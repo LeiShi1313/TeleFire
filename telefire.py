@@ -71,7 +71,8 @@ class Telegram(object):
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
         async for msg in self._client.iter_messages(channel, from_user=user):
-            if user is None:
+            sender = user
+            if sender is None:
                 sender = await self._client.get_entity(msg.from_id)
             self._log_message(msg, channel, sender)
 
@@ -86,7 +87,8 @@ class Telegram(object):
         if slow:
             async for msg in self._client.iter_messages(peer, from_user=user):
                 if msg and msg.text and query in msg.text:
-                    if user is None:
+                    sender = user
+                    if sender is None:
                         sender = await self._client.get_entity(msg.from_id)
                     self._log_message(msg, peer, sender)
         else:
@@ -105,7 +107,9 @@ class Telegram(object):
                     from_id=user)
             result = await self._client(search_request)
             for msg in result.messages:
-                user = await self._client.get_entity(msg.from_id)
+                sender = user
+                if sender is None:
+                    sender = await self._client.get_entity(msg.from_id)
                 self._log_message(msg, peer, sender)
 
     def search_messages(self, peer, query, slow=False, limit=100, from_id=None):

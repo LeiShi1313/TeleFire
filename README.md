@@ -77,3 +77,8 @@ docker build . -t telefire
 docker run -ti -v $(pwd)/telefire.py:/tg/telefire.py telefire python telefire.py [COMMAND] [OPTIONS]
 ```
 And that's it, enjoy!
+
+## TODO
+
+- For deleting messages, add an option to delete messages based on time instead of always delete all.
+- A long-running service that will notify user if someone said something contains some interested words.

@@ -46,9 +46,9 @@ Those negative IDs start with `-100` are private groups, that's the only way you
 ```shell
 python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] list_messages --chat [CHAT_IDENTIFIER] [Optional: --user USER_IDENTIFIER]
 ```
-For **CHAT_IDENTIFIER**, it can be a chat ID you got from <a href="README.md#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
+For `CHAT_IDENTIFIER`, it can be a chat ID you got from <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
 
-For **USER_IDENTIFIER**, it can be the user's ID or username.
+For `USER_IDENTIFIER`, it can be the user's ID or username.
 
 
 ### search_messages
@@ -66,7 +66,7 @@ This command comes with some optional parameters that you can custom:
 ```shell
 python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] delete_all --chat [CHAT_IDENTIFIER]
 ```
-For **CHAT_IDENTIFIER**, smiliar to `CHAT_IDENTIFIER` in <a href="README.md#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
+For `CHAT_IDENTIFIER`, smiliar to `CHAT_IDENTIFIER` in <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
 
 
 ## Docker

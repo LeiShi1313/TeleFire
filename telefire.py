@@ -27,26 +27,36 @@ class Telegram(object):
         consoleHandler.setFormatter(self._logFormatter)
         self._logger.addHandler(consoleHandler)
 
+    def _set_file_handler(self, method, channel, user='', query=''):
+        fileHandler = logging.FileHandler(
+                "{}_[{}]{}{}.log".format(
+                    method,
+                    channel.title,
+                    '_[{}]'.format(utils.get_display_name(user)) if user else '',
+                    '_[query={}]'.format(query) if query else ''))
+        fileHandler.setFormatter(self._logFormatter)
+        self._logger.addHandler(fileHandler)
+
+    def _log_message(self, msg, channel, user):
+        self._logger.info("{} [{}] [{}]: {}".format(
+            msg.date,
+            _get_url(channel, msg),
+            utils.get_display_name(user),
+            msg.text))
+
     async def _get_all_chats(self):
         async for dialog in self._client.iter_dialogs():
             self._logger.info('{:>14}: {}'.format(dialog.id, dialog.title))
-
 
     async def _delete_all_async(self, chat=''):
         user = await self._client.get_me()
         channel = await self._client.get_entity(chat)
 
-        fileHandler = logging.FileHandler("delete_messages_[{}].log".format(channel.title))
-        fileHandler.setFormatter(self._logFormatter)
-        self._logger.addHandler(fileHandler)
+        self._set_file_handler('delete_all', channel, user)
         self._logger.info("Deleting all messages for {} in {}".format(
             utils.get_display_name(user), channel.title))
         async for msg in self._client.iter_messages(channel, from_user=user):
-            self._logger.info("{} [{}] {}: {}".format(
-                msg.date,
-                _get_url(channel, msg),
-                utils.get_display_name(user),
-                msg.text))
+            self._log_message(msg, channel, user)
             await msg.delete()
 
     async def _list_messages_async(self, chat, user=None):
@@ -54,24 +64,16 @@ class Telegram(object):
         if user is not None:
             user = await self._client.get_entity(user)
 
-        fileHandler = logging.FileHandler("list_messages_[{}]{}.log".format(
-            channel.title,
-            '_[{}]'.format(utils.get_display_name(user)) if user else ''))
-        fileHandler.setFormatter(self._logFormatter)
-        self._logger.addHandler(fileHandler)
+        self._set_file_handler('list_messages', channel, user)
 
         self._logger.debug(channel)
         self._logger.debug(user)
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
         async for msg in self._client.iter_messages(channel, from_user=user):
-            self._logger.info("{} [{}] {}: {}".format(
-                msg.date,
-                _get_url(channel, msg),
-                utils.get_display_name(user) if user \
-                        else utils.get_display_name(
-                            await self._client.get_entity(msg.from_id)),
-                msg.text))
+            if user is None:
+                sender = await self._client.get_entity(msg.from_id)
+            self._log_message(msg, channel, sender)
 
     async def _search_messages_async(self, peer, query, slow, limit, user):
         _filter = InputMessagesFilterEmpty()
@@ -79,22 +81,14 @@ class Telegram(object):
         if user is not None:
             user = await self._client.get_entity(user)
 
-        fileHandler = logging.FileHandler("search_messages_[{}]_[query={}]{}.log".format(
-            peer.title, query,
-            '_[{}]'.format(utils.get_display_name(user)) if user is not None else ''))
-        fileHandler.setFormatter(self._logFormatter)
-        self._logger.addHandler(fileHandler)
+        self._set_file_handler('search_messages', peer, user, query)
 
         if slow:
             async for msg in self._client.iter_messages(peer, from_user=user):
                 if msg and msg.text and query in msg.text:
-                    self._logger.info("{} [{}] {}: {}".format(
-                        msg.date,
-                        _get_url(peer, msg),
-                        utils.get_display_name(user) if user \
-                                else utils.get_display_name(
-                                    await self._client.get_entity(msg.from_id)),
-                        msg.text))
+                    if user is None:
+                        sender = await self._client.get_entity(msg.from_id)
+                    self._log_message(msg, peer, sender)
         else:
             search_request = SearchRequest(
                     peer=peer,
@@ -112,11 +106,7 @@ class Telegram(object):
             result = await self._client(search_request)
             for msg in result.messages:
                 user = await self._client.get_entity(msg.from_id)
-                self._logger.info("{} [{}] {}: {}".format(
-                    msg.date,
-                    _get_url(peer, msg),
-                    utils.get_display_name(user),
-                    msg.message))
+                self._log_message(msg, peer, sender)
 
     def search_messages(self, peer, query, slow=False, limit=100, from_id=None):
         with self._client:

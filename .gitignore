@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Telethon session
+*.session
+
+# Vim stuff
+*.swp

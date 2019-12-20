@@ -19,6 +19,7 @@
 - <a href="#list_messages">list_messages</a>: List messages in a certain chat.
 - <a href="#search_messages">search_messages</a>: Search messages in a certain chat.
 - <a href="#delete_all">delete_all</a>: Delete all the messages that you have permission to delete in a certain chat.
+- <a href="#auto_delete">auto_delete</a>: Delete certain messages after certain time.
 
 ## How
 
@@ -54,7 +55,7 @@ For `USER_IDENTIFIER`, it can be the user's ID or username.
 ### search_messages
 
 ```shell
-python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] search_messages --peer [PEER_IDENTIFIER] --query [YOUR_QUERY_STRING]
+python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] search_messages --peer [PEER_IDENTIFIER] --query [QUERY_STRING]
 ```
 This command comes with some optional parameters that you can custom:
 - `--slow`: Whether to use telegram's search API or iterate through whole message history to do the search. The later can be comprehensive if you are searching UTF-8 characters such as Chinases.
@@ -64,9 +65,18 @@ This command comes with some optional parameters that you can custom:
 ### delete_all
 
 ```shell
-python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] delete_all --chat [CHAT_IDENTIFIER]
+python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] delete_all --chat [CHAT_IDENTIFIER] [Optional: --query QUERY_STRING]
 ```
 For `CHAT_IDENTIFIER`, smiliar to `CHAT_IDENTIFIER` in <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
+
+You can also using the `--query` to specify only messages containing certain string will be deleted.
+
+### auto_delete
+
+```shell
+python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] auto_delete
+```
+It's a command you have to keep it running in the backgroud to use it. Then you can send any messages in your app start with something like `10s `(notice the space) and then followed by your original messages you want to send, this message will be deleted automately in 10 seconds. you can also specify  minutes(`m`), hours(`h`) and days(`d`) as the message experation time.
 
 
 ## Docker
@@ -74,7 +84,7 @@ For `CHAT_IDENTIFIER`, smiliar to `CHAT_IDENTIFIER` in <a href="#get_all_chats">
 This project also come with a `Dockerfile` so that you don't need to setup any python environment, just run the following command:
 ```shell
 docker build . -t telefire
-docker run -ti -v $(pwd)/telefire.py:/tg/telefire.py telefire python telefire.py [COMMAND] [OPTIONS]
+docker run -ti --rm -v $(pwd)/telefire.py:/tg/telefire.py telefire python telefire.py [COMMAND] [OPTIONS]
 ```
 And that's it, enjoy!
 

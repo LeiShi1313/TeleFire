@@ -62,6 +62,13 @@ class Telegram(object):
             return num, m.group(2)
         return None, None
 
+    async def _send_to_ifttt_async(self, event, key, header, body, url):
+        payload = {'value1': header, 'value2': body, 'value3': url}
+        u = 'https://maker.ifttt.com/trigger/{}/with/key/{}'.format(event, key)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(u, data=payload) as resp:
+                self._logger.info("[{}] {}{}\nIFTTT status: {}".format(url, header, body, resp.status))
+
     async def _auto_delete_async(self, msg, t, text):
         template = "{}\n==========\nTTL: {}"
         delta = timedelta(seconds=t)
@@ -183,6 +190,23 @@ class Telegram(object):
             t, text = self._parse_auto_delete_message(msg.text)
             await self._auto_delete_async(msg, t, text)
 
+        self._client.start()
+        self._client.run_until_disconnected()
+
+    def words_to_ifttt(self, event, key, *words):
+        @self._client.on(events.NewMessage)
+        async def _inner(evt):
+            if any(w.lower() in evt.raw_text.lower() for w in words):
+                msg = evt.message
+                channel = await self._client.get_entity(msg.to_id)
+                header = "{}在{}说了: ".format(' '.join([msg.sender.first_name, msg.sender.last_name]),channel.title)
+                body = evt.raw_text[:20] + ('...' if len(evt.raw_text) > 20 else '')
+                if channel.username is None:
+                    url = "https://t.me/c/{}/{}".format(channel.id, msg.id)
+                else:
+                    url = "https://t.me/{}/{}".format(channel.username, msg.id)
+                await self._send_to_ifttt_async(event, key, header, body, url)
+        self._logger.info("Sending messages to IFTTT for words:{}".format(words))
         self._client.start()
         self._client.run_until_disconnected()
 

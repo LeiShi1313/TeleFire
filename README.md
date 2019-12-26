@@ -20,6 +20,8 @@
 - <a href="#search_messages">search_messages</a>: Search messages in a certain chat.
 - <a href="#delete_all">delete_all</a>: Delete all the messages that you have permission to delete in a certain chat.
 - <a href="#auto_delete">auto_delete</a>: Delete certain messages after certain time.
+- <a href="#words_to_ifttt">words_to_ifttt</a>: Send an event to IFTTT when somebody said some words
+  you interested.
 
 ## How
 
@@ -78,6 +80,15 @@ python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] auto_delete
 ```
 It's a command you have to keep it running in the backgroud to use it. Then you can send any messages in your app start with something like `10s `(notice the space) and then followed by your original messages you want to send, this message will be deleted automately in 10 seconds. you can also specify  minutes(`m`), hours(`h`) and days(`d`) as the message experation time.
 
+### words_to_ifttt
+
+```shell
+python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] words_to_ifttt --event [IFTTT EVENT] --key [IFTTT WEBHOOK KEY] [WORDS YOU INTERESTED]
+```
+
+Like `auto_delete`, you need to keep this command running to make it work. For the `event` and `key`, you can get it from [here](https://ifttt.com/maker_webhooks). For `WORDS YOU INTERESTED`, it can be something like **telefire "telefire is so cool"**, then whenever anybody said **telefire** or **telefire is so cool**, an IFTTT event will be sent and you can create an applet to do whatever you like on IFTTT, such as sending notifications, turn on a light, etc.
+
+
 
 ## Docker
 
@@ -90,5 +101,5 @@ And that's it, enjoy!
 
 ## TODO
 
-- For deleting messages, add an option to delete messages based on time instead of always delete all.
-- A long-running service that will notify user if someone said something contains some interested words.
+- :heavy_check_mark: For deleting messages, add an option to delete messages based on time instead of always delete all.
+- :heavy_check_mark: A long-running service that will notify user if someone said something contains some interested words.

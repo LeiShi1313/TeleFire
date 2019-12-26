@@ -15,12 +15,12 @@
 
 ## What has inside
 
-- <a href="#get_all_chats">get_all_chats</a>: Fetches all the chat IDs and names.
-- <a href="#list_messages">list_messages</a>: List messages in a certain chat.
-- <a href="#search_messages">search_messages</a>: Search messages in a certain chat.
-- <a href="#delete_all">delete_all</a>: Delete all the messages that you have permission to delete in a certain chat.
-- <a href="#auto_delete">auto_delete</a>: Delete certain messages after certain time.
-- <a href="#words_to_ifttt">words_to_ifttt</a>: Send an event to IFTTT when somebody said some words
+- :flags:<a href="#get_all_chats">get_all_chats</a>: Fetches all the chat IDs and names.
+- :bookmark_tabs:<a href="#list_messages">list_messages</a>: List messages in a certain chat.
+- :mag:<a href="#search_messages">search_messages</a>: Search messages in a certain chat.
+- :skull:<a href="#delete_all">delete_all</a>: Delete all the messages that you have permission to delete in a certain chat.
+- :bomb:<a href="#auto_delete">auto_delete</a>: Delete certain messages after certain time.
+- :speech_balloon:<a href="#words_to_ifttt">words_to_ifttt</a>: Send an event to IFTTT when somebody said some words
   you interested.
 
 ## How
@@ -86,7 +86,7 @@ It's a command you have to keep it running in the backgroud to use it. Then you 
 python telefire.py --api_id=[YOUR_API_ID] --api_hash=[YOUR_API_HASH] words_to_ifttt --event [IFTTT EVENT] --key [IFTTT WEBHOOK KEY] [WORDS YOU INTERESTED]
 ```
 
-Like `auto_delete`, you need to keep this command running to make it work. For the `event` and `key`, you can get it from [here](https://ifttt.com/maker_webhooks). For `WORDS YOU INTERESTED`, it can be something like **telefire "telefire is so cool"**, then whenever anybody said **telefire** or **telefire is so cool**, an IFTTT event will be sent and you can create an applet to do whatever you like on IFTTT, such as sending notifications, turn on a light, etc.
+Like `auto_delete`, you need to keep this command running to make it work. For the `event` and `key`, you can get it from [here](https://ifttt.com/maker_webhooks). For `WORDS YOU INTERESTED`, it can be something like `telefire "telefire is so cool"`, then whenever anybody said **telefire** or **telefire is so cool**, an IFTTT event will be sent and you can create an applet to do whatever you like on IFTTT, such as sending notifications, turn on a light, etc.
 
 
 

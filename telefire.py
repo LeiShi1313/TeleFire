@@ -7,8 +7,9 @@ import logging
 from datetime import timedelta
 from telethon import utils
 from telethon.sync import TelegramClient, events
-from telethon.tl.types import InputMessagesFilterEmpty
 from telethon.tl.functions.messages import SearchRequest
+from telethon.tl.functions.channels import CreateChannelRequest
+from telethon.tl.types import InputMessagesFilterEmpty, MessageEntityTextUrl, Channel
 
 
 def _get_url(channel, msg):
@@ -30,11 +31,11 @@ class Telegram(object):
         consoleHandler.setFormatter(self._logFormatter)
         self._logger.addHandler(consoleHandler)
 
-    def _set_file_handler(self, method, channel, user='', query=''):
+    def _set_file_handler(self, method, channel=None, user=None, query=None):
         fileHandler = logging.FileHandler(
-                "{}_[{}]{}{}.log".format(
+                "{}{}{}{}.log".format(
                     method,
-                    channel.title,
+                    '_[{}]'.format(channel.title) if channel else '',
                     '_[{}]'.format(utils.get_display_name(user)) if user else '',
                     '_[query={}]'.format(query) if query else ''))
         fileHandler.setFormatter(self._logFormatter)
@@ -48,7 +49,7 @@ class Telegram(object):
             msg.text))
 
     def _parse_auto_delete_message(self, text):
-        m = re.search(r'^([\d]+[s|m|h|d]) (.*)$', text, re.DOTALL)
+        m = re.search(r'^\/([\d]+[s|m|h|d]) (.*)$', text, re.DOTALL)
         if m:
             num = int(m.group(1)[:-1]) if m.group(1)[:-1].isnumeric() else None
             net = m.group(1)[-1]
@@ -61,6 +62,19 @@ class Telegram(object):
                     num *= 60
             return num, m.group(2)
         return None, None
+
+    def _generate_message_url(self, channel, msg):
+        if channel.username is None:
+            return "https://t.me/c/{}/{}".format(channel.id, msg.id)
+        else:
+            return "https://t.me/{}/{}".format(channel.username, msg.id)
+
+    async def _get_entity(self, entity_like):
+        try:
+            entity = await self._client.get_entity(entity_like)
+        except Exception as e:
+            entity = await self._client.get_entity(int(entity_like))
+        return entity
 
     async def _send_to_ifttt_async(self, event, key, header, body, url):
         payload = {'value1': header, 'value2': body, 'value3': url}
@@ -106,22 +120,40 @@ class Telegram(object):
                 self._log_message(msg, channel, user)
                 await msg.delete()
 
-    async def _list_messages_async(self, chat, user=None):
+    async def _iter_messages_async(self, chat, user, query, output):
+        async for msg in self._client.iter_messages(chat, from_user=user):
+            if not query or query in msg.text:
+                if isinstance(output, Channel):
+                    url = self._generate_message_url(chat, msg)
+                    await self._client.send_message(output, "{}:\n{}\n{}".format(msg.date, msg.text, url))
+                else:
+                    sender = user
+                    if sender is None:
+                        if msg.from_id == None:
+                            self._logger.debug(msg)
+                            continue
+                        sender = await self._client.get_entity(msg.from_id)
+                    self._log_message(msg, chat, sender)
+
+    async def _list_messages_async(self, chat, user, output):
         channel = await self._client.get_entity(chat)
         if user is not None:
             user = await self._client.get_entity(user)
 
-        self._set_file_handler('list_messages', channel, user)
+        if output == 'channel':
+            result = await self._client(CreateChannelRequest(
+                "List Messages",
+                "Messages For {} in {}".format(utils.get_display_name(user), channel.title)))
+            created_channel = result.chats[0]
+            self._logger.info("Channel: {} created.".format(created_channel.title))
+        else:
+            self._set_file_handler('list_messages', channel, user)
 
-        self._logger.debug(channel)
-        self._logger.debug(user)
+            self._logger.debug(channel)
+            self._logger.debug(user)
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
-        async for msg in self._client.iter_messages(channel, from_user=user):
-            sender = user
-            if sender is None:
-                sender = await self._client.get_entity(msg.from_id)
-            self._log_message(msg, channel, sender)
+        await self._iter_messages_async(channel, user, '', created_channel)
 
     async def _search_messages_async(self, peer, query, slow, limit, user):
         _filter = InputMessagesFilterEmpty()
@@ -132,12 +164,7 @@ class Telegram(object):
         self._set_file_handler('search_messages', peer, user, query)
 
         if slow:
-            async for msg in self._client.iter_messages(peer, from_user=user):
-                if msg and msg.text and query in msg.text:
-                    sender = user
-                    if sender is None:
-                        sender = await self._client.get_entity(msg.from_id)
-                    self._log_message(msg, peer, sender)
+            await self._iter_messages_async(peer, user, query, 'log')
         else:
             search_request = SearchRequest(
                     peer=peer,
@@ -164,10 +191,10 @@ class Telegram(object):
             self._client.loop.run_until_complete(
                     self._search_messages_async(peer, query, slow, limit, from_id))
 
-    def list_messages(self, chat, user=None):
+    def list_messages(self, chat, user=None, output='log'):
         with self._client:
             self._client.loop.run_until_complete(
-                    self._list_messages_async(chat, user))
+                    self._list_messages_async(chat, user, output))
 
     def delete_all(self, chat, query=''):
         with self._client:
@@ -178,21 +205,6 @@ class Telegram(object):
         with self._client:
             self._client.loop.run_until_complete(self._get_all_chats())
 
-    def auto_delete(self):
-        @self._client.on(events.NewMessage(pattern=r'^[\d]+[s|m|h|d] '))
-        async def _inner(event):
-            msg = event.message
-            if not msg.out:
-                return
-            channel = await event.get_chat()
-            user = await event.get_sender()
-            self._log_message(msg, channel, user)
-            t, text = self._parse_auto_delete_message(msg.text)
-            await self._auto_delete_async(msg, t, text)
-
-        self._client.start()
-        self._client.run_until_disconnected()
-
     def words_to_ifttt(self, event, key, *words):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
@@ -201,12 +213,109 @@ class Telegram(object):
                 channel = await self._client.get_entity(msg.to_id)
                 header = "{}在{}说了: ".format(' '.join([msg.sender.first_name, msg.sender.last_name]),channel.title)
                 body = evt.raw_text[:20] + ('...' if len(evt.raw_text) > 20 else '')
-                if channel.username is None:
-                    url = "https://t.me/c/{}/{}".format(channel.id, msg.id)
-                else:
-                    url = "https://t.me/{}/{}".format(channel.username, msg.id)
+                url = self._generate_message_url(channel, msg)
                 await self._send_to_ifttt_async(event, key, header, body, url)
+
+        self._set_file_handler('words_to_ifttt')
         self._logger.info("Sending messages to IFTTT for words:{}".format(words))
+        self._client.start()
+        self._client.run_until_disconnected()
+
+    async def _markdown_mode(self, msg):
+        if not msg.out:
+            return
+        channel = await self._client.get_entity(msg.to_id)
+        self._logger.info(msg)
+        try:
+            await self._client.edit_message(msg, msg.text[4:], parse_mode='markdown')
+        except Exception as e:
+            self._logger.info(e)
+
+    async def _shiny_mode(self, msg):
+        if not msg.out:
+            return
+        channel = await self._client.get_entity(msg.to_id)
+        self._logger.info(msg)
+        try:
+            t = msg.text[7:]
+            for i in range(200):
+                await self._client.edit_message(msg, "**"+t+"**", parse_mode='md')
+                await asyncio.sleep(1)
+                await self._client.edit_message(msg, t, parse_mode=None)
+                await asyncio.sleep(1)
+            await self._client.edit_message(msg, t, parse_mode=None)
+        except Exception as e:
+            self._logger.info(e)
+
+    async def _auto_delete_mode(self, event, msg):
+        if not msg.out:
+            return
+        channel = await event.get_chat()
+        user = await event.get_sender()
+        self._log_message(msg, channel, user)
+        t, text = self._parse_auto_delete_message(msg.text)
+        await self._auto_delete_async(msg, t, text)
+
+    async def _search_mode(self, msg):
+        raw_params = msg.text.split(' ')[1:]
+        if len(raw_params) == 2:
+            c, user, query = raw_params + ['']
+        elif len(raw_params) == 3:
+            c, user, query = raw_params
+        else:
+            self._logger.info("Unknown command: {}".format(msg.text))
+            self._logger.debug("{}".format(msg))
+        await msg.delete()
+        try:
+            channel = await self._get_entity(msg.to_id if c == 'this' else c)
+            user = await self._get_entity(user)
+        except Exception as e:
+            self._logger.info(e)
+            return
+
+        try:
+            result = await self._client(CreateChannelRequest(
+                "{} in {}".format(utils.get_display_name(user), channel.title),
+                "query={}".format(query)))
+            created_channel = result.chats[0]
+        except Exception as e:
+            self._logger.error(e)
+        self._logger.info("Channel: {} created.".format(created_channel.id))
+
+        await self._iter_messages_async(channel, user, query, created_channel)
+
+    def plus_mode(self):
+        @self._client.on(events.NewMessage)
+        async def _inner(evt):
+            msg = evt.message
+            if msg.text:
+                if re.search(r'^\/([\d]+[s|m|h|d]) (.*)$', msg.text, re.DOTALL):
+                    self._logger.info("Received auto delete message: {}".format(msg.text))
+                    await self._auto_delete_mode(evt, msg)
+                if msg.text.startswith('/md'):
+                    self._logger.info("Received markdown mode message: {}".format(msg.text))
+                    await self._markdown_mode(msg)
+                elif msg.text.startswith('/shiny'):
+                    self._logger.info("Received shiny message: {}".format(msg.text))
+                    await self._shiny_mode(msg)
+                elif msg.text.startswith('/search'):
+                    self._logger.info("Received search message: {}".format(msg.text))
+                    await self._search_mode(msg)
+
+        self._set_file_handler('plus_mode')
+        self._client.start()
+        self._client.run_until_disconnected()
+
+    def log_chat(self, chat):
+        @self._client.on(events.NewMessage)
+        async def _inner(evt):
+            msg = evt.message
+            channel = await self._client.get_entity(msg.to_id)
+            if channel.username == chat:
+                if msg.media:
+                    self._logger.info(msg)
+
+        self._set_file_handler('log_chat')
         self._client.start()
         self._client.run_until_disconnected()
 

@@ -116,23 +116,26 @@ class Telegram(object):
         self._logger.info("Deleting all messages for {} in {}".format(
             utils.get_display_name(user), channel.title))
         async for msg in self._client.iter_messages(channel, from_user=user):
-            if not query or query in msg.text:
+            if not query or (msg.text and query in msg.text):
                 self._log_message(msg, channel, user)
                 await msg.delete()
 
     async def _iter_messages_async(self, chat, user, query, output):
         async for msg in self._client.iter_messages(chat, from_user=user):
-            if not query or query in msg.text:
+            if not query or (msg.text and query in msg.text):
                 if isinstance(output, Channel):
                     url = self._generate_message_url(chat, msg)
                     await self._client.send_message(output, "{}:\n{}\n{}".format(msg.date, msg.text, url))
                 else:
                     sender = user
                     if sender is None:
-                        if msg.from_id == None:
+                        if msg.post:
+                            sender = chat
+                        elif msg.from_id == None:
                             self._logger.debug(msg)
                             continue
-                        sender = await self._client.get_entity(msg.from_id)
+                        else:
+                            sender = await self._client.get_entity(msg.from_id)
                     self._log_message(msg, chat, sender)
 
     async def _list_messages_async(self, chat, user, output):
@@ -146,25 +149,32 @@ class Telegram(object):
                 "Messages For {} in {}".format(utils.get_display_name(user), channel.title)))
             created_channel = result.chats[0]
             self._logger.info("Channel: {} created.".format(created_channel.title))
+            await self._iter_messages_async(channel, user, '', created_channel)
         else:
             self._set_file_handler('list_messages', channel, user)
 
             self._logger.debug(channel)
             self._logger.debug(user)
+            await self._iter_messages_async(channel, user, '', 'log')
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
-        await self._iter_messages_async(channel, user, '', created_channel)
 
-    async def _search_messages_async(self, peer, query, slow, limit, user):
+    async def _search_messages_async(self, chat, query, slow, limit, user, output):
         _filter = InputMessagesFilterEmpty()
-        peer = await self._client.get_entity(peer)
+        peer = await self._client.get_entity(chat)
         if user is not None:
             user = await self._client.get_entity(user)
 
         self._set_file_handler('search_messages', peer, user, query)
 
         if slow:
-            await self._iter_messages_async(peer, user, query, 'log')
+            if output == 'channel':
+                result = await self._client(CreateChannelRequest(
+                    "Search Messages",
+                    "Messages in {}".format(peer.title)))
+                output = result.chats[0]
+                self._logger.info("Channel: {} created.".format(output.title))
+            await self._iter_messages_async(peer, user, query, output)
         else:
             search_request = SearchRequest(
                     peer=peer,
@@ -186,10 +196,10 @@ class Telegram(object):
                     sender = await self._client.get_entity(msg.from_id)
                 self._log_message(msg, peer, sender)
 
-    def search_messages(self, peer, query, slow=False, limit=100, from_id=None):
+    def search_messages(self, chat, query, slow=False, limit=100, user=None, output='log'):
         with self._client:
             self._client.loop.run_until_complete(
-                    self._search_messages_async(peer, query, slow, limit, from_id))
+                    self._search_messages_async(chat, query, slow, limit, user, output))
 
     def list_messages(self, chat, user=None, output='log'):
         with self._client:

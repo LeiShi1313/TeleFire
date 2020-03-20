@@ -4,12 +4,16 @@ import fire
 import asyncio
 import aiohttp
 import logging
-from datetime import timedelta
+from math import floor
 from telethon import utils
+from datetime import timedelta
+from collections import Counter
+from subprocess import check_output
 from telethon.sync import TelegramClient, events
 from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import InputMessagesFilterEmpty, MessageEntityTextUrl, Channel
+from telethon.tl.types import PeerUser, PeerChat, PeerChannel
 
 
 def _get_url(channel, msg):
@@ -116,29 +120,46 @@ class Telegram(object):
         self._logger.info("Deleting all messages for {} in {}".format(
             utils.get_display_name(user), channel.title))
         async for msg in self._client.iter_messages(channel, from_user=user):
-            if not query or query in msg.text:
+            if not query or (msg.text and query in msg.text):
                 self._log_message(msg, channel, user)
                 await msg.delete()
 
-    async def _iter_messages_async(self, chat, user, query, output):
+    async def _iter_messages_async(self, chat, user, query, output, print_stat=False):
+        if print_stat:
+            counter = Counter()
         async for msg in self._client.iter_messages(chat, from_user=user):
-            if not query or query in msg.text:
+            if not query or (msg.text and query in msg.text):
                 if isinstance(output, Channel):
                     url = self._generate_message_url(chat, msg)
                     await self._client.send_message(output, "{}:\n{}\n{}".format(msg.date, msg.text, url))
                 else:
                     sender = user
                     if sender is None:
-                        if msg.from_id == None:
+                        if msg.post:
+                            sender = chat
+                        elif msg.from_id == None:
                             self._logger.debug(msg)
                             continue
-                        sender = await self._client.get_entity(msg.from_id)
+                        else:
+                            sender = await self._client.get_entity(msg.from_id)
                     self._log_message(msg, chat, sender)
+                if print_stat:
+                    counter[msg.date.hour] += 1
+        if print_stat:
+            total = sum(counter.values())
+            for hour in range(24):
+                print("{}: {}".format(hour, floor(counter[hour] / total * 100) * '='))
 
-    async def _list_messages_async(self, chat, user, output):
+    async def _list_messages_async(self, chat, user, output, print_stat=False):
         channel = await self._client.get_entity(chat)
         if user is not None:
-            user = await self._client.get_entity(user)
+            try:
+                user = await self._client.get_entity(user)
+            except ValueError as e:
+                if user.isdecimal():
+                    user = await self._client.get_entity(int(user))
+                else:
+                    raise e
 
         if output == 'channel':
             result = await self._client(CreateChannelRequest(
@@ -146,25 +167,32 @@ class Telegram(object):
                 "Messages For {} in {}".format(utils.get_display_name(user), channel.title)))
             created_channel = result.chats[0]
             self._logger.info("Channel: {} created.".format(created_channel.title))
+            await self._iter_messages_async(channel, user, '', created_channel, print_stat)
         else:
             self._set_file_handler('list_messages', channel, user)
 
             self._logger.debug(channel)
             self._logger.debug(user)
+            await self._iter_messages_async(channel, user, '', 'log', print_stat)
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
-        await self._iter_messages_async(channel, user, '', created_channel)
 
-    async def _search_messages_async(self, peer, query, slow, limit, user):
+    async def _search_messages_async(self, chat, query, slow, limit, user, output):
         _filter = InputMessagesFilterEmpty()
-        peer = await self._client.get_entity(peer)
+        peer = await self._client.get_entity(chat)
         if user is not None:
             user = await self._client.get_entity(user)
 
         self._set_file_handler('search_messages', peer, user, query)
 
         if slow:
-            await self._iter_messages_async(peer, user, query, 'log')
+            if output == 'channel':
+                result = await self._client(CreateChannelRequest(
+                    "Search Messages",
+                    "Messages in {}".format(peer.title)))
+                output = result.chats[0]
+                self._logger.info("Channel: {} created.".format(output.title))
+            await self._iter_messages_async(peer, user, query, output)
         else:
             search_request = SearchRequest(
                     peer=peer,
@@ -186,15 +214,15 @@ class Telegram(object):
                     sender = await self._client.get_entity(msg.from_id)
                 self._log_message(msg, peer, sender)
 
-    def search_messages(self, peer, query, slow=False, limit=100, from_id=None):
+    def search_messages(self, chat, query, slow=False, limit=100, user=None, output='log'):
         with self._client:
             self._client.loop.run_until_complete(
-                    self._search_messages_async(peer, query, slow, limit, from_id))
+                    self._search_messages_async(chat, query, slow, limit, user, output))
 
-    def list_messages(self, chat, user=None, output='log'):
+    def list_messages(self, chat, user=None, output='log', print_stat=False):
         with self._client:
             self._client.loop.run_until_complete(
-                    self._list_messages_async(chat, user, output))
+                    self._list_messages_async(chat, user, output, print_stat))
 
     def delete_all(self, chat, query=''):
         with self._client:
@@ -284,6 +312,18 @@ class Telegram(object):
 
         await self._iter_messages_async(channel, user, query, created_channel)
 
+    async def _archive_mode_async(self, msg, group_name, docker_name, url):
+        try:
+            cmd = 'echo "{}" | docker exec -i {} /bin/archive'.format(url, docker_name)
+            self._logger.info("Archiving: {}".format(cmd))
+            process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE)
+            stdout, _ = await process.communicate()
+            await self._client.send_message(group_name, stdout.decode('utf-8')[:4000], reply_to=msg)
+            self._logger.info("Archive completed: {}".format(url))
+        except Exception as e:
+            self._logger.info(e)
+
+
     def plus_mode(self):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
@@ -303,6 +343,41 @@ class Telegram(object):
                     await self._search_mode(msg)
 
         self._set_file_handler('plus_mode')
+        self._client.start()
+        self._client.run_until_disconnected()
+
+    def special_attention_mode(self, event, key, *people):
+        @self._client.on(events.NewMessage)
+        async def _inner(evt):
+            msg = evt.message
+            sender = evt.message.sender
+            if sender and any(sender.id==p or sender.username==p for p in people):
+                channel = await self._client.get_entity(msg.to_id)
+                header = "{}在{}说了: ".format(' '.join([msg.sender.first_name, msg.sender.last_name]),channel.title)
+                body = evt.raw_text[:20] + ('...' if len(evt.raw_text) > 20 else '')
+                url = self._generate_message_url(channel, msg)
+                await self._send_to_ifttt_async(event, key, header, body, url)
+
+        self._set_file_handler('special_attention_mode')
+        self._logger.info("Sending messages to IFTTT for people:{}".format(people))
+        self._client.start()
+        self._client.run_until_disconnected()
+
+    def archive_mode(self, docker_name, me, group_name='ArchiveIt'):
+        @self._client.on(events.NewMessage)
+        async def _inner(evt):
+            msg = evt.message
+            sender = evt.message.sender
+            if sender and sender.username==me:
+                self._logger.info("Received: {}".format(msg.text))
+                for match in matcher.findall(msg.text):
+                    self._logger.info("Matched: {}".format(match))
+                    await self._archive_mode_async(msg, group_name, docker_name, match)
+
+
+        matcher = re.compile(r"(?P<url>https?://[^\s]+)")
+        self._set_file_handler('archive_mode')
+        self._logger.info("Archiving pages for: {}".format(me))
         self._client.start()
         self._client.run_until_disconnected()
 

@@ -1,11 +1,11 @@
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 
 
-class ListMessages(Telegram):
-    name = 'list_messages'
+class ListMessages(Telegram, metaclass=PluginMount):
+    command_name = 'list_messages'
 
     async def _list_messages_async(self, chat, user, output, print_stat=False):
         channel = await self._client.get_entity(chat)
@@ -34,7 +34,7 @@ class ListMessages(Telegram):
         self._logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
 
-    def action(self, chat, user=None, output='log', print_stat=False):
+    def __call__(self, chat, user=None, output='log', print_stat=False):
         with self._client:
             self._client.loop.run_until_complete(
                     self._list_messages_async(chat, user, output, print_stat))

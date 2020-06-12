@@ -2,11 +2,11 @@ from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import InputMessagesFilterEmpty
 
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 
 
-class SearchMessages(Telegram):
-    name = 'search_messages'
+class SearchMessages(Telegram, metaclass=PluginMount):
+    command_name = 'search_messages'
 
     async def _search_messages_async(self, chat, query, slow, limit, user, output):
         _filter = InputMessagesFilterEmpty()
@@ -45,7 +45,7 @@ class SearchMessages(Telegram):
                     sender = await self._client.get_entity(msg.from_id)
                 self._log_message(msg, peer, sender)
 
-    def action(self, chat, query, slow=False, limit=100, user=None, output='log'):
+    def __call__(self, chat, query, slow=False, limit=100, user=None, output='log'):
         with self._client:
             self._client.loop.run_until_complete(
                     self._search_messages_async(chat, query, slow, limit, user, output))

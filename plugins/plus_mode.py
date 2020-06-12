@@ -6,11 +6,11 @@ from telethon import utils
 from telethon.sync import events
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 
 
-class PlusMode(Telegram):
-    name = 'plus_mode'
+class PlusMode(Telegram, metaclass=PluginMount):
+    command_name = 'plus_mode'
 
     async def _auto_delete_async(self, msg, t, text):
         template = "{}\n==========\nTTL: {}"
@@ -94,7 +94,7 @@ class PlusMode(Telegram):
 
         await self._iter_messages_async(channel, user, query, created_channel)
 
-    def action(self):
+    def __call__(self):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message

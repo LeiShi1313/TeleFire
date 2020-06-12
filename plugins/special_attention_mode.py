@@ -1,13 +1,13 @@
 from telethon.sync import events
 
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 from utils import get_url
 
 
-class SpecialAttentionMode(Telegram):
-    name = 'special_attention_mode'
+class SpecialAttentionMode(Telegram, metaclass=PluginMount):
+    command_name = 'special_attention_mode'
 
-    def action(self, event, key, *people):
+    def __call__(self, event, key, *people):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message

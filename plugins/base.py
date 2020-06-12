@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 from math import floor
@@ -11,16 +12,12 @@ from telethon.tl.types import Channel, Message, User
 from utils import get_url, camel_to_snake
 
 
-class PluginMount(type):
-    def __init__(cls, name, bases, attrs):
-        super(PluginMount, cls).__init__(name, bases, attrs)
-        name = cls.name if hasattr(cls, 'name') else camel_to_snake(cls.__name__)
-        if bases[0] != object:
-            setattr(bases[0], name, getattr(cls, 'action', lambda: None))
-
-
-class Telegram(object, metaclass=PluginMount):
-    def __init__(self, api_id, api_hash, session='test', log_level='info'):
+class Telegram(object):
+    def __init__(self, session='test', log_level='info'):
+        api_id = os.environ.get("TELEGRAM_API_ID")
+        api_hash = os.environ.get("TELEGRAM_API_HASH")
+        if not api_id or not api_hash:
+            raise ValueError("Please set TELEGRAM_API_ID and TELEGRAM_API_HASH as environment variables!")
         self._client = TelegramClient(session, api_id, api_hash)
 
         self._logger = logging.getLogger(__name__)
@@ -87,3 +84,14 @@ class Telegram(object, metaclass=PluginMount):
         except Exception as e:
             entity = await self._client.get_entity(int(entity_like))
         return entity
+
+
+class Commands(object):
+    pass
+
+
+class PluginMount(type):
+    def __init__(cls, name, bases, attrs):
+        super(PluginMount, cls).__init__(name, bases, attrs)
+        command_name = cls.command_name if hasattr(cls, 'command_name') else camel_to_snake(cls.__name__)
+        setattr(Commands, command_name, cls)

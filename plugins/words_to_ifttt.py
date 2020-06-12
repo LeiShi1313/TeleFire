@@ -1,12 +1,12 @@
 from telethon.sync import events
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 from utils import get_url
 
 
-class WordsToIfttt(Telegram):
-    name = 'words_to_ifttt'
+class WordsToIfttt(Telegram, metaclass=PluginMount):
+    command_name = 'words_to_ifttt'
 
-    def action(self, event, key, *words):
+    def __call__(self, event, key, *words):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             if any(w.lower() in evt.raw_text.lower() for w in words):

@@ -1,11 +1,11 @@
 from telethon.sync import events
-from plugins.base import Telegram
+from plugins.base import Telegram, PluginMount
 
 
-class LogChat(Telegram):
-    name = 'log_chat'
+class LogChat(Telegram, metaclass=PluginMount):
+    command_name = 'log_chat'
 
-    def action(self, chat):
+    def __call__(self, chat):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message

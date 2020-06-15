@@ -23,7 +23,6 @@ async def _send_to_ifttt_async(event: str, key: str, header, body, url):
             self._logger.info("[{}] {}{}\nIFTTT status: {}".format(url, header, body, resp.status))
 
 async def send_to_pushbullet(access_token: str, device_iden: str, title: str, body: str, url: str):
-    url: str = 'https://api.pushbullet.com/v2/pushes'
     payload: dict = {
         'title': title,
         'body': body,
@@ -33,5 +32,5 @@ async def send_to_pushbullet(access_token: str, device_iden: str, title: str, bo
     }
     headers = {'Access-Token': access_token}
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, headers=headers) as resp:
+        async with session.post('https://api.pushbullet.com/v2/pushes', json=payload, headers=headers) as resp:
             return resp.status, await resp.text()

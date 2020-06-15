@@ -15,8 +15,11 @@ class WordsToPushbullet(Telegram, metaclass=PluginMount):
                 header = "{}在{}说了: ".format(' '.join([msg.sender.first_name, msg.sender.last_name]),channel.title)
                 body = evt.raw_text[:20] + ('...' if len(evt.raw_text) > 20 else '')
                 url = get_url(channel, msg)
-                resp = await send_to_pushbullet(token, device, header, body, url)
-                self._logger.info("[{}] {}{}\nPushbullet status: {}".format(url, header, body, resp))
+                status, resp_text = await send_to_pushbullet(token, device, header, body, url)
+                if status == 200:
+                    self._logger.info("[{}] {}{}\nPushbullet status: [{}]".format(url, header, body, status, resp_text))
+                else:
+                    self._logger.info("[{}] {}{}\nPushbullet status: [{}] {}".format(url, header, body, status, resp_text))
 
         self._set_file_handler('words_to_pushbullet')
         self._logger.info("Sending messages to Pushbullet for words:{}".format(words))

@@ -32,7 +32,6 @@ async def send_to_pushbullet(access_token: str, device_iden: str, title: str, bo
         'device_iden': device_iden
     }
     headers = {'Access-Token': access_token}
-    print(payload, headers)
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload, headers=headers) as resp:
-            return resp
+            return resp.status, await resp.text()

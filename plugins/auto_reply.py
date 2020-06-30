@@ -11,11 +11,11 @@ class AutoReply(Telegram, metaclass=PluginMount):
         async def _inner(evt):
             msg = evt.message
             if not msg.is_reply and any(w.lower() in evt.raw_text.lower() for w in words):
-                to_chat = await event.get_chat()
+                to_chat = await evt.get_chat()
                 if to_chat.username=='gua_mei_debug' or chat == to_chat.username or chat == to_chat.id:
                     sender = await evt.get_sender()
                     self._log_message(msg, to_chat, sender)
-                    await evt.reply(reply)
+                    await msg.reply(reply)
 
         self._set_file_handler('auto_reply_[{}]'.format(chat))
         self._logger.info("Auto reply in chat {} for words:{}".format(chat, words))

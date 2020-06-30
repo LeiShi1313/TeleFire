@@ -10,7 +10,7 @@ class AutoReply(Telegram, metaclass=PluginMount):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message
-            if not msg.is_reply and any(w.lower() == evt.raw_text.lower() for w in words):
+            if not msg.is_reply and any(w.lower() in evt.raw_text.lower() for w in words):
                 to_chat = await self._client.get_entity(msg.to_id)
                 if chat == to_chat.username or chat == to_chat.id:
                     sender = await evt.get_sender()

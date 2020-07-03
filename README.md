@@ -61,7 +61,7 @@ For `USER_IDENTIFIER`, it can be the user's ID or username.
 TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py search_messages --peer [PEER_IDENTIFIER] --query [QUERY_STRING]
 ```
 This command comes with some optional parameters that you can custom:
-- `--slow`: Whether to use telegram's search API or iterate through whole message history to do the search. The later can be comprehensive if you are searching UTF-8 characters such as Chinases.
+- `--slow`: Whether to use telegram's search API or iterate through whole message history to do the search. The later can be comprehensive if you are searching UTF-8 characters such as Chinese.
 - `--limit [INTEGER]`: Set the limit of search result, default `100`.
 - `--from_id [USER_IDENTIFIER]`: The id/username of the message sender.
 

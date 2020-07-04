@@ -13,7 +13,7 @@
 </p>
 
 
-## What has inside
+## What is inside
 
 - :flags:<a href="#get_all_chats">get_all_chats</a>: Fetches all the chat IDs and names.
 - :bookmark_tabs:<a href="#list_messages">list_messages</a>: List messages in a certain chat.
@@ -24,7 +24,7 @@
   you interested.
 - :heart_eyes:<a href="#other-commands">special_attention_mode</a>: Get notified when someone in special attention mode said something.
 
-## How
+## Usage
 
 ### Setup
 

@@ -49,8 +49,9 @@ class Action(Telegram, metaclass=PluginMount):
                         end.strftime('%Y/%m/%d') if end else 'Now') if start or end else ''),
                 reply_to=msg_id,
                 file=stream.getvalue())
-        finally:
+        except Exception as _:
             traceback.print_exc()
+        finally:
             await reply_msg.delete()
             
 
@@ -60,7 +61,7 @@ class Action(Telegram, metaclass=PluginMount):
         async def _inner(event):
             msg = event.message
             try:
-                if msg.text and msg.text.startswith('wordcloud'):
+                if msg.text and msg.text.lower().startswith('wordcloud'):
                     chat = await event.get_chat()
                     user = None
                     if msg.is_reply:

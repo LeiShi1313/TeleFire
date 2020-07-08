@@ -1,4 +1,5 @@
 import re
+import traceback
 import asyncio
 from datetime import timedelta
 
@@ -66,6 +67,15 @@ class PlusMode(Telegram, metaclass=PluginMount):
         except Exception as e:
             self._logger.info(e)
 
+    async def _getid_mode(self, msg):
+        try:
+            await msg.delete()
+            me = self._client.get_me()
+            sender = await msg.get_sender()
+            await self._client.send_message(me, f'id: `{sender.id}`\nusername: `{sender.username}`')
+        except Exception as _:
+            traceback.print_exc()
+
     async def _search_mode(self, msg):
         raw_params = msg.text.split(' ')[1:]
         if len(raw_params) == 2:
@@ -98,16 +108,20 @@ class PlusMode(Telegram, metaclass=PluginMount):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message
+            channel = await evt.get_chat()
             if msg.text:
                 if re.search(r'^\/([\d]+[s|m|h|d]) (.*)$', msg.text, re.DOTALL):
                     self._logger.info("Received auto delete message: {}".format(msg.text))
                     await self._auto_delete_mode(evt, msg)
-                if msg.text.startswith('/md'):
+                elif msg.text.startswith('/md'):
                     self._logger.info("Received markdown mode message: {}".format(msg.text))
                     await self._markdown_mode(msg)
                 elif msg.text.startswith('/search'):
                     self._logger.info("Received search message: {}".format(msg.text))
                     await self._search_mode(msg)
+                elif msg.is_reply and msg.start.startswith('/getid'):
+                    self._logger.info("Received getid message: {}".format(msg.text))
+                    await self._getid_mode(msg)
 
         self._set_file_handler('plus_mode')
         self._client.start()

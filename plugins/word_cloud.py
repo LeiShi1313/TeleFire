@@ -3,7 +3,6 @@ from datetime import timezone
 from dateutil import parser
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
-from PIL.Image import Image
 
 from plugins.base import Telegram, PluginMount
 

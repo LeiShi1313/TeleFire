@@ -41,11 +41,11 @@ class Action(Telegram, metaclass=PluginMount):
                         await reply_msg.edit(text=initial_msg + '.' * (count // 1000))
                     except Exception as _:
                         traceback.print_exc()
+        wordcloud_msg = None
         try:
             image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate(' '.join(words)).to_image()
             stream = BytesIO()
             image.save(stream, 'PNG')
-            await reply_msg.delete()
             wordcloud_msg = await self._client.send_message(
                 to_chat,
                 '词云 for\n{}{}{}'.format(
@@ -59,8 +59,10 @@ class Action(Telegram, metaclass=PluginMount):
         except Exception as _:
             traceback.print_exc()
         finally:
-            await asyncio.sleep(3600)
-            await wordcloud_msg.delete()
+            await reply_msg.delete()
+            if wordcloud_msg:
+                await asyncio.sleep(3600)
+                await wordcloud_msg.delete()
             
 
     def __call__(self, redis):

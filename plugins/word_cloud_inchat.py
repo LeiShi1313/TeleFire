@@ -30,7 +30,7 @@ class Action(Telegram, metaclass=PluginMount):
             if start and msg.date < start:
                 break
             if msg.text:
-                words += [w for w in jieba.cut_for_search(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
+                words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
                 count += 1
             if count % 1000 == 1:
                 initial_msg += '.'

@@ -76,10 +76,13 @@ class Action(Telegram, metaclass=PluginMount):
                     search_chat = to_chat
                     m = re.search(r'chat=(?P<chat>[0-9a-zA-Z_\-]+)', msg.text)
                     if m is not None:
-                        search_chat = await self._client.get_entity(m.groupdict().get('chat'))
+                        search_chat = await self._get_entity(m.groupdict().get('chat'))
 
                     user = None
-                    if msg.is_reply:
+                    m = re.search(r'user=(?P<user>[0-9a-zA-Z_\-]+)', msg.text)
+                    if m is not None:
+                        user = await self._get_entity(m.groupdict().get('user'))
+                    elif msg.is_reply:
                         reply_to = await msg.get_reply_message()
                         user = await reply_to.get_sender()
                     elif 'group' not in msg.text:

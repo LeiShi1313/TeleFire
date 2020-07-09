@@ -8,8 +8,8 @@ from datetime import timezone, datetime, timedelta
 
 from telethon import utils
 from telethon.sync import events
+# from telethon.tl.types import DocumentAttributeSticker
 from telethon.tl.functions.channels import CreateChannelRequest
-# from telethon.tl.types import 
 
 from plugins.base import Telegram, PluginMount
 
@@ -33,14 +33,18 @@ class Action(Telegram, metaclass=PluginMount):
                 break
             if msg.text:
                 words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
-                count += 1
+            # if msg.sticker:
+                # words += [a.alt for a in msg.sticker.attributes if isinstance(a, DocumentAttributeSticker)]
+
+            count += 1
             if count >= 1000:
                 p = math.floor(math.log(count, 10))
-                if count % int(math.pow(10, p)) == 0:
+                if count % int(math.pow(10, p)) == 0 and count // 1000:
                     try:
                         await reply_msg.edit(text=initial_msg + '.' * (count // 1000))
                     except Exception as _:
                         traceback.print_exc()
+
         wordcloud_msg = None
         try:
             image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate(' '.join(words)).to_image()

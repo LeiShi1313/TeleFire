@@ -1,4 +1,5 @@
 import re
+import asyncio
 import traceback
 from io import BytesIO
 from dateutil import parser
@@ -39,7 +40,7 @@ class Action(Telegram, metaclass=PluginMount):
             image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate(' '.join(words)).to_image()
             stream = BytesIO()
             image.save(stream, 'PNG')
-            await self._client.send_message(
+            wordcloud_msg = await self._client.send_message(
                 chat,
                 'Wordcloud for\n{}{}{}'.format(
                     f'{chat.title}',
@@ -49,6 +50,8 @@ class Action(Telegram, metaclass=PluginMount):
                         end.strftime('%Y/%m/%d') if end else 'Now') if start or end else ''),
                 reply_to=msg_id,
                 file=stream.getvalue())
+            await asyncio.sleep(3600)
+            await wordcloud_msg.delete()
         except Exception as _:
             traceback.print_exc()
         finally:

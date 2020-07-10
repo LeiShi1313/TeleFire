@@ -5,6 +5,7 @@ import traceback
 from io import BytesIO
 from dateutil import parser
 from datetime import timezone, datetime, timedelta
+from collections import defaultdict
 
 from telethon import utils
 from telethon.sync import events
@@ -25,14 +26,17 @@ class Action(Telegram, metaclass=PluginMount):
         except ImportError as e:
             print(e)
             return
-        words = []
+        words = defaultdict(int)
         count = 0
         initial_msg = reply_msg.text + '\n'
         async for msg in self._client.iter_messages(search_chat, from_user=user, offset_date=end):
             if start and msg.date < start:
                 break
             if msg.text:
-                words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
+                for word in jieba.cut(msg.text):
+                    if not await self.redis.sismember(f'{self.prefix}stop_words', word):
+                        words[word] += 1
+                # words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
             # if msg.sticker:
                 # words += [a.alt for a in msg.sticker.attributes if isinstance(a, DocumentAttributeSticker)]
 
@@ -47,7 +51,7 @@ class Action(Telegram, metaclass=PluginMount):
 
         wordcloud_msg = None
         try:
-            image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate(' '.join(words)).to_image()
+            image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate_from_frequencies(words).to_image()
             stream = BytesIO()
             image.save(stream, 'PNG')
             wordcloud_msg = await self._client.send_message(
@@ -64,9 +68,6 @@ class Action(Telegram, metaclass=PluginMount):
             traceback.print_exc()
         finally:
             await reply_msg.delete()
-            if wordcloud_msg:
-                await asyncio.sleep(3600)
-                await wordcloud_msg.delete()
             
 
     def __call__(self, redis):

@@ -34,6 +34,7 @@ class Action(Telegram, metaclass=PluginMount):
                 break
             if msg.text:
                 for word in jieba.cut(msg.text):
+                    word = word.lower()
                     if not await self.redis.sismember(f'{self.prefix}stop_words', word):
                         words[word] += 1
                 # words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]

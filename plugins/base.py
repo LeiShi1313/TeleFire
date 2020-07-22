@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import logging
 from math import floor
@@ -58,7 +59,7 @@ class Telegram(object):
         async for msg in self._client.iter_messages(chat, from_user=user):
             if not query or (msg.text and query in msg.text):
                 if isinstance(output, Channel):
-                    url = self._generate_message_url(chat, msg)
+                    url = get_url(chat, msg)
                     await self._client.send_message(output, "{}:\n{}\n{}".format(msg.date, msg.text, url))
                 else:
                     sender = user
@@ -84,6 +85,18 @@ class Telegram(object):
         except Exception as e:
             entity = await self._client.get_entity(int(entity_like))
         return entity
+
+    def _parse_msg(self, msg, key, regex):
+        m = re.search(r'{}=({})'.format(key, regex), msg)
+        if m is not None:
+            return m.groups()[0]
+        return None
+
+    async def _parse_entity(self, msg: str, entity_name: str):
+        m = self._parse_msg(msg, entity_name, r'[0-9a-zA-Z_\-]+')
+        if m is not None:
+            return await self._get_entity(m)
+        return None
 
 
 class Commands(object):

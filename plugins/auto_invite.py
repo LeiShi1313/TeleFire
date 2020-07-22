@@ -13,15 +13,6 @@ class Action(Telegram, metaclass=PluginMount):
     command_name = "auto_invite"
     prefix = "auto_invite_"
 
-    async def is_blocked(self, sender):
-        if sender.id and await self.redis.sismember(f'{self.prefix}blocklist', sender.id):
-            return True
-        elif sender.id and await self.redis.sismember(f'{self.prefix}blocklist', str(sender.id)):
-            return True
-        elif sender.username and await self.redis.sismember(f'{self.prefix}blocklist', sender.username):
-            return True
-        return False
-
     async def incr_attempts(self, sender):
         return await self.redis.hincrby(f'{self.prefix}attempts', sender.id)
 
@@ -67,23 +58,21 @@ class Action(Telegram, metaclass=PluginMount):
                         if code and not await self.not_code(code):
                             self._log_message(msg, to_chat, sender)
                             self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) sent a code: {code}')
+                            await self.incr_attempts(sender)
                             await self.redis.hincrby('auto_invite_codes', code)
                     return
                 if await self.is_asking_code(msg, to_chat, sender):
                     attempts = await self.incr_attempts(sender)
-                    if not await self.is_blocked(sender):
-                        if attempts == 1:
-                            one_reply = await self.get_one_reply('replies')
-                            reply = await self.get_reply()
-                            await msg.reply(one_reply+'\n'+reply)
+                    if attempts == 1 or sender.id == self.me.id:
+                        one_reply = await self.get_one_reply('replies')
+                        await msg.reply(one_reply)
                     else:
-                        self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in blocklist sent {msg.text}')
-                    if attempts >= 3 and sender.id != 419540347:
-                        await self.redis.sadd(f'{self.prefix}blocklist', sender.id)
+                        self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in {to_chat.username} sent {msg.text}, attempts: {attempts}')
             except Exception as e:
                 traceback.print_exc()
         
         async def connect_redis():
+            self.me = await self._client.get_me()
             self.redis = await aioredis.create_redis_pool(f'redis://{redis}')
         
         with self._client:

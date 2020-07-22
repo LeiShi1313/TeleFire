@@ -1,6 +1,6 @@
 import re
-import traceback
 import asyncio
+import traceback
 from datetime import timedelta
 
 from telethon import utils
@@ -77,38 +77,29 @@ class PlusMode(Telegram, metaclass=PluginMount):
             traceback.print_exc()
 
     async def _search_mode(self, msg):
-        raw_params = msg.text.split(' ')[1:]
-        if len(raw_params) == 2:
-            c, user, query = raw_params + ['']
-        elif len(raw_params) == 3:
-            c, user, query = raw_params
-        else:
-            self._logger.info("Unknown command: {}".format(msg.text))
-            self._logger.debug("{}".format(msg))
-        await msg.delete()
         try:
-            channel = await self._get_entity(msg.to_id if c == 'this' else c)
-            user = await self._get_entity(user)
-        except Exception as e:
-            self._logger.info(e)
-            return
+            chat = await self._parse_entity(msg.text, 'chat')
+            user = await self._parse_entity(msg.text, 'user')
+            query = self._parse_msg(msg.text, 'query', r'[\w]+')
 
-        try:
             result = await self._client(CreateChannelRequest(
-                "{} in {}".format(utils.get_display_name(user), channel.title),
+                "{}{}".format(
+                    '{} in '.format(utils.get_display_name(user)) if user else '',
+                    chat.title),
                 "query={}".format(query)))
-            created_channel = result.chats[0]
-        except Exception as e:
-            self._logger.error(e)
-        self._logger.info("Channel: {} created.".format(created_channel.id))
 
-        await self._iter_messages_async(channel, user, query, created_channel)
+            created_channel = result.chats[0]
+            self._logger.info("Channel: {} created.".format(created_channel.id))
+            await self._iter_messages_async(chat, user, query, created_channel)
+        except:
+            traceback.print_exc()
+        finally:
+            await msg.delete()
 
     def __call__(self):
         @self._client.on(events.NewMessage)
         async def _inner(evt):
             msg = evt.message
-            channel = await evt.get_chat()
             if msg.text:
                 if re.search(r'^\/([\d]+[s|m|h|d]) (.*)$', msg.text, re.DOTALL):
                     self._logger.info("Received auto delete message: {}".format(msg.text))
@@ -116,7 +107,7 @@ class PlusMode(Telegram, metaclass=PluginMount):
                 elif msg.text.startswith('/md'):
                     self._logger.info("Received markdown mode message: {}".format(msg.text))
                     await self._markdown_mode(msg)
-                elif msg.text.startswith('/search'):
+                elif msg.text.startswith('search'):
                     self._logger.info("Received search message: {}".format(msg.text))
                     await self._search_mode(msg)
                 elif msg.is_reply and msg.start.startswith('/getid'):

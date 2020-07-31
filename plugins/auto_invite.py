@@ -65,7 +65,7 @@ class Action(Telegram, metaclass=PluginMount):
                     attempts = await self.incr_attempts(sender)
                     if attempts == 1 or sender.id == self.me.id:
                         one_reply = await self.get_one_reply('replies')
-                        await msg.reply(one_reply)
+                        await self._client.send_message(sender, one_reply)
                     else:
                         self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in {to_chat.username} sent {msg.text}, attempts: {attempts}')
             except Exception as e:

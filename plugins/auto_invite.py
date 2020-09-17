@@ -40,7 +40,9 @@ class Action(Telegram, metaclass=PluginMount):
         return (to_chat.username and await self.redis.sismember(f'{self.prefix}chats', to_chat.username)) \
               or (to_chat.id and await self.redis.sismember(f'{self.prefix}chats', to_chat.id))
 
-    def __call__(self, redis):
+    def __call__(self, redis, prefix = None):
+        if prefix is not None:
+            self.prefix = prefix
         import aioredis
         regex = re.compile(r'^([a-zA-Z0-9]{4})$|^.*邀请码.*([a-zA-Z0-9]{4}).*$|^.*code=([a-zA-Z0-9]{4}).*$', re.MULTILINE)
         @self._client.on(events.NewMessage)
@@ -65,7 +67,7 @@ class Action(Telegram, metaclass=PluginMount):
                     attempts = await self.incr_attempts(sender)
                     if attempts == 1 or sender.id == self.me.id:
                         one_reply = await self.get_one_reply('replies')
-                        await self._client.send_message(sender, one_reply)
+                        await msg.reply(one_reply)
                     else:
                         self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in {to_chat.username} sent {msg.text}, attempts: {attempts}')
             except Exception as e:

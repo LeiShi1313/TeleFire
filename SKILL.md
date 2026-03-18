@@ -14,12 +14,14 @@ CLI tool for Telegram automation via user account. Built on Telethon + python-fi
 
 ## Prerequisites
 
-Env vars in `.env` in your working directory (loaded automatically):
-- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — required for all commands
-- `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `MATRIX_PASSWORD` — only for matrix_* commands
-- `AI_API_ENDPOINT`, `AI_API_MODEL`, `AI_API_KEY` — only for ai_bot
+First-time setup:
+```bash
+telefire init    # saves credentials to ~/.telefire/config.toml
+```
+This prompts for Telegram API ID/Hash (required) and Matrix credentials (optional).
+Credentials can also be set via env vars (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`) or `.env` file.
 
-First run prompts for phone number + Telegram code (creates session file).
+First run of any Telegram command prompts for phone number + code (creates session file).
 
 ## Start Here
 
@@ -29,26 +31,10 @@ telefire get_all_chats
 ```
 Most commands take `--chat=` (username, numeric ID, or display name).
 
-**`--user=` must be a Telegram username or numeric user ID.** Display names do NOT work — they fail with `ValueError: Cannot find any entity`. To find a user's username/ID from their display name, search recent messages in the chat:
-```python
-python -c "
-import asyncio
-from telethon import TelegramClient
-from dotenv import load_dotenv
-import os
-load_dotenv()
-client = TelegramClient('test', int(os.environ['TELEGRAM_API_ID']), os.environ['TELEGRAM_API_HASH'])
-async def main():
-    await client.start()
-    chat = await client.get_entity('CHAT_NAME')
-    async for msg in client.iter_messages(chat, limit=500):
-        if msg.sender and hasattr(msg.sender, 'first_name'):
-            name = (msg.sender.first_name or '') + (msg.sender.last_name or '')
-            if 'DISPLAY_NAME' in name:
-                print(f'ID: {msg.sender_id}, Name: {name}, Username: {msg.sender.username}')
-                break
-asyncio.run(main())
-"
+**`--user=` must be a Telegram username or numeric user ID.** Display names do NOT work — they fail with `ValueError: Cannot find any entity`. Use `find_user` to resolve:
+```bash
+telefire find_user --chat=coder_ot --name='风扇'
+# Output: ID: 567376438, Name: 风扇滑翔翼, Username: Fangliding
 ```
 
 ## Quick Reference
@@ -59,6 +45,7 @@ asyncio.run(main())
 |---------|-------|---------|
 | `get_all_chats` | `get_all_chats` | List all chats with IDs |
 | `get_entity` | `get_entity --entity=X` | Resolve user/chat info |
+| `find_user` | `find_user --chat=X --name=X [--limit=500]` | Find username/ID from display name |
 | `search_messages` | `search_messages --chat=X --query=X [--user=X] [--slow=True] [--limit=100] [--before=DATE] [--after=DATE]` | Search messages. Fast=server-side (default), slow=full scan |
 | `list_messages` | `list_messages --chat=X [--user=X] [--output=log] [--print_stat=True] [--cut=True] [--before=DATE] [--after=DATE]` | List all messages from a user. `--print_stat` shows hourly distribution, `--cut` enables jieba segmentation |
 | `get_messages_by_ids` | `get_messages_by_ids --chat=X --ids=ID1,ID2` | Fetch specific messages |

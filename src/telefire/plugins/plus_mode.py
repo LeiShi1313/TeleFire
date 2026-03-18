@@ -1,7 +1,6 @@
 import re
 import asyncio
 import traceback
-from g4f.client import Client
 from os.path import exists
 from datetime import timedelta
 
@@ -179,6 +178,7 @@ class PlusMode(Telegram, metaclass=PluginMount):
             prompt = prompt + "\n" + "\n".join(msgs[::-1])
 
             self._logger.info(f"Prompt: {prompt}")
+            from g4f.client import Client
             client = Client()
             completion = client.chat.completions.create(
                 model="gpt-4o-mini",

@@ -7,6 +7,7 @@ from dateutil import parser
 from datetime import timezone, datetime, timedelta
 from collections import defaultdict
 
+import aioredis
 from telethon import utils
 from telethon.sync import events
 # from telethon.tl.types import DocumentAttributeSticker
@@ -16,10 +17,10 @@ from plugins.base import Telegram, PluginMount
 
 
 class Action(Telegram, metaclass=PluginMount):
-    command_name = "word_cloud_inchat"
-    prefix = "word_cloud_inchat_"
+    command_name = "wordcloud"
+    prefix = "wordcloud_"
 
-    async def _generate_word_cloud_async(self, msg_id: str, reply_msg, to_chat, search_chat, user, start: datetime, end: datetime):
+    async def _generate_word_cloud_async(self, redis: str, msg_id: str, reply_msg, to_chat, search_chat, user, start: datetime, end: datetime):
         try:
             import jieba
             from wordcloud import WordCloud
@@ -29,30 +30,31 @@ class Action(Telegram, metaclass=PluginMount):
         words = defaultdict(int)
         count = 0
         initial_msg = reply_msg.text + '\n'
-        async for msg in self._client.iter_messages(search_chat, from_user=user, offset_date=end):
-            if start and msg.date < start:
-                break
-            if msg.text:
-                for word in jieba.cut(msg.text):
-                    word = word.lower()
-                    if not await self.redis.sismember(f'{self.prefix}stop_words', word):
-                        words[word] += 1
-                # words += [w for w in jieba.cut(msg.text) if not await self.redis.sismember(f'{self.prefix}stop_words', w)]
-            # if msg.sticker:
-                # words += [a.alt for a in msg.sticker.attributes if isinstance(a, DocumentAttributeSticker)]
+        async with aioredis.from_url(f'redis://{redis}', encoding="utf-8", decode_responses=True) as conn:
+            async for msg in self._client.iter_messages(search_chat, from_user=user, offset_date=end):
+                if start and msg.date < start:
+                    break
+                if msg.text:
+                    for word in jieba.cut(msg.text):
+                        word = word.lower()
+                        if not await self.conn.sismember(f'{self.prefix}stop_words', word):
+                            words[word] += 1
+                    # words += [w for w in jieba.cut(msg.text) if not await conn.sismember(f'{self.prefix}stop_words', w)]
+                # if msg.sticker:
+                    # words += [a.alt for a in msg.sticker.attributes if isinstance(a, DocumentAttributeSticker)]
 
-            count += 1
-            if count >= 1000:
-                p = math.floor(math.log(count, 10))
-                if count % int(math.pow(10, p)) == 0 and count // 1000:
-                    try:
-                        await reply_msg.edit(text=initial_msg + '.' * (count // 1000))
-                    except Exception as _:
-                        traceback.print_exc()
+                count += 1
+                if count >= 1000:
+                    p = math.floor(math.log(count, 10))
+                    if count % int(math.pow(10, p)) == 0 and count // 1000:
+                        try:
+                            await reply_msg.edit(text=initial_msg + '.' * (count // 1000))
+                        except Exception as _:
+                            traceback.print_exc()
 
         wordcloud_msg = None
         try:
-            image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate_from_frequencies(words).to_image()
+            image = WordCloud(font_path="simsun.ttf", width=800, height=400, background_color=(4, 57, 39)).generate_from_frequencies(words).to_image()
             stream = BytesIO()
             image.save(stream, 'PNG')
             wordcloud_msg = await self._client.send_message(
@@ -72,10 +74,10 @@ class Action(Telegram, metaclass=PluginMount):
             
 
     def __call__(self, redis):
-        import aioredis
         @self._client.on(events.NewMessage)
         async def _inner(event):
             msg = event.message
+            self.conn = aioredis.from_url(f'redis://{redis}', encoding="utf-8", decode_responses=True)
             try:
                 if msg.text and msg.text.lower().startswith('wordcloud'):
                     to_chat = await event.get_chat()
@@ -111,12 +113,16 @@ class Action(Telegram, metaclass=PluginMount):
                             end.strftime('%Y/%m/%d') if end else 'Now') if start or end else '')
                     self._logger.info(reply_words.replace('\n', ' '))
                     reply_msg = await self._client.send_message(to_chat, reply_words, reply_to=msg.id)
-                    await self._generate_word_cloud_async(msg.id, reply_msg, to_chat, search_chat, user, start, end)
+                    await self._generate_word_cloud_async(redis, msg.id, reply_msg, to_chat, search_chat, user, start, end)
             except Exception as e:
                 traceback.print_exc()
 
         async def connect_redis():
-            self.redis = await aioredis.create_redis_pool(f'redis://{redis}')
+            async with aioredis.from_url(f'redis://{redis}', encoding="utf-8", decode_responses=True) as conn:
+                with open('StopWords.txt', 'r') as f:
+                    for word in f.readlines():
+                        word = word.strip()
+                        await conn.sadd(f"{self.prefix}stop_words", word)
         
         with self._client:
             self._client.loop.run_until_complete(connect_redis())

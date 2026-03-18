@@ -142,3 +142,15 @@ dmypy.json
 .vscode/
 
 *.pkl
+matrix.jpeg
+matrix.png
+matrix.webm
+matrix.webp
+guamei_*.jpeg
+all_chats
+data.csv
+matrix_all_chats
+matrix_media_decrypt.py
+test.py
+plugins/yvlu/
+.pdm-python

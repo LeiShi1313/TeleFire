@@ -1,3 +1,4 @@
+from dateutil import parser
 from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import InputMessagesFilterEmpty
@@ -8,11 +9,14 @@ from plugins.base import Telegram, PluginMount
 class SearchMessages(Telegram, metaclass=PluginMount):
     command_name = 'search_messages'
 
-    async def _search_messages_async(self, chat, query, slow, limit, user, output):
+    async def _search_messages_async(self, chat, query, slow, limit, user, output, before=None, after=None):
         _filter = InputMessagesFilterEmpty()
         peer = await self._client.get_entity(chat)
         if user is not None:
             user = await self._client.get_entity(user)
+
+        offset_date = parser.parse(before) if before else None
+        min_date = parser.parse(after) if after else None
 
         self._set_file_handler('search_messages', peer, user, query)
 
@@ -23,14 +27,14 @@ class SearchMessages(Telegram, metaclass=PluginMount):
                     "Messages in {}".format(peer.title)))
                 output = result.chats[0]
                 self._logger.info("Channel: {} created.".format(output.title))
-            await self._iter_messages_async(peer, user, query, output)
+            await self._iter_messages_async(peer, user, query, output, offset_date=offset_date, min_date=min_date)
         else:
             search_request = SearchRequest(
                     peer=peer,
                     q=query,
                     filter=_filter,
-                    min_date=None,
-                    max_date=None,
+                    min_date=min_date,
+                    max_date=offset_date,
                     offset_id=0,
                     add_offset=0,
                     limit=limit,
@@ -45,7 +49,7 @@ class SearchMessages(Telegram, metaclass=PluginMount):
                     sender = await self._client.get_entity(msg.from_id)
                 self._log_message(msg, peer, sender)
 
-    def __call__(self, chat, query, slow=False, limit=100, user=None, output='log'):
+    def __call__(self, chat, query, slow=False, limit=100, user=None, output='log', before=None, after=None):
         with self._client:
             self._client.loop.run_until_complete(
-                    self._search_messages_async(chat, query, slow, limit, user, output))
+                    self._search_messages_async(chat, query, slow, limit, user, output, before, after))

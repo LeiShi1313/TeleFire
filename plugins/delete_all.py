@@ -8,7 +8,7 @@ from plugins.base import Telegram, PluginMount
 class DeleteAll(Telegram, metaclass=PluginMount):
     command_name = 'delete_all'
 
-    async def _delete_all_async(self, chat: str, before: str, query: str) -> None:
+    async def _delete_all_async(self, chat: str, before: str, after:str, query: str) -> None:
         user = await self._client.get_me()
         channel = await self._client.get_entity(chat)
 
@@ -23,6 +23,12 @@ class DeleteAll(Telegram, metaclass=PluginMount):
                     should_delete = msg.date <= before_date
                 except Exception as e:
                     self._logger.warning(traceback.format_exc())
+            if after is not None:
+                try:
+                    after_date = parser.parse(str(after)).replace(tzinfo=timezone.utc)
+                    should_delete = msg.date >= after_date
+                except Exception as e:
+                    self._logger.warning(traceback.format_exc())
             elif query is not None:
                 should_delete = msg.text and query in msg.text
             if should_delete:
@@ -30,6 +36,6 @@ class DeleteAll(Telegram, metaclass=PluginMount):
                 await msg.delete()
                     
 
-    def __call__(self, chat: str, before=None, query=None) -> None:
+    def __call__(self, chat: str, before=None, after=None, query=None) -> None:
         with self._client:
-            self._client.loop.run_until_complete(self._delete_all_async(chat, before, query))
+            self._client.loop.run_until_complete(self._delete_all_async(chat, before, after, query))

@@ -27,8 +27,16 @@ class Telegram(object):
         api_id = os.environ.get("TELEGRAM_API_ID")
         api_hash = os.environ.get("TELEGRAM_API_HASH")
         if not api_id or not api_hash:
-            raise ValueError("Please set TELEGRAM_API_ID and TELEGRAM_API_HASH as environment variables!")
-        self._client = TelegramClient(session, api_id, api_hash)
+            raise ValueError("Please set TELEGRAM_API_ID and TELEGRAM_API_HASH, or run: telefire init")
+        # Look for session file: local first, then ~/.telefire/
+        local_session = Path(f'{session}.session')
+        home_session = Path.home() / '.telefire' / session
+        if local_session.exists():
+            session_path = session
+        else:
+            Path.home().joinpath('.telefire').mkdir(parents=True, exist_ok=True)
+            session_path = str(home_session)
+        self._client = TelegramClient(session_path, api_id, api_hash)
 
         self._logger = logging.getLogger(__name__)
         self._logger.setLevel(logging.INFO if log_level=='info' else logging.DEBUG)

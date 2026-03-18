@@ -1,5 +1,6 @@
 import sys
 import inspect
+import importlib
 import pkgutil
 
 
@@ -9,12 +10,15 @@ class Wrapper:
 
 
 __all__ = []
-for loader, name, is_pkg in pkgutil.walk_packages(__path__):
-    module = loader.find_module(name).load_module(name)
-    for name, value in inspect.getmembers(module):
-        if name.startswith('__'):
+for loader, name, is_pkg in pkgutil.walk_packages(__path__, prefix=__name__ + "."):
+    try:
+        module = importlib.import_module(name)
+    except Exception:
+        continue
+    for attr_name, value in inspect.getmembers(module):
+        if attr_name.startswith('__'):
             continue
-        globals()[name] = value
-        __all__.append(name)
+        globals()[attr_name] = value
+        __all__.append(attr_name)
     __all__.append(module)
 sys.modules[__name__] = Wrapper()

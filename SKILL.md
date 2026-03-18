@@ -12,16 +12,22 @@ CLI tool for Telegram automation via user account. Built on Telethon + python-fi
 
 **IMPORTANT:** All arguments must use named flags (`--chat=X`, `--user=X`). Bare positional args do NOT work with python-fire in this codebase.
 
-## Prerequisites
+## Before Running Any Command
 
-First-time setup:
-```bash
-telefire init    # saves credentials to ~/.telefire/config.toml
-```
-This prompts for Telegram API ID/Hash (required) and Matrix credentials (optional).
+**You MUST verify setup before executing telefire commands.** Follow this checklist:
+
+1. **Check config exists:** `cat ~/.telefire/config.toml`
+   - If missing or empty → run `telefire init` (interactive, needs user input)
+   - Needs `[telegram]` section with `api_id` and `api_hash`
+2. **Check session exists:** `ls ~/.telefire/test.session` or `ls ./test.session`
+   - If missing → run any telefire command (e.g. `telefire get_all_chats`), it will prompt for phone number + verification code (needs user input)
+3. **Check session is valid:** `telefire get_all_chats 2>&1 | head -3`
+   - If it outputs chat list → ready to use
+   - If `ValueError: Please set TELEGRAM_API_ID` → config is missing, go to step 1
+   - If `SessionPasswordNeededError` or auth error → session expired, delete `~/.telefire/test.session` and re-authenticate
+   - If `ConnectionError` → network issue, retry
+
 Credentials can also be set via env vars (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`) or `.env` file.
-
-First run of any Telegram command prompts for phone number + code (creates session file).
 
 ## Start Here
 
@@ -67,7 +73,6 @@ telefire find_user --chat=coder_ot --name='风扇'
 | `words_notify` | `words_notify --chats=X WORD1 [WORD2]...` | Forward keyword matches to debug channel (specific chats) |
 | `special_attention_mode` | `special_attention_mode --event=X --key=X PERSON1...` | IFTTT notification when specific people speak |
 | `log_chat` | `log_chat` | Log all incoming messages |
-| `ai_bot` | `ai_bot` | AI chatbot (responds to /ai or reply chains) |
 | `wordcloud` | `wordcloud [--db=PATH]` | In-chat word cloud generation (triggered by "wordcloud" message) |
 | `chat_to_redis` | `chat_to_redis [--db=PATH]` | Stream all messages to SQLite |
 

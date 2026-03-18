@@ -153,4 +153,15 @@ matrix_all_chats
 matrix_media_decrypt.py
 test.py
 plugins/yvlu/
+src/telefire/plugins/yvlu/
 .pdm-python
+.python-version
+
+# Legacy flat layout (now in src/telefire/)
+/plugins/
+/utils.py
+/telefire.py
+/util/
+
+# pdm
+pdm.lock

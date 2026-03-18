@@ -7,14 +7,14 @@ description: Use when the user asks to interact with Telegram — listing chats,
 
 CLI tool for Telegram automation via user account. Built on Telethon + python-fire.
 
-**Location:** `/home/lei/workspace/created/telefire/`
-**Run pattern:** `python telefire.py <command> --arg1=val1 --arg2=val2`
+**Install:** `uv tool install telefire` or `pip install telefire`
+**Run pattern:** `telefire <command> --arg1=val1 --arg2=val2`
 
 **IMPORTANT:** All arguments must use named flags (`--chat=X`, `--user=X`). Bare positional args do NOT work with python-fire in this codebase.
 
 ## Prerequisites
 
-Env vars in `.env` (loaded automatically):
+Env vars in `.env` in your working directory (loaded automatically):
 - `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — required for all commands
 - `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `MATRIX_PASSWORD` — only for matrix_* commands
 - `AI_API_ENDPOINT`, `AI_API_MODEL`, `AI_API_KEY` — only for ai_bot
@@ -25,7 +25,7 @@ First run prompts for phone number + Telegram code (creates session file).
 
 Always run `get_all_chats` first to find chat IDs/usernames:
 ```bash
-python telefire.py get_all_chats
+telefire get_all_chats
 ```
 Most commands take `--chat=` (username, numeric ID, or display name).
 
@@ -81,9 +81,8 @@ asyncio.run(main())
 | `special_attention_mode` | `special_attention_mode --event=X --key=X PERSON1...` | IFTTT notification when specific people speak |
 | `log_chat` | `log_chat` | Log all incoming messages |
 | `ai_bot` | `ai_bot` | AI chatbot (responds to /ai or reply chains) |
-| `wordcloud` | `wordcloud --redis=X` | In-chat word cloud generation (triggered by "wordcloud" message) |
-| `chat_to_redis` | `chat_to_redis --redis=X` | Stream all messages to Redis |
-| `lottery` | `lottery --redis=X --chat=X` | Lottery bot |
+| `wordcloud` | `wordcloud [--db=PATH]` | In-chat word cloud generation (triggered by "wordcloud" message) |
+| `chat_to_redis` | `chat_to_redis [--db=PATH]` | Stream all messages to SQLite |
 
 ### Matrix Commands
 
@@ -97,33 +96,33 @@ asyncio.run(main())
 
 **List messages with hourly stats:**
 ```bash
-python telefire.py list_messages --chat=coder_ot --user=Fangliding --print_stat=True
+telefire list_messages --chat=coder_ot --user=Fangliding --print_stat=True
 ```
 
 **Search messages from a specific user:**
 ```bash
-python telefire.py search_messages --chat=coder_ot --query='keyword' --user=username --limit=500
+telefire search_messages --chat=coder_ot --query='keyword' --user=username --limit=500
 ```
 
 **Monitor keywords with phone notifications:**
 ```bash
 # Pushbullet (direct push) — monitors ALL chats
-python telefire.py words_to_pushbullet --token=TOKEN --device=DEVICE_ID outage alert
+telefire words_to_pushbullet --token=TOKEN --device=DEVICE_ID outage alert
 
 # IFTTT webhook — monitors ALL chats
-python telefire.py words_to_ifttt --event=event-name --key=webhook-key outage alert
+telefire words_to_ifttt --event=event-name --key=webhook-key outage alert
 
 # Forward to Telegram channel — monitors SPECIFIC chats
-python telefire.py words_notify --chats=chat-id keyword1 keyword2
+telefire words_notify --chats=chat-id keyword1 keyword2
 ```
 
 **Safe message deletion (preview first):**
 ```bash
 # Step 1: Preview with list_messages (no delete)
-python telefire.py list_messages --chat=chat-name --user=your-username
+telefire list_messages --chat=chat-name --user=your-username
 
 # Step 2: Delete (irreversible)
-python telefire.py delete_all --chat=chat-name --before='2024-01-01'
+telefire delete_all --chat=chat-name --before='2024-01-01'
 ```
 
 **Plus mode sub-commands** (send as Telegram messages while plus_mode is running):
@@ -143,4 +142,4 @@ python telefire.py delete_all --chat=chat-name --before='2024-01-01'
 - Log output does **not include message dates** (date line is commented out in base.py)
 - `search_messages` fast mode uses Telegram's server-side `SearchRequest` — **performs poorly with Chinese text**. Use `--slow=True` for Chinese searches (iterates all messages client-side with substring match)
 - `list_messages` and `search_messages` support `--before` and `--after` date filters (parsed by dateutil, e.g. `2024-01-01`, `last week`)
-- Plugins that need Redis require a `--redis=` connection string argument
+- Plugins that need storage accept `--db=PATH` for custom SQLite path (defaults to `~/.telefire/data.db`)

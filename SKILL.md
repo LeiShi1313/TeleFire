@@ -12,7 +12,7 @@ Current baseline:
 - Python 3.14+
 - Telegram on Telethon
 - Matrix on mautrix
-- account-aware config in `~/.telefire/config.toml`
+- default-first config in `~/.telefire/config.toml`
 
 Install options:
 
@@ -37,6 +37,7 @@ Run pattern:
 - Prefer `--account` for Telegram and Matrix.
 - Telegram also accepts `--session` as an explicit session-file override.
 - Default Telegram session name is `telefire`.
+- `telefire init` updates the default accounts only. Optional named accounts are manual config.
 
 ## Setup Checklist
 
@@ -50,11 +51,13 @@ cat ~/.telefire/config.toml
 
 Minimum Telegram config:
 
-- `[telegram]` with `api_id`, `api_hash`, and `session_name`
+- `[telegram]` with `api_id` and `api_hash`
+- optional `session_name`
 
 Minimum Matrix config:
 
 - `[matrix]` with `base_url` and `user_id`
+- optional `device_name`
 - and either a `password` for first-run bootstrap, or an existing session file under `~/.telefire/matrix/default/session.json`
 
 2. Check the selected Telegram session file:
@@ -69,14 +72,13 @@ For other accounts, pass `--account=<name>` — it resolves the session name aut
 
 ```bash
 uv run telefire telegram get_entity me
-uv run telefire telegram get_entity me --account=work
+uv run telefire telegram get_entity me --session=work
 ```
 
 4. Validate a Matrix account:
 
 ```bash
 uv run telefire matrix whoami
-uv run telefire matrix whoami --account=work
 ```
 
 If the Matrix account only has a password configured, the first successful run will bootstrap and persist a session token under `~/.telefire/matrix/<account>/`.
@@ -113,7 +115,7 @@ Save the output to a scratch file or memory so you can resolve chat/room names t
 
 ## Config Model
 
-Default account fields live directly under `[telegram]` / `[matrix]`. Additional accounts are sub-tables.
+Focus on the default account first. Default fields live directly under `[telegram]` / `[matrix]`.
 
 ```toml
 [telegram]
@@ -122,15 +124,19 @@ api_hash = "..."
 session_name = "telefire"
 store_dir = "/home/you/.telefire/telegram"
 
-[telegram.work]
-session_name = "work"
-
 [matrix]
 base_url = "https://matrix.example.com"
 user_id = "@you:example.com"
 device_name = "telefire"
 store_dir = "/home/you/.telefire/matrix/default"
 password = "..."
+```
+
+Optional extra accounts can be added manually:
+
+```toml
+[telegram.work]
+session_name = "work"
 
 [matrix.work]
 base_url = "https://matrix.work.example"
@@ -230,7 +236,7 @@ uv run telefire telegram delete_all --chat=chat-name --before='2024-01-01'
 List rooms:
 
 ```bash
-uv run telefire matrix list_rooms --account=default
+uv run telefire matrix list_rooms
 ```
 
 ## Notes
@@ -239,5 +245,6 @@ uv run telefire matrix list_rooms --account=default
 - `search_messages --slow=True` is the safer choice for Chinese text (server-side search performs poorly with CJK).
 - `delete_all` is **irreversible with no dry-run**. Always preview with `list_messages` first.
 - `--before` and `--after` accept flexible date strings parsed by dateutil (e.g. `2024-01-01`, `last week`).
-- Prefer `--account` for both Telegram and Matrix. Use `--session` only for raw Telegram session-file overrides.
+- Use the default account as the normal path. Reach for `--account` only when you actually need another account.
+- Use `--session` only for raw Telegram session-file overrides.
 - Plugins that need storage accept `--db=PATH` for custom SQLite path (defaults to `~/.telefire/data.db`).

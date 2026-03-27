@@ -1,7 +1,7 @@
 [project]
 name = "telefire"
 dynamic = ["version"]
-description = "CLI tool for Telegram automation via user account"
+description = "CLI tool for Telegram and Matrix automation"
 authors = [{ name = "Lei Shi", email = "me@leishi.io" }]
 requires-python = ">=3.14"
 license = { text = "MIT" }

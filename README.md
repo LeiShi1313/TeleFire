@@ -55,6 +55,7 @@ uv run telefire init
 ```
 
 That writes `~/.telefire/config.toml`.
+`telefire init` configures the default Telegram and Matrix accounts. Optional named accounts can be added manually later.
 
 Before running commands, validate the current setup:
 
@@ -73,7 +74,7 @@ uv run telefire telegram get_entity me
 3. Validate Matrix:
 
 ```bash
-uv run telefire matrix whoami --account=default
+uv run telefire matrix whoami
 ```
 
 The first Telegram command will prompt for login if the selected session file does not exist yet.
@@ -82,7 +83,7 @@ The first Matrix command can bootstrap from the configured password, then persis
 
 ## Config
 
-The default account lives directly under `[telegram]` / `[matrix]`. Additional accounts are sub-tables.
+The normal setup path is the default account under `[telegram]` and `[matrix]`.
 
 ```toml
 [telegram]
@@ -100,6 +101,13 @@ user_id = "@you:example.com"
 device_name = "telefire"
 store_dir = "/home/you/.telefire/matrix/default"
 password = "..."
+```
+
+Optional extra accounts can be added manually as subtables:
+
+```toml
+[telegram.work]
+session_name = "work"
 
 [matrix.work]
 base_url = "https://matrix.work.example"
@@ -111,9 +119,11 @@ password = "..."
 
 Notes:
 
-- Telegram uses `--account` to resolve a configured session alias.
+- Telegram defaults to the config under `[telegram]`.
+- Telegram uses `--account` to resolve an optional configured session alias.
 - Telegram also accepts `--session` as a low-level override.
-- Matrix uses `--account` to select both config and store directory.
+- Matrix defaults to the config under `[matrix]`.
+- Matrix uses `--account` to select an optional named account and store directory.
 
 ## Storage Layout
 
@@ -145,7 +155,6 @@ Telegram examples:
 
 ```bash
 uv run telefire telegram get_entity me
-uv run telefire telegram get_entity me --account=default
 uv run telefire telegram get_entity me --session=work
 uv run telefire telegram get_all_chats
 uv run telefire telegram list_messages --chat=coder_ot --user=Fangliding
@@ -155,10 +164,10 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 Matrix examples:
 
 ```bash
-uv run telefire matrix whoami --account=default
-uv run telefire matrix list_rooms --account=default
+uv run telefire matrix whoami
+uv run telefire matrix list_rooms
 uv run telefire matrix list_rooms --account=work
-uv run telefire matrix cleanup --account=default --days=30
+uv run telefire matrix cleanup --days=30
 ```
 
 Long-running commands should be kept alive in `tmux`, `screen`, or a service manager:
@@ -166,7 +175,7 @@ Long-running commands should be kept alive in `tmux`, `screen`, or a service man
 ```bash
 uv run telefire telegram plus_mode
 uv run telefire telegram words_to_ifttt --event=event-name --key=webhook-key outage alert
-uv run telefire matrix plus_mode --account=default
+uv run telefire matrix plus_mode
 ```
 
 ## Architecture
@@ -191,3 +200,4 @@ This keeps protocol runtime, storage, and command orchestration separate, while 
 - Protocol commands now live under `telefire telegram ...` and `telefire matrix ...`.
 - Required arguments may be positional or flags, depending on the command signature shown by `--help`.
 - The old "all arguments must use named flags" rule is no longer true.
+- The default account is the primary setup path. Named accounts are optional manual config.

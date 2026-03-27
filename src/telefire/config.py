@@ -24,6 +24,47 @@ _CLI_ENV_BLOCKLIST = {
 }
 
 
+def _toml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _toml_literal(value) -> str:
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return _toml_quote(value)
+    raise TypeError(f"Unsupported TOML value type: {type(value)!r}")
+
+
+def _append_table(lines: list[str], name: str, values: dict, ordered_keys: tuple[str, ...] = ()) -> None:
+    if lines:
+        lines.append("")
+    lines.append(f"[{name}]")
+
+    seen: set[str] = set()
+    for key in ordered_keys:
+        if key not in values:
+            continue
+        value = values[key]
+        if isinstance(value, dict) or value is None:
+            continue
+        lines.append(f"{key} = {_toml_literal(value)}")
+        seen.add(key)
+
+    for key in sorted(values):
+        if key in seen:
+            continue
+        value = values[key]
+        if isinstance(value, dict) or value is None:
+            continue
+        lines.append(f"{key} = {_toml_literal(value)}")
+
+
 def read_config_file() -> dict:
     """Read ~/.telefire/config.toml and return raw nested config."""
     config: dict = {}
@@ -77,7 +118,9 @@ def init_config():
 
     print("Telefire Setup")
     print("=" * 40)
-    print(f"Config file: {CONFIG_FILE}\n")
+    print(f"Config file: {CONFIG_FILE}")
+    print("This setup updates the default Telegram and Matrix accounts.")
+    print("Optional named accounts are preserved and can be edited manually.\n")
 
     # Telegram — default account fields live under [telegram]
     tg = existing.get("telegram", {})
@@ -127,6 +170,10 @@ def init_config():
         }
         if password or mx.get("password"):
             matrix_config["password"] = password or mx.get("password", "")
+        if mx.get("access_token"):
+            matrix_config["access_token"] = mx["access_token"]
+        if mx.get("device_id"):
+            matrix_config["device_id"] = mx["device_id"]
 
     # Preserve existing named Matrix accounts
     matrix_extra_accounts = {
@@ -136,33 +183,53 @@ def init_config():
     }
 
     # Write TOML
-    lines = ["[telegram]"]
-    lines.append(f"api_id = {telegram_config['api_id']}")
-    lines.append(f'api_hash = "{telegram_config["api_hash"]}"')
-    lines.append(f'session_name = "{telegram_config["session_name"]}"')
-    lines.append(f'store_dir = "{telegram_config["store_dir"]}"')
+    lines: list[str] = []
+    _append_table(
+        lines,
+        "telegram",
+        telegram_config,
+        ordered_keys=("api_id", "api_hash", "session_name", "store_dir"),
+    )
 
     for account_name, account_config in telegram_extra_accounts.items():
-        lines.append(f"\n[telegram.{account_name}]")
-        lines.append(f'session_name = "{account_config.get("session_name", account_name)}"')
+        _append_table(
+            lines,
+            f"telegram.{account_name}",
+            account_config,
+            ordered_keys=("session_name",),
+        )
 
     if matrix_config is not None:
-        lines.append("\n[matrix]")
-        lines.append(f'base_url = "{matrix_config["base_url"]}"')
-        lines.append(f'user_id = "{matrix_config["user_id"]}"')
-        lines.append(f'device_name = "{matrix_config["device_name"]}"')
-        lines.append(f'store_dir = "{matrix_config["store_dir"]}"')
-        if matrix_config.get("password"):
-            lines.append(f'password = "{matrix_config["password"]}"')
+        _append_table(
+            lines,
+            "matrix",
+            matrix_config,
+            ordered_keys=(
+                "base_url",
+                "user_id",
+                "device_name",
+                "store_dir",
+                "password",
+                "access_token",
+                "device_id",
+            ),
+        )
 
     for account_name, account_config in matrix_extra_accounts.items():
-        lines.append(f"\n[matrix.{account_name}]")
-        lines.append(f'base_url = "{account_config.get("base_url", "")}"')
-        lines.append(f'user_id = "{account_config.get("user_id", "")}"')
-        lines.append(f'device_name = "{account_config.get("device_name", "telefire")}"')
-        lines.append(f'store_dir = "{account_config.get("store_dir", "")}"')
-        if account_config.get("password"):
-            lines.append(f'password = "{account_config["password"]}"')
+        _append_table(
+            lines,
+            f"matrix.{account_name}",
+            account_config,
+            ordered_keys=(
+                "base_url",
+                "user_id",
+                "device_name",
+                "store_dir",
+                "password",
+                "access_token",
+                "device_id",
+            ),
+        )
 
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     print(f"\nSaved to {CONFIG_FILE}")

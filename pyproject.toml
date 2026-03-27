@@ -1,6 +1,6 @@
 [project]
 name = "telefire"
-version = "0.1.0"
+dynamic = ["version"]
 description = "CLI tool for Telegram automation via user account"
 authors = [{ name = "Lei Shi", email = "me@leishi.io" }]
 requires-python = ">=3.14"
@@ -24,6 +24,9 @@ ai = ["g4f>=0.3.8"]
 [project.scripts]
 telefire = "telefire.cli:main"
 
+[tool.hatch.version]
+source = "vcs"
+
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"

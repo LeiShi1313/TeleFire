@@ -10,34 +10,38 @@ from telefire.telegram.config import DEFAULT_SESSION_NAME
 
 CONFIG_DIR = Path.home() / ".telefire"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
+DEFAULT_MATRIX_ACCOUNT = "default"
+_CLI_ENV_BLOCKLIST = {"MATRIX_ACCESS_TOKEN", "MATRIX_BASE_URL", "MATRIX_DEVICE_ID", "MATRIX_DEVICE_NAME", "MATRIX_PASSWORD", "MATRIX_STORE_DIR", "MATRIX_USER_ID"}
 
 
-def load_config() -> dict:
-    """Load config from ~/.telefire/config.toml, with env var overrides."""
-    config = {}
+def read_config_file() -> dict:
+    """Read ~/.telefire/config.toml and return raw nested config."""
+    config: dict = {}
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "rb") as f:
             config = tomllib.load(f)
+    return config
+
+
+def load_config() -> dict:
+    """Load startup env overrides from ~/.telefire/config.toml for CLI bootstrap."""
+    config = read_config_file()
 
     telegram = config.get("telegram", {})
-    matrix = config.get("matrix", {})
 
     return {
         "TELEGRAM_API_ID": os.environ.get("TELEGRAM_API_ID") or str(telegram.get("api_id", "")),
         "TELEGRAM_API_HASH": os.environ.get("TELEGRAM_API_HASH") or telegram.get("api_hash", ""),
         "TELEGRAM_SESSION_NAME": os.environ.get("TELEGRAM_SESSION_NAME") or telegram.get("session_name", DEFAULT_SESSION_NAME),
         "TELEGRAM_STORE_DIR": os.environ.get("TELEGRAM_STORE_DIR") or telegram.get("store_dir", ""),
-        "MATRIX_BASE_URL": os.environ.get("MATRIX_BASE_URL") or matrix.get("base_url", ""),
-        "MATRIX_USER_ID": os.environ.get("MATRIX_USER_ID") or matrix.get("user_id", ""),
-        "MATRIX_PASSWORD": os.environ.get("MATRIX_PASSWORD") or matrix.get("password", ""),
-        "MATRIX_DEVICE_NAME": os.environ.get("MATRIX_DEVICE_NAME") or matrix.get("device_name", "telefire"),
-        "MATRIX_STORE_DIR": os.environ.get("MATRIX_STORE_DIR") or matrix.get("store_dir", ""),
     }
 
 
 def apply_config():
-    """Load config and set as environment variables (for Telegram/Matrix base classes).
-    Priority: env vars > config.toml > .env file
+    """Load CLI startup env.
+
+    Priority: existing env > config.toml Telegram settings > .env file.
+    Matrix account settings are resolved later by MatrixRuntimeConfig.
     """
     # Load .env as lowest-priority fallback
     env_file = Path.cwd() / ".env"
@@ -47,6 +51,8 @@ def apply_config():
             if line and not line.startswith("#") and "=" in line:
                 key, _, value = line.partition("=")
                 key, value = key.strip(), value.strip().strip('"').strip("'")
+                if key in _CLI_ENV_BLOCKLIST:
+                    continue
                 if key and value and not os.environ.get(key):
                     os.environ[key] = value
 
@@ -59,10 +65,7 @@ def init_config():
     """Interactive first-run setup. Saves credentials to ~/.telefire/config.toml."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    existing = {}
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "rb") as f:
-            existing = tomllib.load(f)
+    existing = read_config_file()
 
     print("Telefire Setup")
     print("=" * 40)
@@ -86,7 +89,17 @@ def init_config():
     }
 
     # Matrix
-    mx = existing.get("matrix", {})
+    matrix_accounts = {
+        str(name): values
+        for name, values in existing.get("matrix_accounts", {}).items()
+        if isinstance(values, dict)
+    }
+    if DEFAULT_MATRIX_ACCOUNT not in matrix_accounts and isinstance(existing.get("matrix"), dict):
+        matrix_accounts[DEFAULT_MATRIX_ACCOUNT] = existing["matrix"]
+
+    matrix_account = input(f"  Account [{DEFAULT_MATRIX_ACCOUNT}]: ").strip()
+    matrix_account = matrix_account or DEFAULT_MATRIX_ACCOUNT
+    mx = matrix_accounts.get(matrix_account, {})
     print("\n[Matrix] (optional, press Enter to skip)")
     base_url = input(f"  Base URL [{mx.get('base_url', '')}]: ").strip()
     user_id = input(f"  User ID [{mx.get('user_id', '')}]: ").strip()
@@ -96,16 +109,19 @@ def init_config():
     ).strip()
     password = input(f"  Password [{mx.get('password', '')}]: ").strip()
 
-    matrix_config = {}
+    matrix_config = None
     if base_url or user_id or mx.get("base_url") or mx.get("user_id"):
         matrix_config = {
             "base_url": base_url or mx.get("base_url", ""),
             "user_id": user_id or mx.get("user_id", ""),
             "device_name": device_name or mx.get("device_name", "telefire"),
-            "store_dir": matrix_store_dir or mx.get("store_dir", str(CONFIG_DIR / "matrix")),
+            "store_dir": matrix_store_dir or mx.get("store_dir", str(CONFIG_DIR / "matrix" / matrix_account)),
         }
         if password or mx.get("password"):
             matrix_config["password"] = password or mx.get("password", "")
+
+    if matrix_config is not None:
+        matrix_accounts[matrix_account] = matrix_config
 
     # Write TOML
     lines = ["[telegram]"]
@@ -114,14 +130,14 @@ def init_config():
     lines.append(f'session_name = "{telegram_config["session_name"]}"')
     lines.append(f'store_dir = "{telegram_config["store_dir"]}"')
 
-    if matrix_config:
-        lines.append("\n[matrix]")
-        lines.append(f'base_url = "{matrix_config["base_url"]}"')
-        lines.append(f'user_id = "{matrix_config["user_id"]}"')
-        lines.append(f'device_name = "{matrix_config["device_name"]}"')
-        lines.append(f'store_dir = "{matrix_config["store_dir"]}"')
-        if matrix_config.get("password"):
-            lines.append(f'password = "{matrix_config["password"]}"')
+    for account_name, account_config in matrix_accounts.items():
+        lines.append(f"\n[matrix_accounts.{account_name}]")
+        lines.append(f'base_url = "{account_config["base_url"]}"')
+        lines.append(f'user_id = "{account_config["user_id"]}"')
+        lines.append(f'device_name = "{account_config["device_name"]}"')
+        lines.append(f'store_dir = "{account_config["store_dir"]}"')
+        if account_config.get("password"):
+            lines.append(f'password = "{account_config["password"]}"')
 
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     print(f"\nSaved to {CONFIG_FILE}")

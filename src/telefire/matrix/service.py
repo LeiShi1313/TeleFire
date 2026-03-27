@@ -1,10 +1,12 @@
+import shutil
+
 from mautrix.api import HTTPAPI
 from mautrix.client import Client
 from mautrix.client.state_store import FileStateStore
 from mautrix.errors import MatrixConnectionError, MatrixError, MatrixInvalidToken
 from mautrix.types import Filter, FilterID
 
-from telefire.matrix.config import MatrixRuntimeConfig
+from telefire.matrix.config import DEFAULT_MATRIX_ACCOUNT, MatrixRuntimeConfig
 from telefire.matrix.store import FileSyncStore, MatrixSession, MatrixSessionStore
 from telefire.runtime import build_logger
 
@@ -49,11 +51,17 @@ class MatrixService:
             except MatrixInvalidToken:
                 self.logger.info("Matrix session token is invalid, bootstrapping a new session.")
                 self.session_store.clear()
+                await self._dispose_client(client)
             except MatrixConnectionError:
+                await self._dispose_client(client)
                 raise
             except MatrixError as exc:
                 self.logger.debug(f"Stored Matrix session validation failed: {exc}")
                 self.session_store.clear()
+                await self._dispose_client(client)
+            except Exception:
+                await self._dispose_client(client)
+                raise
             else:
                 self._client = client
                 self._persist_session()
@@ -62,21 +70,26 @@ class MatrixService:
 
         if not self.config.password:
             raise ValueError(
-                "No valid Matrix session found. Set MATRIX_PASSWORD or run: telefire init"
+                f"No valid Matrix session found for account '{self.config.account}'. "
+                "Set MATRIX_PASSWORD or run: telefire init"
             )
 
         bootstrap_device_id = self.config.device_id or (
             stored_session.device_id if stored_session is not None else None
         )
         client = self._build_client(device_id=bootstrap_device_id)
-        login_response = await client.login(
-            identifier=self.config.user_id,
-            password=self.config.password,
-            device_name=self.config.device_name,
-            device_id=bootstrap_device_id,
-        )
+        try:
+            login_response = await client.login(
+                identifier=self.config.user_id,
+                password=self.config.password,
+                device_name=self.config.device_name,
+                device_id=bootstrap_device_id,
+            )
+            await self._validate_client(client)
+        except Exception:
+            await self._dispose_client(client)
+            raise
         self._client = client
-        await self._validate_client(self._client)
         self._persist_session(
             MatrixSession(
                 base_url=self.config.base_url,
@@ -91,9 +104,7 @@ class MatrixService:
     async def close(self) -> None:
         client = self._client
         if client is not None:
-            client.stop()
-            if not client.api.session.closed:
-                await client.api.session.close()
+            await self._dispose_client(client)
 
         await self.state_store.flush()
         await self.sync_store.flush()
@@ -121,6 +132,7 @@ class MatrixService:
             return
 
         self.config.store_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_default_account_store()
         await self.state_store.open()
         await self.sync_store.open()
         self._stores_open = True
@@ -165,3 +177,28 @@ class MatrixService:
         if not persisted.device_id or not persisted.access_token:
             raise RuntimeError("Matrix session is missing device_id or access_token")
         self.session_store.save(persisted)
+
+    def _migrate_legacy_default_account_store(self) -> None:
+        if self.config.account != DEFAULT_MATRIX_ACCOUNT:
+            return
+        if self.config.store_dir.name != self.config.account:
+            return
+
+        legacy_dir = self.config.store_dir.parent
+        if legacy_dir == self.config.store_dir:
+            return
+
+        legacy_targets = (
+            (legacy_dir / "session.json", self.config.session_path),
+            (legacy_dir / "sync_store.json", self.config.sync_store_path),
+            (legacy_dir / "state_store.bin", self.config.state_store_path),
+        )
+
+        for source, target in legacy_targets:
+            if source.exists() and not target.exists():
+                shutil.copy2(source, target)
+
+    async def _dispose_client(self, client: Client) -> None:
+        client.stop()
+        if not client.api.session.closed:
+            await client.api.session.close()

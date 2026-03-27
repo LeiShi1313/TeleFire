@@ -8,6 +8,8 @@ from telethon import utils
 
 
 class TelegramCommand(ServiceCommand):
+    command_group = "telegram"
+
     def __init__(
         self,
         account: str = DEFAULT_TELEGRAM_ACCOUNT,

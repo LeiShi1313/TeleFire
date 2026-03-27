@@ -5,6 +5,8 @@ from telefire.runtime import ServiceCommand
 
 
 class MatrixCommand(ServiceCommand):
+    command_group = "matrix"
+
     def __init__(self, account: str = DEFAULT_MATRIX_ACCOUNT, log_level: str = "info"):
         service = MatrixService(
             MatrixRuntimeConfig.from_account(account=account),

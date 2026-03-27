@@ -1,137 +1,245 @@
 ---
 name: telefire
-description: Use when the user asks to interact with Telegram — listing chats, searching messages, fetching history, deleting messages, monitoring keywords, generating word clouds, or running any Telegram automation from the CLI
+description: Use when the user asks to interact with Telegram or Matrix through the TeleFire CLI — listing chats or rooms, resolving account info, searching messages, fetching history, deleting messages, monitoring keywords, or running Matrix room commands
 ---
 
 # Telefire
 
-CLI tool for Telegram automation via user account. Built on Telethon + python-fire.
+TeleFire is a CLI for Telegram and Matrix automation.
 
-**Install:** `uv tool install telefire` or `pip install telefire`
-**Run pattern:** `telefire <command> --arg1=val1 --arg2=val2`
+Current baseline:
 
-**IMPORTANT:** All arguments must use named flags (`--chat=X`, `--user=X`). Bare positional args do NOT work with python-fire in this codebase.
+- Python 3.14+
+- Telegram on Telethon
+- Matrix on mautrix
+- account-aware config in `~/.telefire/config.toml`
 
-## Before Running Any Command
+Install options:
 
-**You MUST verify setup before executing telefire commands.** Follow this checklist:
+- repo-local: `uv run telefire ...`
+- one-shot: `uvx telefire ...`
+- global install: `uv tool install telefire` or `pipx install telefire`
 
-1. **Check config exists:** `cat ~/.telefire/config.toml`
-   - If missing or empty → run `telefire init` (interactive, needs user input)
-   - Needs `[telegram]` section with `api_id` and `api_hash`
-2. **Check session exists:** `ls ~/.telefire/test.session` or `ls ./test.session`
-   - If missing → run any telefire command (e.g. `telefire get_all_chats`), it will prompt for phone number + verification code (needs user input)
-3. **Check session is valid:** `telefire get_all_chats 2>&1 | head -3`
-   - If it outputs chat list → ready to use
-   - If `ValueError: Please set TELEGRAM_API_ID` → config is missing, go to step 1
-   - If `SessionPasswordNeededError` or auth error → session expired, delete `~/.telefire/test.session` and re-authenticate
-   - If `ConnectionError` → network issue, retry
+Run pattern:
 
-Credentials can also be set via env vars (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`) or `.env` file.
+- `telefire telegram <command> [args...]`
+- `telefire matrix <command> [args...]`
+- `telefire init`
 
-## Start Here
+## Current CLI Rules
 
-Always run `get_all_chats` first to find chat IDs/usernames:
+- Protocol commands are grouped:
+  - `telefire telegram ...`
+  - `telefire matrix ...`
+- `init` stays top-level.
+- Required args can be positional or flags. Always trust the relevant `--help` output.
+- The old "all arguments must use named flags" rule is no longer valid.
+- Prefer `--account` for Telegram and Matrix.
+- Telegram also accepts `--session` as an explicit session-file override.
+- Default Telegram session name is `telefire`.
+
+## Setup Checklist
+
+Before running TeleFire commands, verify the runtime state:
+
+1. Check config:
+
 ```bash
-telefire get_all_chats
+cat ~/.telefire/config.toml
 ```
-Most commands take `--chat=` (username, numeric ID, or display name).
 
-**`--user=` must be a Telegram username or numeric user ID.** Display names do NOT work — they fail with `ValueError: Cannot find any entity`. Use `find_user` to resolve:
+Minimum Telegram config:
+
+- `[telegram]` with `api_id` and `api_hash`
+- `[telegram_accounts.*]` sections are optional — only needed for multi-account setups
+
+Minimum Matrix config:
+
+- `[matrix_accounts.<name>]` with `base_url` and `user_id`
+- optional `device_name`
+- and either:
+  - a `password` for first-run bootstrap
+  - or an existing session file under `~/.telefire/matrix/<account>/session.json`
+
+2. Check the selected Telegram session file:
+
 ```bash
-telefire find_user --chat=coder_ot --name='风扇'
-# Output: ID: 567376438, Name: 风扇滑翔翼, Username: Fangliding
+ls ~/.telefire/telegram/telefire.session
+```
+
+For other accounts, pass `--account=<name>` — it resolves the session name automatically.
+
+3. Validate the selected Telegram session:
+
+```bash
+uv run telefire telegram get_entity me
+uv run telefire telegram get_entity me --account=work
+```
+
+4. Validate a Matrix account:
+
+```bash
+uv run telefire matrix whoami
+uv run telefire matrix whoami --account=work
+```
+
+If the Matrix account only has a password configured, the first successful run will bootstrap and persist a session token under `~/.telefire/matrix/<account>/`.
+
+5. If needed, inspect the Matrix account store directly:
+
+```bash
+find ~/.telefire/matrix -maxdepth 2 -type f | sort
+```
+
+6. If a Telegram session is invalid, remove the selected session files and re-authenticate:
+
+```bash
+rm ~/.telefire/telegram/<session>.session*
+```
+
+Then rerun a Telegram command and complete the login flow.
+
+## Cache Account and Room Data
+
+On first use (or when stale), snapshot account details and room/chat lists so later requests can skip the API call:
+
+```bash
+# Telegram — cache identity and chat list
+uv run telefire telegram get_entity me
+uv run telefire telegram get_all_chats
+
+# Matrix — cache identity and room list
+uv run telefire matrix whoami
+uv run telefire matrix list_rooms
+```
+
+Save the output to a scratch file or memory so you can resolve chat/room names to IDs without re-running these commands each time the user asks about a specific chat.
+
+## Config Model
+
+Recommended shape:
+
+```toml
+[telegram]
+api_id = 1094995
+api_hash = "..."
+default_account = "default"
+store_dir = "/home/you/.telefire/telegram"
+
+[telegram_accounts.default]
+session_name = "telefire"
+
+[telegram_accounts.work]
+session_name = "work"
+
+[matrix_accounts.default]
+base_url = "https://matrix.example.com"
+user_id = "@you:example.com"
+device_name = "telefire"
+store_dir = "/home/you/.telefire/matrix/default"
+password = "..."
+```
+
+Telegram storage:
+
+- `~/.telefire/telegram/telefire.session`
+- `~/.telefire/telegram/work.session`
+
+Matrix storage:
+
+- `~/.telefire/matrix/default/session.json`
+- `~/.telefire/matrix/default/sync_store.json`
+- `~/.telefire/matrix/default/state_store.bin`
+
+Matrix accounts are account-scoped by directory, unlike Telegram where multiple accounts usually share one store dir and differ by session filename.
+
+## Discovery
+
+Run `--help` at any level:
+
+```bash
+uv run telefire --help
+uv run telefire telegram --help
+uv run telefire matrix --help
+uv run telefire telegram COMMAND --help
 ```
 
 ## Quick Reference
 
-### One-Shot Commands (run and exit)
+### Telegram One-Shot Commands
 
-| Command | Usage | Purpose |
-|---------|-------|---------|
-| `get_all_chats` | `get_all_chats` | List all chats with IDs |
-| `get_entity` | `get_entity --entity=X` | Resolve user/chat info |
-| `find_user` | `find_user --chat=X --name=X [--limit=500]` | Find username/ID from display name |
-| `search_messages` | `search_messages --chat=X --query=X [--user=X] [--slow=True] [--limit=100] [--before=DATE] [--after=DATE]` | Search messages. Fast=server-side (default), slow=full scan |
-| `list_messages` | `list_messages --chat=X [--user=X] [--output=log] [--print_stat=True] [--cut=True] [--before=DATE] [--after=DATE]` | List all messages from a user. `--print_stat` shows hourly distribution, `--cut` enables jieba segmentation |
-| `get_messages_by_ids` | `get_messages_by_ids --chat=X --ids=ID1,ID2` | Fetch specific messages |
-| `summary_messages` | `summary_messages --chat=X [--user=X] [--limit=10]` | Recent messages from user |
-| `list_deleted_user_messages` | `list_deleted_user_messages --chat=X` | Messages from deleted accounts |
-| `delete_all` | `delete_all --chat=X [--before=DATE] [--after=DATE] [--query=X]` | Delete own messages (irreversible, no dry-run) |
-| `word_cloud` | `word_cloud --chat=X [--user=X] [--start=DATE] [--end=DATE]` | Generate word cloud image |
-
-### Long-Running Commands (event listeners, run in tmux/screen)
-
-| Command | Usage | Purpose |
-|---------|-------|---------|
-| `plus_mode` | `plus_mode` | Advanced mode: auto-delete, markdown, search, AI summary |
-| `auto_reply` | `auto_reply --regex=X --reply=X [--chat=X] [--from_sender=X]` | Auto-reply on regex match |
-| `auto_repeat` | `auto_repeat --chat=X` | Repeat when 2 users send same text |
-| `auto_reaction` | `auto_reaction --chat=X --user=X` | Auto-react to user's messages |
-| `words_to_ifttt` | `words_to_ifttt --event=X --key=X WORD1 [WORD2]...` | IFTTT notification on keyword (all chats) |
-| `words_to_pushbullet` | `words_to_pushbullet --token=X --device=X WORD1 [WORD2]...` | Pushbullet notification on keyword (all chats) |
-| `words_notify` | `words_notify --chats=X WORD1 [WORD2]...` | Forward keyword matches to debug channel (specific chats) |
-| `special_attention_mode` | `special_attention_mode --event=X --key=X PERSON1...` | IFTTT notification when specific people speak |
-| `log_chat` | `log_chat` | Log all incoming messages |
-| `wordcloud` | `wordcloud [--db=PATH]` | In-chat word cloud generation (triggered by "wordcloud" message) |
-| `chat_to_redis` | `chat_to_redis [--db=PATH]` | Stream all messages to SQLite |
+| Command | Key Args | Purpose |
+|---------|----------|---------|
+| `get_all_chats` | | List all chats with IDs |
+| `get_entity` | `ENTITY` | Resolve user/chat info (`me`, username, or chat) |
+| `find_user` | `CHAT NAME [--limit=500]` | Find username/ID from display name |
+| `search_messages` | `CHAT QUERY [--user=X] [--slow=True] [--limit=100] [--before=DATE] [--after=DATE]` | Search messages. `--slow=True` for Chinese text |
+| `list_messages` | `CHAT [--user=X] [--print_stat=True] [--cut=True] [--before=DATE] [--after=DATE]` | List messages. `--print_stat` for hourly distribution |
+| `get_messages_by_ids` | `CHAT --ids=ID1,ID2` | Fetch specific messages by ID |
+| `summary_messages` | `CHAT [--user=X] [--limit=10]` | Recent messages from user |
+| `list_deleted_user_messages` | `CHAT` | Messages from deleted accounts |
+| `delete_all` | `CHAT [--before=DATE] [--after=DATE] [--query=X]` | Delete own messages (**irreversible, no dry-run**) |
+| `word_cloud` | `CHAT [--user=X] [--start=DATE] [--end=DATE]` | Generate word cloud image |
+| `chat_count` | `CHAT [--user=X]` | Message count statistics |
+| `regex_messages` | `CHAT REGEX` | Filter messages by regex |
 
 ### Matrix Commands
 
-| Command | Usage | Purpose |
-|---------|-------|---------|
-| `matrix_list_rooms` | `matrix_list_rooms` | List joined Matrix rooms |
-| `matrix_plus_mode` | `matrix_plus_mode` | Matrix plus mode |
-| `matrix_chengyu_bot` | `matrix_chengyu_bot --chat=X [--dry_run=True]` | Chinese idiom game bot |
+| Command | Key Args | Purpose |
+|---------|----------|---------|
+| `whoami` | | Show current Matrix identity |
+| `list_rooms` | | List joined rooms |
 
-## Common Workflows
+All Telegram commands accept `--account=X` and `--session=X`. All Matrix commands accept `--account=X`.
 
-**List messages with hourly stats:**
+## Useful Telegram Workflows
+
+List chats:
+
 ```bash
-telefire list_messages --chat=coder_ot --user=Fangliding --print_stat=True
+uv run telefire telegram get_all_chats
 ```
 
-**Search messages from a specific user:**
+Resolve an entity:
+
 ```bash
-telefire search_messages --chat=coder_ot --query='keyword' --user=username --limit=500
+uv run telefire telegram get_entity me
+uv run telefire telegram get_entity username_or_chat
 ```
 
-**Monitor keywords with phone notifications:**
+Search messages:
+
 ```bash
-# Pushbullet (direct push) — monitors ALL chats
-telefire words_to_pushbullet --token=TOKEN --device=DEVICE_ID outage alert
-
-# IFTTT webhook — monitors ALL chats
-telefire words_to_ifttt --event=event-name --key=webhook-key outage alert
-
-# Forward to Telegram channel — monitors SPECIFIC chats
-telefire words_notify --chats=chat-id keyword1 keyword2
+uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
+uv run telefire telegram search_messages --chat=coder_ot --query='中文' --slow=True
 ```
 
-**Safe message deletion (preview first):**
-```bash
-# Step 1: Preview with list_messages (no delete)
-telefire list_messages --chat=chat-name --user=your-username
+List messages from a specific user:
 
-# Step 2: Delete (irreversible)
-telefire delete_all --chat=chat-name --before='2024-01-01'
+```bash
+uv run telefire telegram list_messages --chat=coder_ot --user=Fangliding --print_stat=True
 ```
 
-**Plus mode sub-commands** (send as Telegram messages while plus_mode is running):
-- `/Ns MESSAGE` — auto-delete after N seconds (e.g., `/30s hello`)
-- `/Nm`, `/Nh`, `/Nd` — minutes, hours, days
-- `/md` — markdown mode
-- `/search user=X chat=Y query=Z` — search and create results channel
-- `/summary user=X count=N [prompt]` — AI summarize recent messages
-- `/getid` — get user ID (reply to their message)
-- `-paolu` — delete all own messages in current chat
+Delete your own messages:
 
-## Known Limitations
+```bash
+uv run telefire telegram list_messages --chat=chat-name --user=your-username
+uv run telefire telegram delete_all --chat=chat-name --before='2024-01-01'
+```
 
-- **`--user=` requires username or numeric ID** — display names fail. Use the lookup snippet above to resolve.
-- `delete_all` has **no dry-run mode** — always preview with `list_messages` first
-- `words_to_ifttt` and `words_to_pushbullet` monitor **all chats** — no chat filter (use `words_notify` for specific chats, but it forwards to Telegram, not phone)
-- Log output does **not include message dates** (date line is commented out in base.py)
-- `search_messages` fast mode uses Telegram's server-side `SearchRequest` — **performs poorly with Chinese text**. Use `--slow=True` for Chinese searches (iterates all messages client-side with substring match)
-- `list_messages` and `search_messages` support `--before` and `--after` date filters (parsed by dateutil, e.g. `2024-01-01`, `last week`)
-- Plugins that need storage accept `--db=PATH` for custom SQLite path (defaults to `~/.telefire/data.db`)
+## Useful Matrix Workflows
+
+List rooms:
+
+```bash
+uv run telefire matrix list_rooms --account=default
+```
+
+## Notes
+
+- **`--user` requires username or numeric ID** — display names fail with `ValueError`. Use `find_user` to resolve.
+- `search_messages --slow=True` is the safer choice for Chinese text (server-side search performs poorly with CJK).
+- `delete_all` is **irreversible with no dry-run**. Always preview with `list_messages` first.
+- `--before` and `--after` accept flexible date strings parsed by dateutil (e.g. `2024-01-01`, `last week`).
+- Prefer `--account` for both Telegram and Matrix. Use `--session` only for raw Telegram session-file overrides.
+- Plugins that need storage accept `--db=PATH` for custom SQLite path (defaults to `~/.telefire/data.db`).

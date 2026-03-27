@@ -1,5 +1,6 @@
 import inspect
 from functools import wraps
+
 from telefire.utils import camel_to_snake
 
 
@@ -8,32 +9,91 @@ class CommandRegistry:
         self._commands = {}
         self._sources = {}
 
-    def register(self, name, command, *, source):
-        existing_source = self._sources.get(name)
+    def register(self, name, command, *, source, group=None):
+        command_path = (*self._normalize_group(group), name)
+        existing_source = self._sources.get(command_path)
         if existing_source is not None and existing_source != source:
             raise ValueError(
-                f"Command '{name}' is already registered by {existing_source}; "
+                f"Command '{self._format_path(command_path)}' is already registered by {existing_source}; "
                 f"cannot replace it with {source}"
             )
 
-        self._commands[name] = command
-        self._sources[name] = source
+        node = self._commands
+        for segment in command_path[:-1]:
+            existing = node.get(segment)
+            if existing is None:
+                existing = {}
+                node[segment] = existing
+            elif not isinstance(existing, dict):
+                raise ValueError(
+                    f"Cannot create command group '{segment}' because a command already "
+                    f"exists at '{self._format_path(command_path[:-1])}'"
+                )
+            node = existing
+
+        existing = node.get(name)
+        if isinstance(existing, dict):
+            raise ValueError(
+                f"Cannot register command '{self._format_path(command_path)}' because that "
+                "path is already used as a command group"
+            )
+
+        node[name] = command
+        self._sources[command_path] = source
         return command
 
-    def register_callable(self, func, *, name=None):
+    def register_callable(self, func, *, name=None, group=None):
         command_name = name or func.__name__
         source = f"{func.__module__}.{func.__qualname__}"
-        return self.register(command_name, func, source=source)
+        return self.register(command_name, func, source=source, group=group)
 
     def register_class(self, cls):
-        command_name = (
-            cls.command_name if hasattr(cls, "command_name") else camel_to_snake(cls.__name__)
+        command_group = self._resolve_command_group(cls)
+        command_name = self._resolve_command_name(
+            cls.command_name if hasattr(cls, "command_name") else camel_to_snake(cls.__name__),
+            command_group,
         )
         source = f"{cls.__module__}.{cls.__qualname__}"
-        return self.register(command_name, _build_command_wrapper(cls), source=source)
+        return self.register(
+            command_name,
+            _build_command_wrapper(cls, command_name),
+            source=source,
+            group=command_group,
+        )
 
     def as_fire_commands(self):
-        return dict(self._commands)
+        return self._copy_tree(self._commands)
+
+    def _resolve_command_group(self, cls):
+        return getattr(cls, "command_group", None)
+
+    def _resolve_command_name(self, raw_name, group):
+        if not isinstance(raw_name, str):
+            return raw_name
+
+        normalized_group = self._normalize_group(group)
+        if normalized_group:
+            prefix = f"{normalized_group[-1]}_"
+            if raw_name.startswith(prefix):
+                return raw_name.removeprefix(prefix)
+
+        return raw_name
+
+    def _normalize_group(self, group):
+        if group is None:
+            return ()
+        if isinstance(group, str):
+            return tuple(part for part in group.split(".") if part)
+        return tuple(str(part) for part in group if part)
+
+    def _format_path(self, path):
+        return " ".join(path)
+
+    def _copy_tree(self, node):
+        copied = {}
+        for key, value in node.items():
+            copied[key] = self._copy_tree(value) if isinstance(value, dict) else value
+        return copied
 
 
 command_registry = CommandRegistry()
@@ -72,7 +132,7 @@ def _build_command_signature(cls):
     )
 
 
-def _build_command_wrapper(cls):
+def _build_command_wrapper(cls, command_name):
     signature = _build_command_signature(cls)
     init_signature = inspect.signature(cls.__init__)
     call_parameters = list(_iter_command_parameters(inspect.signature(cls.__call__)))
@@ -115,7 +175,6 @@ def _build_command_wrapper(cls):
 
         return cls(**init_kwargs)(*call_args, **call_kwargs)
 
-    command_name = cls.command_name if hasattr(cls, "command_name") else camel_to_snake(cls.__name__)
     command.__name__ = command_name
     command.__qualname__ = command.__name__
     command.__doc__ = inspect.getdoc(cls.__call__) or inspect.getdoc(cls)

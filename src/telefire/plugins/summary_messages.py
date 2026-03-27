@@ -21,6 +21,4 @@ class SummaryMessages(Telegram, metaclass=PluginMount):
         print('\n'.join(msgs[::-1]))
 
     def __call__(self, chat, user=None, limit=10):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._list_messages_async(chat, user, limit))
+        self._run_command(self._list_messages_async(chat, user, limit))

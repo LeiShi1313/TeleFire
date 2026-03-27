@@ -19,6 +19,4 @@ class FindUser(Telegram, metaclass=PluginMount):
             print(f"No user matching '{name}' found in last {limit} messages")
 
     def __call__(self, chat, name, limit=500):
-        with self._client:
-            self._client.loop.run_until_complete(
-                self._find_user_async(chat, name, limit))
+        self._run_command(self._find_user_async(chat, name, limit))

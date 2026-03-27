@@ -15,6 +15,4 @@ class Action(Telegram, metaclass=PluginMount):
         print(await self._get_entity(entity))
 
     def __call__(self, entity):
-        with self._client:
-            self._client.loop.run_until_complete(
-                self._get_entity_async(entity))
+        self._run_command(self._get_entity_async(entity))

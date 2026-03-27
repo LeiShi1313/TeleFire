@@ -28,5 +28,4 @@ class Action(Telegram, metaclass=PluginMount):
         
         self._set_file_handler("auto_reply_test")
         self._logger.info(f"Auto reply start for chat {chat}, reply: {reply}")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

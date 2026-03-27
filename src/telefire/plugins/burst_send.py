@@ -28,5 +28,4 @@ class Action(Telegram, metaclass=PluginMount):
         
         self._set_file_handler("auto_reply")
         self._logger.info(f"Burst send started for chat: {chat}, msg: {msg}, times: {times}, interval: {interval}")
-        with self._client:
-            self._client.loop.run_until_complete(burst_send(chat, msg, times, interval))
+        self._run_command(burst_send(chat, msg, times, interval))

@@ -31,6 +31,4 @@ class Action(Telegram, metaclass=PluginMount):
                     traceback.print_exc()
 
     def __call__(self, chat, regex, db=None):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._search_messages_by_regrex_async(chat, regex, db))
+        self._run_command(self._search_messages_by_regrex_async(chat, regex, db))

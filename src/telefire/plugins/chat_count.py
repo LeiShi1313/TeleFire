@@ -59,5 +59,4 @@ class ChatCount(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("chat_count")
         self._logger.info(f"chat_count start for chat: {chat}")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

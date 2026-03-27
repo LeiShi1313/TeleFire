@@ -38,5 +38,4 @@ class Action(Telegram, metaclass=PluginMount):
         chat_entity, sender_entity = None, None 
         self._set_file_handler("auto_reply")
         self._logger.info(f"Auto reply start for regex: {regex}, reply: {reply}, chat: {chat}, from: {sender}")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

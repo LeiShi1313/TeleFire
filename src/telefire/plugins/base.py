@@ -1,8 +1,7 @@
-import os
 import re
-import sys
 import logging
 import asyncio
+import inspect
 from pathlib import Path
 from math import floor
 from datetime import datetime
@@ -10,30 +9,22 @@ from collections import Counter
 
 import aiohttp
 from telethon import utils
-from telethon.sync import TelegramClient
 from telethon.hints import EntitiesLike
 from telethon.tl.types import Channel, Message, User
 
 from telefire.runtime import build_logger
+from telefire.telegram import TelegramRuntimeConfig, TelegramService
 from telefire.utils import get_url, camel_to_snake
 
 
 class Telegram(object):
     def __init__(self, session='test', log_level='info'):
-        api_id = os.environ.get("TELEGRAM_API_ID")
-        api_hash = os.environ.get("TELEGRAM_API_HASH")
-        if not api_id or not api_hash:
-            raise ValueError("Please set TELEGRAM_API_ID and TELEGRAM_API_HASH, or run: telefire init")
-        # Look for session file: local first, then ~/.telefire/
-        local_session = Path(f'{session}.session')
-        home_session = Path.home() / '.telefire' / session
-        if local_session.exists():
-            session_path = session
-        else:
-            Path.home().joinpath('.telefire').mkdir(parents=True, exist_ok=True)
-            session_path = str(home_session)
-        self._client = TelegramClient(session_path, api_id, api_hash)
-        self._logger = build_logger(__name__, log_level=log_level)
+        self._telegram = TelegramService(
+            TelegramRuntimeConfig.from_env(session=session),
+            log_level=log_level,
+        )
+        self._client = self._telegram.client
+        self._logger = self._telegram.logger
         self._logFormatter = logging.Formatter("%(message)s")
 
     def _set_file_handler(self, method, channel=None, user=None, query=None):
@@ -125,6 +116,23 @@ class Telegram(object):
         if m is not None:
             return await self._get_entity(m)
         return None
+
+    async def _invoke_async(self, action):
+        result = action() if callable(action) else action
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def _run_command(self, action):
+        return asyncio.run(self._telegram.run_once(lambda _: self._invoke_async(action)))
+
+    def _run_forever_command(self, setup=None):
+        async def _setup(_):
+            if setup is None:
+                return None
+            return await self._invoke_async(setup)
+
+        return asyncio.run(self._telegram.run_forever(setup=_setup if setup else None))
 
 class Commands(object):
     pass

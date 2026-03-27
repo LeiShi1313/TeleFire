@@ -18,5 +18,4 @@ class LogChat(Telegram, metaclass=PluginMount):
             #         self._logger.info(msg)
 
         self._set_file_handler('log_chat')
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

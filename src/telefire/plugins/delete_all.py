@@ -37,5 +37,4 @@ class DeleteAll(Telegram, metaclass=PluginMount):
                     
 
     def __call__(self, chat: str, before=None, after=None, query=None) -> None:
-        with self._client:
-            self._client.loop.run_until_complete(self._delete_all_async(chat, before, after, query))
+        self._run_command(self._delete_all_async(chat, before, after, query))

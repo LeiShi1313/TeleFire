@@ -328,7 +328,4 @@ class PlusMode(Telegram, metaclass=PluginMount):
             self._logger.info(f"Plus mode is running as {self.me.username}")
 
         self._set_file_handler("plus_mode")
-        with self._client:
-            self._client.loop.run_until_complete(prepare())
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command(setup=prepare)

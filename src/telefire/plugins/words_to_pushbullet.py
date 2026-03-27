@@ -23,5 +23,4 @@ class WordsToPushbullet(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('words_to_pushbullet')
         self._logger.info("Sending messages to Pushbullet for words:{}".format(words))
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

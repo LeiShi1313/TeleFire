@@ -16,6 +16,4 @@ class Action(Telegram, metaclass=PluginMount):
             print(msg)
 
     def __call__(self, chat, *ids):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._get_message_by_ids_async(chat, ids))
+        self._run_command(self._get_message_by_ids_async(chat, ids))

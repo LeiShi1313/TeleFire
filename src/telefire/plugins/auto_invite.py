@@ -79,9 +79,6 @@ class Action(Telegram, metaclass=PluginMount):
             self.me = await self._client.get_me()
             await self.store.connect()
 
-        with self._client:
-            self._client.loop.run_until_complete(setup())
         self._set_file_handler("auto_invite")
         self._logger.info("Auto invite start")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command(setup=setup)

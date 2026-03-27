@@ -15,6 +15,4 @@ class ListMessages(Telegram, metaclass=PluginMount):
 
     def __call__(self, chat):
         self._set_file_handler(f'list_deleted_user_messages_for_[{chat}]')
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._list_messages_async(chat))
+        self._run_command(self._list_messages_async(chat))

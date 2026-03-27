@@ -36,5 +36,4 @@ class Action(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("auto_reaction")
         self._logger.info(f"Auto reaction for chat: {chat}")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

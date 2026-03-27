@@ -40,6 +40,6 @@ class ListMessages(Telegram, metaclass=PluginMount):
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
 
     def __call__(self, chat, user=None, output='log', print_stat=False, cut=False, before=None, after=None):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._list_messages_async(chat, user, output, print_stat, jieba, before, after))
+        self._run_command(
+            self._list_messages_async(chat, user, output, print_stat, cut, before, after)
+        )

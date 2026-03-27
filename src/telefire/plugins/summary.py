@@ -18,6 +18,4 @@ class summary(Telegram, metaclass=PluginMount):
 
 
     def __call__(self, db=None, chat=None, limit=30):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._summary_messages_async(db, chat, limit))
+        self._run_command(self._summary_messages_async(db, chat, limit))

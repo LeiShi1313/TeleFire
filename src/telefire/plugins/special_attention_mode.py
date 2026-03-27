@@ -21,5 +21,4 @@ class SpecialAttentionMode(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('special_attention_mode')
         self._logger.info("Sending messages to IFTTT for people:{}".format(people))
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

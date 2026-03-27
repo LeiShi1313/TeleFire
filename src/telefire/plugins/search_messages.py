@@ -50,6 +50,6 @@ class SearchMessages(Telegram, metaclass=PluginMount):
                 self._log_message(msg, peer, sender)
 
     def __call__(self, chat, query, slow=False, limit=100, user=None, output='log', before=None, after=None):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._search_messages_async(chat, query, slow, limit, user, output, before, after))
+        self._run_command(
+            self._search_messages_async(chat, query, slow, limit, user, output, before, after)
+        )

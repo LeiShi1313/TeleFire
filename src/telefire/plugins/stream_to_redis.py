@@ -66,7 +66,4 @@ class ChatToRedis(Telegram, metaclass=PluginMount):
         async def setup():
             await self.store.connect()
 
-        with self._client:
-            self._client.loop.run_until_complete(setup())
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command(setup=setup)

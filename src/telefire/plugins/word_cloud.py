@@ -51,6 +51,4 @@ class Action(Telegram, metaclass=PluginMount):
             
 
     def __call__(self, chat: str, user=None, start=None, end=None):
-        with self._client:
-            self._client.loop.run_until_complete(
-                self._generate_word_cloud_async(chat, user, start, end))
+        self._run_command(self._generate_word_cloud_async(chat, user, start, end))

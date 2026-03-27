@@ -6,7 +6,7 @@ authors = [{ name = "Lei Shi", email = "me@leishi.io" }]
 requires-python = ">=3.14"
 license = { text = "MIT" }
 dependencies = [
-    "telethon>=1.40.0",
+    "telethon>=1.42.0",
     "fire>=0.5.0",
     "aiohttp>=3.9.0",
     "aiosqlite>=0.20.0",

@@ -19,5 +19,4 @@ class WordsNotify(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('words_notify')
         self._logger.info("Sending messages to chats {} for words:{}".format(chats, words))
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command()

@@ -124,10 +124,6 @@ class Action(Telegram, metaclass=PluginMount):
             except FileNotFoundError:
                 pass
 
-        with self._client:
-            self._client.loop.run_until_complete(setup())
-
         self._set_file_handler("word_cloud_inchat")
         self._logger.info("Wordcloud inchat mode start")
-        self._client.start()
-        self._client.run_until_disconnected()
+        self._run_forever_command(setup=setup)

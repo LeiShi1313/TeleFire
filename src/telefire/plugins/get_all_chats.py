@@ -10,6 +10,4 @@ class GetAllChats(Telegram, metaclass=PluginMount):
             async for dialog in self._client.iter_dialogs():
                 self._logger.info('{:>14}: {}'.format(dialog.id, dialog.title))
 
-        with self._client:
-            self._client.loop.run_until_complete(_get_all_chats(self))
-
+        self._run_command(lambda: _get_all_chats(self))

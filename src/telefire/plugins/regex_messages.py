@@ -11,16 +11,16 @@ from telefire.storage import Storage
 
 
 class Action(TelegramCommand, metaclass=PluginMount):
-    command_name = 'regex_messages'
+    command_name = "regex_messages"
 
     def _not_code(self, code):
         return all('a' <= c <= 'z' for c in code) or all('A' <= c <= 'Z' for c in code) or all('0' <= c <= '9' for c in code)
 
     async def _search_messages_by_regrex_async(self, chat, regex, db):
         async with Storage(db) as store:
-            _chat = await self._client.get_entity(chat)
+            _chat = await self.client.get_entity(chat)
             regex = re.compile(r'^([a-zA-Z0-9]{4})$|邀请码.*([a-zA-Z0-9]{4})|code=([a-zA-Z0-9]{4})')
-            async for msg in self._client.iter_messages(_chat):
+            async for msg in self.client.iter_messages(_chat):
                 try:
                     m = regex.match(msg.text)
                     if m:
@@ -32,4 +32,4 @@ class Action(TelegramCommand, metaclass=PluginMount):
                     traceback.print_exc()
 
     def __call__(self, chat, regex, db=None):
-        self.run_telegram(self._search_messages_by_regrex_async(chat, regex, db))
+        self.run_once(lambda: self._search_messages_by_regrex_async(chat, regex, db))

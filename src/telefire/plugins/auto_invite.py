@@ -34,7 +34,7 @@ class Action(TelegramCommand, metaclass=PluginMount):
         if not msg.is_reply and msg.text and any([val in msg.text.lower() async for val in self.store.isscan(f'{self.prefix}words')]):
             if (to_chat.username and await self.store.sismember(f'{self.prefix}chats', to_chat.username)) \
               or (to_chat.id and await self.store.sismember(f'{self.prefix}chats', to_chat.id)):
-                self._log_message(msg, to_chat, sender)
+                self.helpers.messages.log(msg, to_chat, sender)
                 return True
         return False
 
@@ -46,40 +46,41 @@ class Action(TelegramCommand, metaclass=PluginMount):
         if prefix is not None:
             self.prefix = prefix
         regex = re.compile(r'^([a-zA-Z0-9]{4})$|^.*邀请码.*([a-zA-Z0-9]{4}).*$|^.*code=([a-zA-Z0-9]{4}).*$', re.MULTILINE)
-        @self._client.on(events.NewMessage)
-        async def _inner(evt):
-            msg = evt.message
-            try:
-                to_chat = await evt.get_chat()
-                if not await self.is_in_chat(to_chat):
-                    return
-
-                sender = await evt.get_sender()
-                m = regex.match(msg.text)
-                if msg.text and m:
-                    for code in m.groups():
-                        if code and not await self.not_code(code):
-                            self._log_message(msg, to_chat, sender)
-                            self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) sent a code: {code}')
-                            await self.incr_attempts(sender)
-                            await self.store.hincrby('auto_invite_codes', code)
-                    return
-                if await self.is_asking_code(msg, to_chat, sender):
-                    attempts = await self.incr_attempts(sender)
-                    if attempts == 1 or sender.id == self.me.id:
-                        one_reply = await self.get_one_reply('replies')
-                        await msg.reply(one_reply)
-                    else:
-                        self._logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in {to_chat.username} sent {msg.text}, attempts: {attempts}')
-            except Exception as e:
-                traceback.print_exc()
 
         self.store = Storage(db)
 
         async def setup():
-            self.me = await self._client.get_me()
+            self.me = await self.client.get_me()
             await self.store.connect()
 
-        self._set_file_handler("auto_invite")
-        self._logger.info("Auto invite start")
-        self.run_telegram_forever(setup=setup)
+            @self.client.on(events.NewMessage)
+            async def _inner(evt):
+                msg = evt.message
+                try:
+                    to_chat = await evt.get_chat()
+                    if not await self.is_in_chat(to_chat):
+                        return
+
+                    sender = await evt.get_sender()
+                    m = regex.match(msg.text)
+                    if msg.text and m:
+                        for code in m.groups():
+                            if code and not await self.not_code(code):
+                                self.helpers.messages.log(msg, to_chat, sender)
+                                self.logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) sent a code: {code}')
+                                await self.incr_attempts(sender)
+                                await self.store.hincrby('auto_invite_codes', code)
+                        return
+                    if await self.is_asking_code(msg, to_chat, sender):
+                        attempts = await self.incr_attempts(sender)
+                        if attempts == 1 or sender.id == self.me.id:
+                            one_reply = await self.get_one_reply('replies')
+                            await msg.reply(one_reply)
+                        else:
+                            self.logger.info(f'{telethon_utils.get_display_name(sender)}({sender.id}) in {to_chat.username} sent {msg.text}, attempts: {attempts}')
+                except Exception:
+                    traceback.print_exc()
+
+        self.set_file_handler("auto_invite")
+        self.logger.info("Auto invite start")
+        self.run_forever(setup=setup)

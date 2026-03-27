@@ -61,7 +61,7 @@ class Action(MatrixCommand, metaclass=PluginMount):
     async def delayed_response(self, room_id, last_chengyu_text):
         try:
             wait_time = random.uniform(*self.wait_time_range)
-            self._logger.info(
+            self.logger.info(
                 f"Waiting for {wait_time:.2f} seconds before responding in room {room_id}"
             )
             await asyncio.sleep(wait_time)
@@ -75,11 +75,11 @@ class Action(MatrixCommand, metaclass=PluginMount):
             last_char = last_chengyu_text[-1]
             next_chengyu = self.find_next_chengyu(last_char, room_id)
 
-            self._logger.info(
+            self.logger.info(
                 f"Last chengyu: {last_chengyu_text}, last character: {last_char}, next chengyu: {next_chengyu}"
             )
             if next_chengyu:
-                await self.matrix.client.send_message(
+                await self.client.send_message(
                     room_id=room_id,
                     content=TextMessageEventContent(
                         msgtype=MessageType.TEXT, body=next_chengyu
@@ -94,7 +94,7 @@ class Action(MatrixCommand, metaclass=PluginMount):
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self._logger.error(f"Error in delayed_response: {e}")
+            self.logger.error(f"Error in delayed_response: {e}")
             traceback.print_exc()
         finally:
             current_task = asyncio.current_task()
@@ -103,12 +103,12 @@ class Action(MatrixCommand, metaclass=PluginMount):
 
     def __call__(self, chat, wait_start: int = 600, wait_end: int = 3600, dry_run: bool = False):
         def setup():
-            @self.matrix.client.on(EventType.ROOM_MESSAGE)
+            @self.client.on(EventType.ROOM_MESSAGE)
             async def _inner(event: MessageEvent):
                 try:
                     if event.room_id != chat:
                         return
-                    if event.sender == self.matrix.user_id:
+                    if event.sender == self.service.user_id:
                         return
                     if (
                         not hasattr(event.content, "body")
@@ -120,8 +120,8 @@ class Action(MatrixCommand, metaclass=PluginMount):
 
                     body = event.content.body.strip()
                     if self.is_chengyu(body):
-                        self._logger.info(
-                            f"Received chengyu: {body} in room {await self.rooms.get_display_name(chat)}"
+                        self.logger.info(
+                            f"Received chengyu: {body} in room {await self.helpers.rooms.display_name(chat)}"
                         )
 
                         if event.room_id in self.waiting_tasks:
@@ -139,16 +139,16 @@ class Action(MatrixCommand, metaclass=PluginMount):
                             del self.waiting_tasks[event.room_id]
 
                 except Exception as e:
-                    self._logger.error(f"Error in event handler: {e}")
+                    self.logger.error(f"Error in event handler: {e}")
                     traceback.print_exc()
                     return
 
         self.wait_time_range = (wait_start, wait_end)
         self.chengyu = load_chengyu_dict()
-        self._logger.info(
+        self.logger.info(
             f"Loaded {len(set(chain.from_iterable(self.chengyu.values())))} chengyu from dictionary."
         )
-        self.run_matrix_forever(
+        self.run_forever(
             setup=setup,
             filter_data=Filter(room=RoomFilter(rooms=[chat])),
         )

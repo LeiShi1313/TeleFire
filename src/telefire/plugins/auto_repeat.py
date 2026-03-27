@@ -16,16 +16,17 @@ class Action(TelegramCommand, metaclass=PluginMount):
     def __call__(self, chat):
         self.pre = None
 
-        @self._client.on(events.NewMessage(chats=[chat]))
-        async def _inner(evt):
-            msg = evt.message
-            try:
-                if self.pre is not None and msg.text == self.pre.text and msg.from_id != self.pre.from_id:
-                    await self._client.send_message(msg.to_id, f"{msg.text}")
-                self.pre = msg
-            except Exception as e:
-                traceback.print_exc()
-        
-        self._set_file_handler("auto_repeat")
-        self._logger.info(f"Auto reply repeat for chat: {chat}")
-        self.run_telegram_forever()
+        def setup():
+            @self.client.on(events.NewMessage(chats=[chat]))
+            async def _inner(evt):
+                msg = evt.message
+                try:
+                    if self.pre is not None and msg.text == self.pre.text and msg.from_id != self.pre.from_id:
+                        await self.client.send_message(msg.to_id, f"{msg.text}")
+                    self.pre = msg
+                except Exception:
+                    traceback.print_exc()
+
+        self.set_file_handler("auto_repeat")
+        self.logger.info(f"Auto reply repeat for chat: {chat}")
+        self.run_forever(setup=setup)

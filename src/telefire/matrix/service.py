@@ -14,9 +14,9 @@ class MatrixService:
         self.config = config
         self.logger = build_logger(__name__, log_level=log_level)
         self._client: Client | None = None
-        self._session_store = MatrixSessionStore(config.session_path)
-        self._sync_store = FileSyncStore(config.sync_store_path)
-        self._state_store = FileStateStore(config.state_store_path)
+        self.session_store = MatrixSessionStore(config.session_path)
+        self.sync_store = FileSyncStore(config.sync_store_path)
+        self.state_store = FileStateStore(config.state_store_path)
         self._stores_open = False
         self._whoami_user_id = config.user_id
 
@@ -48,12 +48,12 @@ class MatrixService:
                 await self._validate_client(client)
             except MatrixInvalidToken:
                 self.logger.info("Matrix session token is invalid, bootstrapping a new session.")
-                self._session_store.clear()
+                self.session_store.clear()
             except MatrixConnectionError:
                 raise
             except MatrixError as exc:
                 self.logger.debug(f"Stored Matrix session validation failed: {exc}")
-                self._session_store.clear()
+                self.session_store.clear()
             else:
                 self._client = client
                 self._persist_session()
@@ -95,8 +95,8 @@ class MatrixService:
             if not client.api.session.closed:
                 await client.api.session.close()
 
-        await self._state_store.flush()
-        await self._sync_store.flush()
+        await self.state_store.flush()
+        await self.sync_store.flush()
         self._client = None
 
     async def start_sync(self, filter_data: FilterID | Filter | None = None) -> None:
@@ -112,8 +112,8 @@ class MatrixService:
             mxid=self.config.user_id,
             device_id=device_id or "",
             api=api,
-            sync_store=self._sync_store,
-            state_store=self._state_store,
+            sync_store=self.sync_store,
+            state_store=self.state_store,
         )
 
     async def _open_stores(self) -> None:
@@ -121,8 +121,8 @@ class MatrixService:
             return
 
         self.config.store_dir.mkdir(parents=True, exist_ok=True)
-        await self._state_store.open()
-        await self._sync_store.open()
+        await self.state_store.open()
+        await self.sync_store.open()
         self._stores_open = True
 
     def _load_env_session(self) -> MatrixSession | None:
@@ -136,7 +136,7 @@ class MatrixService:
         )
 
     def _load_stored_session(self) -> MatrixSession | None:
-        session = self._session_store.load()
+        session = self.session_store.load()
         if session is None:
             return None
         if session.base_url != self.config.base_url or session.user_id != self.config.user_id:
@@ -164,4 +164,4 @@ class MatrixService:
         )
         if not persisted.device_id or not persisted.access_token:
             raise RuntimeError("Matrix session is missing device_id or access_token")
-        self._session_store.save(persisted)
+        self.session_store.save(persisted)

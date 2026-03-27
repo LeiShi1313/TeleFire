@@ -1,20 +1,17 @@
 from telefire.matrix.config import MatrixRuntimeConfig
-from telefire.matrix.helpers import MatrixRoomHelper
+from telefire.matrix.helpers import MatrixHelpers
 from telefire.matrix.service import MatrixService
 from telefire.runtime import ServiceCommand
 
 
 class MatrixCommand(ServiceCommand):
     def __init__(self, log_level: str = "info"):
-        self.matrix = MatrixService(MatrixRuntimeConfig.from_env(), log_level=log_level)
-        super().__init__(self.matrix, self.matrix.logger)
-        self.rooms = MatrixRoomHelper(self.matrix, self._logger)
+        service = MatrixService(MatrixRuntimeConfig.from_env(), log_level=log_level)
+        super().__init__(service, service.logger)
+        self.helpers = MatrixHelpers(self.service, self.logger)
 
-    def run_matrix(self, action):
-        return self.run_once(action)
-
-    def run_matrix_forever(self, setup=None, filter_data=None):
-        return self.run_forever(
+    def run_forever(self, setup=None, filter_data=None):
+        return super().run_forever(
             setup=setup,
-            runner=lambda: self.matrix.start_sync(filter_data=filter_data),
+            runner=lambda: self.service.start_sync(filter_data=filter_data),
         )

@@ -17,24 +17,25 @@ class Action(TelegramCommand, metaclass=PluginMount):
     def __call__(self, chat, user):
         self.pre = None
 
-        @self._client.on(events.NewMessage(chats=[chat], from_users=[user]))
-        async def _inner(evt):
-            msg = evt.message
-            try:
-                # if self.pre is not None and msg.text == self.pre.text and msg.from_id != self.pre.from_id:
-                #     await self._client.send_message(msg.to_id, f"{msg.text}")
-                # self.pre = msg
-                await self._client(
-                    functions.messages.SendReactionRequest(
-                        peer=msg.peer_id,
-                        msg_id=msg.id,
-                        reaction=[types.ReactionEmoji(emoticon="🤡")],
-                        add_to_recent=True,
+        def setup():
+            @self.client.on(events.NewMessage(chats=[chat], from_users=[user]))
+            async def _inner(evt):
+                msg = evt.message
+                try:
+                    # if self.pre is not None and msg.text == self.pre.text and msg.from_id != self.pre.from_id:
+                    #     await self.client.send_message(msg.to_id, f"{msg.text}")
+                    # self.pre = msg
+                    await self.client(
+                        functions.messages.SendReactionRequest(
+                            peer=msg.peer_id,
+                            msg_id=msg.id,
+                            reaction=[types.ReactionEmoji(emoticon="🤡")],
+                            add_to_recent=True,
+                        )
                     )
-                )
-            except Exception as e:
-                traceback.print_exc()
+                except Exception:
+                    traceback.print_exc()
 
-        self._set_file_handler("auto_reaction")
-        self._logger.info(f"Auto reaction for chat: {chat}")
-        self.run_telegram_forever()
+        self.set_file_handler("auto_reaction")
+        self.logger.info(f"Auto reaction for chat: {chat}")
+        self.run_forever(setup=setup)

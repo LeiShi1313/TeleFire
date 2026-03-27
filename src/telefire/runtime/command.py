@@ -5,7 +5,11 @@ import inspect
 class ServiceCommand:
     def __init__(self, service, logger):
         self.service = service
-        self._logger = logger
+        self.logger = logger
+
+    @property
+    def client(self):
+        return self.service.client
 
     async def _invoke_async(self, action):
         result = action() if callable(action) else action

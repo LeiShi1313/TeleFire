@@ -18,7 +18,7 @@ class Action(TelegramCommand, metaclass=PluginMount):
         async def burst_send(chat, msg, times, interval):
             try:
                 while times:
-                    await self._client.send_message(chat, msg)
+                    await self.client.send_message(chat, msg)
                     if times > 0:
                         times -= 1
                     if interval > 0:
@@ -27,6 +27,6 @@ class Action(TelegramCommand, metaclass=PluginMount):
                 traceback.print_exc()
         
         
-        self._set_file_handler("auto_reply")
-        self._logger.info(f"Burst send started for chat: {chat}, msg: {msg}, times: {times}, interval: {interval}")
-        self.run_telegram(burst_send(chat, msg, times, interval))
+        self.set_file_handler("auto_reply")
+        self.logger.info(f"Burst send started for chat: {chat}, msg: {msg}, times: {times}, interval: {interval}")
+        self.run_once(lambda: burst_send(chat, msg, times, interval))

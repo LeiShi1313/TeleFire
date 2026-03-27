@@ -20,15 +20,15 @@ class Action(TelegramCommand, metaclass=PluginMount):
             print(e)
             return
         
-        chat = await self._get_entity(chat)
+        chat = await self.helpers.entities.get(chat)
         if user is not None:
-            user = await self._get_entity(user)
+            user = await self.helpers.entities.get(user)
         if start is not None:
             start = parser.parse(start).replace(tzinfo=timezone.utc)
         if end is not None:
             end = parser.parse(end)
         words = []
-        async for msg in self._client.iter_messages(chat, from_user=user, offset_date=end):
+        async for msg in self.client.iter_messages(chat, from_user=user, offset_date=end):
             if start and msg.date < start:
                 break
             if msg.text:
@@ -40,7 +40,7 @@ class Action(TelegramCommand, metaclass=PluginMount):
         image = WordCloud(font_path="simsun.ttf", width=800, height=400).generate(' '.join(words)).to_image()
         stream = BytesIO()
         image.save(stream, 'PNG')
-        await self._client.send_message(
+        await self.client.send_message(
                 'gua_mei_debug',
                 '{}{}{}'.format(
                     f'{chat.title}',
@@ -52,4 +52,4 @@ class Action(TelegramCommand, metaclass=PluginMount):
             
 
     def __call__(self, chat: str, user=None, start=None, end=None):
-        self.run_telegram(self._generate_word_cloud_async(chat, user, start, end))
+        self.run_once(lambda: self._generate_word_cloud_async(chat, user, start, end))

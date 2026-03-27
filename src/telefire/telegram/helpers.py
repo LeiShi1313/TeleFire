@@ -1,11 +1,7 @@
-import logging
 import re
 from collections import Counter
-from datetime import datetime
 from math import floor
-from pathlib import Path
 
-import aiohttp
 from telethon import TelegramClient, utils
 from telethon.hints import EntitiesLike
 from telethon.tl.types import Channel, Message, User
@@ -13,43 +9,60 @@ from telethon.tl.types import Channel, Message, User
 from telefire.utils import get_url
 
 
-class TelegramLogHelper:
-    def __init__(self, logger):
-        self.logger = logger
-        self._formatter = logging.Formatter("%(message)s")
+class TelegramEntitiesHelper:
+    def __init__(self, client: TelegramClient):
+        self.client = client
 
-    def set_file_handler(self, method, channel=None, user=None, query=None):
-        path = Path("logs").joinpath(method)
-        if channel:
-            path = path.joinpath(channel.title)
-        if user:
-            path = path.joinpath(utils.get_display_name(user))
-        path.mkdir(parents=True, exist_ok=True)
-        path = path.joinpath(
-            f'{datetime.utcnow().strftime("%Y-%m-%d")}_[query={query if query else None}].log'
+    async def get(self, entity_like):
+        try:
+            return await self.client.get_entity(int(entity_like))
+        except Exception:
+            return await self.client.get_entity(entity_like)
+
+    def same(self, entity: EntitiesLike, other):
+        return (
+            str(entity.id) == str(other)
+            or str(entity.username) == str(other)
+            or f"-100{entity.id}" == str(other)
+            or utils.get_display_name(entity) == str(other)
         )
-        file_handler = logging.FileHandler(path.absolute())
-        file_handler.setFormatter(self._formatter)
-        self.logger.addHandler(file_handler)
 
-    def log_message(self, msg: Message, channel: Channel, user: User):
-        self.logger.info("{}: {}".format(utils.get_display_name(user), msg.text))
+    def parse(self, msg, key, regex):
+        match = re.search(rf"{re.escape(key)}=({regex})", msg)
+        if match is not None:
+            return match.groups()[0]
+        return None
+
+    def clean(self, msg, key):
+        return re.sub(rf"{re.escape(key)}=([0-9a-zA-Z_\-]+)", "", msg)
+
+    async def parse_from_text(self, msg: str, entity_name: str):
+        value = self.parse(msg, entity_name, r"[0-9a-zA-Z_\-]+")
+        if value is not None:
+            return await self.get(value)
+        return None
 
 
-class TelegramInteractionHelper:
-    def __init__(self, client: TelegramClient, logger, log_helper: TelegramLogHelper):
+class TelegramMessagesHelper:
+    def __init__(self, client: TelegramClient, logger, entities: TelegramEntitiesHelper):
         self.client = client
         self.logger = logger
-        self.log_helper = log_helper
+        self.entities = entities
 
-    async def send_to_ifttt_async(self, event, key, header, body, url):
-        payload = {"value1": header, "value2": body, "value3": url}
-        endpoint = f"https://maker.ifttt.com/trigger/{event}/with/key/{key}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, data=payload) as resp:
-                self.logger.info(f"[{url}] {header}{body}\nIFTTT status: {resp.status}")
+    def log(self, msg: Message, channel: Channel, user: User):
+        self.logger.info("{}: {}".format(utils.get_display_name(user), msg.text))
 
-    async def iter_messages_async(
+    async def sender_name(self, msg: Message):
+        sender = await msg.get_sender()
+        if sender is None:
+            if msg.post_author:
+                return msg.post_author
+            if msg.peer_id:
+                return utils.get_display_name(msg.peer_id)
+            return "Unknown"
+        return utils.get_display_name(sender)
+
+    async def iter(
         self,
         chat,
         user,
@@ -88,7 +101,7 @@ class TelegramInteractionHelper:
                             continue
                         else:
                             sender = await self.client.get_entity(msg.from_id)
-                    self.log_helper.log_message(msg, chat, sender)
+                    self.log(msg, chat, sender)
                 if print_stat:
                     counter[msg.date.hour] += 1
 
@@ -97,41 +110,8 @@ class TelegramInteractionHelper:
             for hour in range(24):
                 print("{}: {}".format(hour, floor(counter[hour] / total * 100) * "="))
 
-    async def get_entity(self, entity_like):
-        try:
-            return await self.client.get_entity(int(entity_like))
-        except Exception:
-            return await self.client.get_entity(entity_like)
 
-    def is_same_entity(self, entity: EntitiesLike, other):
-        return (
-            str(entity.id) == str(other)
-            or str(entity.username) == str(other)
-            or f"-100{entity.id}" == str(other)
-            or utils.get_display_name(entity) == str(other)
-        )
-
-    async def get_sender(self, msg: Message):
-        sender = await msg.get_sender()
-        if sender is None:
-            if msg.post_author:
-                return msg.post_author
-            if msg.peer_id:
-                return utils.get_display_name(msg.peer_id)
-            return "Unknown"
-        return utils.get_display_name(sender)
-
-    def parse_msg(self, msg, key, regex):
-        match = re.search(rf"{re.escape(key)}=({regex})", msg)
-        if match is not None:
-            return match.groups()[0]
-        return None
-
-    def clean_entity(self, msg, key):
-        return re.sub(rf"{re.escape(key)}=([0-9a-zA-Z_\-]+)", "", msg)
-
-    async def parse_entity(self, msg: str, entity_name: str):
-        value = self.parse_msg(msg, entity_name, r"[0-9a-zA-Z_\-]+")
-        if value is not None:
-            return await self.get_entity(value)
-        return None
+class TelegramHelpers:
+    def __init__(self, client: TelegramClient, logger):
+        self.entities = TelegramEntitiesHelper(client)
+        self.messages = TelegramMessagesHelper(client, logger, self.entities)

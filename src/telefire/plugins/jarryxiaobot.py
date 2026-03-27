@@ -10,20 +10,21 @@ from telefire.telegram import TelegramCommand
 
 
 class Action(TelegramCommand, metaclass=PluginMount):
-    command_name = 'jarryxiaobot'
+    command_name = "jarryxiaobot"
 
     def __call__(self):
-        @self._client.on(events.InlineQuery)
-        async def _inner(event: events.InlineQuery.Event):
-            print(event)
-            builder = event.builder
+        def setup():
+            @self.client.on(events.InlineQuery)
+            async def _inner(event: events.InlineQuery.Event):
+                print(event)
+                builder = event.builder
 
-            await event.answer([
-                builder.article('Google search', text=event.text, buttons=[
-                    [Button.url(f'Google {event.text}', f'https://www.google.com/search?q={event.text}')]
+                await event.answer([
+                    builder.article('Google search', text=event.text, buttons=[
+                        [Button.url(f'Google {event.text}', f'https://www.google.com/search?q={event.text}')]
+                    ])
                 ])
-            ])
 
-        self._set_file_handler("jarryxiaobot")
-        self._logger.info("jarryxiaobot start")
-        self.run_telegram_forever()
+        self.set_file_handler("jarryxiaobot")
+        self.logger.info("jarryxiaobot start")
+        self.run_forever(setup=setup)

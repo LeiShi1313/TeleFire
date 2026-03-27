@@ -106,22 +106,22 @@ class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "yvlu"
 
     async def _yvlu_async(self, chat, user, msg):
-        chat = await self._get_entity(chat)
-        user = await self._get_entity(user)
+        chat = await self.helpers.entities.get(chat)
+        user = await self.helpers.entities.get(user)
 
         name = user.first_name
         if user.last_name:
             name += f' {user.last_name}'
 
         if not exists(f'plugins/yvlu/{user.id}.jpg'):
-            await self._client.download_profile_photo(user, f'plugins/yvlu/{user.id}.jpg')
+            await self.client.download_profile_photo(user, f'plugins/yvlu/{user.id}.jpg')
 
         file = await yv_lu_process_image(name, msg, f'{user.id}.jpg', "plugins/yvlu/")
-        await self._client.send_file(
+        await self.client.send_file(
             chat,
             file,
             force_document=False,
         )
 
     def __call__(self, chat, user, msg):
-        self.run_telegram(self._yvlu_async(chat, user, msg))
+        self.run_once(lambda: self._yvlu_async(chat, user, msg))

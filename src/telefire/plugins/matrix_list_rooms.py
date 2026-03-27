@@ -7,9 +7,9 @@ class Action(MatrixCommand, metaclass=PluginMount):
 
     def __call__(self):
         async def _inner():
-            rooms = await self.matrix.client.get_joined_rooms()
+            rooms = await self.client.get_joined_rooms()
             for room in rooms:
-                name = await self.rooms.get_display_name(room)
-                self._logger.info(f"{room}: {name}")
+                name = await self.helpers.rooms.display_name(room)
+                self.logger.info(f"{room}: {name}")
 
-        self.run_matrix(_inner)
+        self.run_once(_inner)

@@ -8,10 +8,10 @@ class Action(MatrixCommand, metaclass=PluginMount):
 
     def __call__(self):
         def setup():
-            @self.matrix.client.on(EventType.ROOM_MESSAGE)
+            @self.client.on(EventType.ROOM_MESSAGE)
             async def _inner(event: MessageEvent):
-                if event.sender != self.matrix.user_id:
+                if event.sender != self.service.user_id:
                     return
-                self._logger.info(str(event))
+                self.logger.info(str(event))
 
-        self.run_matrix_forever(setup=setup)
+        self.run_forever(setup=setup)

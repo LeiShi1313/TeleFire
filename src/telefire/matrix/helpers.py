@@ -2,13 +2,13 @@ from mautrix.errors import MatrixError
 from mautrix.types import EventType, RoomID
 
 
-class MatrixRoomHelper:
+class MatrixRoomsHelper:
     def __init__(self, service, logger):
         self.service = service
         self.logger = logger
         self._room_name_cache = {}
 
-    async def get_display_name(self, room_id: RoomID) -> str:
+    async def display_name(self, room_id: RoomID) -> str:
         room_key = str(room_id)
         cached = self._room_name_cache.get(room_key)
         if cached:
@@ -40,3 +40,8 @@ class MatrixRoomHelper:
             self.logger.debug(f"Error getting room canonical alias for {room_id}: {exc}")
 
         return room_key
+
+
+class MatrixHelpers:
+    def __init__(self, service, logger):
+        self.rooms = MatrixRoomsHelper(service, logger)

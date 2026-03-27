@@ -16,18 +16,18 @@ class MatrixCleanup(MatrixCommand, metaclass=PluginMount):
             confirm: Set to True to actually leave rooms. Default is dry-run.
         """
 
-        async def _cleanup(matrix):
+        async def _cleanup():
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            rooms = await matrix.client.get_joined_rooms()
-            matrix.logger.info(f"Checking {len(rooms)} rooms for inactivity (>{days} days)...\n")
+            rooms = await self.matrix.client.get_joined_rooms()
+            self._logger.info(f"Checking {len(rooms)} rooms for inactivity (>{days} days)...\n")
 
             stale = []
             errors = []
 
             for i, room_id in enumerate(rooms):
-                name = await matrix.get_room_display_name(room_id)
+                name = await self.rooms.get_display_name(room_id)
                 try:
-                    msgs = await matrix.client.get_messages(
+                    msgs = await self.matrix.client.get_messages(
                         room_id=room_id,
                         direction=PaginationDirection.BACKWARD,
                         limit=1,
@@ -45,37 +45,37 @@ class MatrixCleanup(MatrixCommand, metaclass=PluginMount):
                     errors.append((room_id, name, str(e)))
 
                 if (i + 1) % 20 == 0:
-                    matrix.logger.info(f"  checked {i + 1}/{len(rooms)}...")
+                    self._logger.info(f"  checked {i + 1}/{len(rooms)}...")
 
-            matrix.logger.info(f"\n{'=' * 60}")
-            matrix.logger.info(f"Stale rooms (no messages in {days}+ days): {len(stale)}")
-            matrix.logger.info(f"Errors (could not check): {len(errors)}")
-            matrix.logger.info(f"{'=' * 60}\n")
+            self._logger.info(f"\n{'=' * 60}")
+            self._logger.info(f"Stale rooms (no messages in {days}+ days): {len(stale)}")
+            self._logger.info(f"Errors (could not check): {len(errors)}")
+            self._logger.info(f"{'=' * 60}\n")
 
             for room_id, name, days_ago in sorted(stale, key=lambda x: x[2], reverse=True):
                 age = f"{days_ago} days ago" if days_ago >= 0 else "no messages"
-                matrix.logger.info(f"  {'[LEAVE]' if confirm else '[DRY-RUN]'} {name} ({room_id}) — last activity: {age}")
+                self._logger.info(f"  {'[LEAVE]' if confirm else '[DRY-RUN]'} {name} ({room_id}) — last activity: {age}")
 
             if errors:
-                matrix.logger.info(f"\nCould not check ({len(errors)} rooms):")
+                self._logger.info(f"\nCould not check ({len(errors)} rooms):")
                 for room_id, name, err in errors:
-                    matrix.logger.info(f"  [SKIP] {name} ({room_id}) — {err}")
+                    self._logger.info(f"  [SKIP] {name} ({room_id}) — {err}")
 
             if not confirm:
-                matrix.logger.info(f"\nDry-run complete. To actually leave these {len(stale)} rooms, run:")
-                matrix.logger.info(f"  uv run telefire matrix_cleanup --days={days} --confirm=True")
+                self._logger.info(f"\nDry-run complete. To actually leave these {len(stale)} rooms, run:")
+                self._logger.info(f"  uv run telefire matrix_cleanup --days={days} --confirm=True")
                 return
 
-            matrix.logger.info(f"\nLeaving {len(stale)} rooms...")
+            self._logger.info(f"\nLeaving {len(stale)} rooms...")
             left = 0
             for room_id, name, days_ago in stale:
                 try:
-                    await matrix.client.leave_room(room_id)
-                    matrix.logger.info(f"  Left: {name}")
+                    await self.matrix.client.leave_room(room_id)
+                    self._logger.info(f"  Left: {name}")
                     left += 1
                 except Exception as e:
-                    matrix.logger.info(f"  Failed to leave {name}: {e}")
+                    self._logger.info(f"  Failed to leave {name}: {e}")
 
-            matrix.logger.info(f"\nDone. Left {left}/{len(stale)} rooms.")
+            self._logger.info(f"\nDone. Left {left}/{len(stale)} rooms.")
 
         self.run_matrix(_cleanup)

@@ -6,11 +6,10 @@ class Action(MatrixCommand, metaclass=PluginMount):
     command_name = "matrix_list_rooms"
 
     def __call__(self):
-
-        async def _inner(matrix):
-            rooms = await matrix.client.get_joined_rooms()
+        async def _inner():
+            rooms = await self.matrix.client.get_joined_rooms()
             for room in rooms:
-                name = await matrix.get_room_display_name(room)
-                matrix.logger.info(f"{room}: {name}")
+                name = await self.rooms.get_display_name(room)
+                self._logger.info(f"{room}: {name}")
 
         self.run_matrix(_inner)

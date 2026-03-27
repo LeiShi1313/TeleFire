@@ -1,12 +1,8 @@
-import asyncio
-import inspect
-from collections.abc import Awaitable, Callable
-
 from mautrix.api import HTTPAPI
 from mautrix.client import Client
 from mautrix.client.state_store import FileStateStore
 from mautrix.errors import MatrixConnectionError, MatrixError, MatrixInvalidToken
-from mautrix.types import EventType, Filter, FilterID, RoomID
+from mautrix.types import Filter, FilterID
 
 from telefire.matrix.config import MatrixRuntimeConfig
 from telefire.matrix.store import FileSyncStore, MatrixSession, MatrixSessionStore
@@ -23,7 +19,6 @@ class MatrixService:
         self._state_store = FileStateStore(config.state_store_path)
         self._stores_open = False
         self._whoami_user_id = config.user_id
-        self._room_name_cache: dict[str, str] = {}
 
     @property
     def client(self) -> Client:
@@ -104,62 +99,8 @@ class MatrixService:
         await self._sync_store.flush()
         self._client = None
 
-    async def run_once(
-        self, callback: Callable[["MatrixService"], Awaitable[object]]
-    ) -> object:
-        await self.connect()
-        try:
-            return await callback(self)
-        finally:
-            await self.close()
-
-    async def sync_forever(
-        self,
-        setup: Callable[["MatrixService"], object] | None = None,
-        filter_data: FilterID | Filter | None = None,
-    ) -> None:
-        await self.connect()
-        try:
-            if setup is not None:
-                result = setup(self)
-                if inspect.isawaitable(result):
-                    await result
-            await self.client.start(filter_data=filter_data)
-        finally:
-            await self.close()
-
-    async def get_room_display_name(self, room_id: RoomID) -> str:
-        room_key = str(room_id)
-        cached = self._room_name_cache.get(room_key)
-        if cached:
-            return cached
-
-        try:
-            state = await self.client.get_state_event(
-                room_id=room_id,
-                event_type=EventType.ROOM_NAME,
-            )
-            name = getattr(state, "name", None)
-            if name:
-                self._room_name_cache[room_key] = name
-                return name
-        except MatrixError as exc:
-            self.logger.debug(f"Error getting room name for {room_id}: {exc}")
-
-        try:
-            state = await self.client.get_state_event(
-                room_id=room_id,
-                event_type=EventType.ROOM_CANONICAL_ALIAS,
-            )
-            alias = getattr(state, "canonical_alias", None)
-            if alias:
-                alias_name = str(alias)
-                self._room_name_cache[room_key] = alias_name
-                return alias_name
-        except MatrixError as exc:
-            self.logger.debug(f"Error getting room canonical alias for {room_id}: {exc}")
-
-        return room_key
+    async def start_sync(self, filter_data: FilterID | Filter | None = None) -> None:
+        await self.client.start(filter_data=filter_data)
 
     def _build_client(
         self,
@@ -224,21 +165,3 @@ class MatrixService:
         if not persisted.device_id or not persisted.access_token:
             raise RuntimeError("Matrix session is missing device_id or access_token")
         self._session_store.save(persisted)
-
-
-class MatrixCommand:
-    def __init__(self, log_level: str = "info"):
-        self.matrix = MatrixService(MatrixRuntimeConfig.from_env(), log_level=log_level)
-        self._logger = self.matrix.logger
-
-    def run_matrix(
-        self, callback: Callable[[MatrixService], Awaitable[object]]
-    ) -> object:
-        return asyncio.run(self.matrix.run_once(callback))
-
-    def run_matrix_forever(
-        self,
-        setup: Callable[[MatrixService], object] | None = None,
-        filter_data: FilterID | Filter | None = None,
-    ) -> None:
-        asyncio.run(self.matrix.sync_forever(setup=setup, filter_data=filter_data))

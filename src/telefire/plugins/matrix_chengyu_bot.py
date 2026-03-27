@@ -102,14 +102,13 @@ class Action(MatrixCommand, metaclass=PluginMount):
                 del self.waiting_tasks[room_id]
 
     def __call__(self, chat, wait_start: int = 600, wait_end: int = 3600, dry_run: bool = False):
-
-        def setup(matrix):
-            @matrix.client.on(EventType.ROOM_MESSAGE)
+        def setup():
+            @self.matrix.client.on(EventType.ROOM_MESSAGE)
             async def _inner(event: MessageEvent):
                 try:
                     if event.room_id != chat:
                         return
-                    if event.sender == matrix.user_id:
+                    if event.sender == self.matrix.user_id:
                         return
                     if (
                         not hasattr(event.content, "body")
@@ -122,7 +121,7 @@ class Action(MatrixCommand, metaclass=PluginMount):
                     body = event.content.body.strip()
                     if self.is_chengyu(body):
                         self._logger.info(
-                            f"Received chengyu: {body} in room {await matrix.get_room_display_name(chat)}"
+                            f"Received chengyu: {body} in room {await self.rooms.get_display_name(chat)}"
                         )
 
                         if event.room_id in self.waiting_tasks:

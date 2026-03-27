@@ -1,19 +1,17 @@
-import asyncio
-import inspect
-
+from telefire.runtime import ServiceCommand
 from telefire.telegram.config import TelegramRuntimeConfig
 from telefire.telegram.helpers import TelegramInteractionHelper, TelegramLogHelper
 from telefire.telegram.service import TelegramService
 
 
-class TelegramCommand:
+class TelegramCommand(ServiceCommand):
     def __init__(self, session: str = "test", log_level: str = "info"):
         self.telegram = TelegramService(
             TelegramRuntimeConfig.from_env(session=session),
             log_level=log_level,
         )
+        super().__init__(self.telegram, self.telegram.logger)
         self._client = self.telegram.client
-        self._logger = self.telegram.logger
         self.log_helper = TelegramLogHelper(self._logger)
         self.interactions = TelegramInteractionHelper(
             self._client,
@@ -81,23 +79,11 @@ class TelegramCommand:
     async def _parse_entity(self, msg: str, entity_name: str):
         return await self.interactions.parse_entity(msg, entity_name)
 
-    async def _invoke_async(self, action):
-        result = action() if callable(action) else action
-        if inspect.isawaitable(result):
-            return await result
-        return result
-
     def run_telegram(self, action):
-        return asyncio.run(
-            self.telegram.run_once(lambda _: self._invoke_async(action))
-        )
+        return self.run_once(action)
 
     def run_telegram_forever(self, setup=None):
-        async def _setup(_):
-            if setup is None:
-                return None
-            return await self._invoke_async(setup)
-
-        return asyncio.run(
-            self.telegram.run_forever(setup=_setup if setup else None)
+        return self.run_forever(
+            setup=setup,
+            runner=self.telegram.wait_until_disconnected,
         )

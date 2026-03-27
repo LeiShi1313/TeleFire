@@ -1,121 +1,151 @@
-<p align="center">
-    <h2 align="center">Telethon X Fire - TeleFire</h2>
-</p>
+# TeleFire
 
-<p align="center">A set of userful command line tools to interact with telegram.</p>
+TeleFire is a CLI for Telegram automation and Matrix automation.
 
-<p align="center">
-    <b><a href="#what-has-inside">What has inside</a></b>
-    |
-    <b><a href="#how">How</a></b>
-    |
-    <b><a href="#docker">Docker</a></b>
-</p>
+The current codebase is `uv`-first, Python 3.14+, and built around explicit runtime layers instead of protocol logic living directly in command classes.
 
+## Highlights
 
-## What is inside
+- Telegram runtime on Telethon
+- Matrix runtime on mautrix
+- shared command runner for one-shot and long-running commands
+- account-aware config in `~/.telefire/config.toml`
+- Telegram session storage in `~/.telefire/telegram/`
+- Matrix session, sync, and state storage in `~/.telefire/matrix/<account>/`
+- Fire command wrappers with real signatures, so required args can be positional
 
-- :flags:<a href="#get_all_chats">get_all_chats</a>: Fetches all the chat IDs and names.
-- :bookmark_tabs:<a href="#list_messages">list_messages</a>: List messages in a certain chat.
-- :mag:<a href="#search_messages">search_messages</a>: Search messages in a certain chat.
-- :skull:<a href="#delete_all">delete_all</a>: Delete all the messages that you have permission to delete in a certain chat.
-- :question:<a href="#plus_mode">plus_mode</a>: Delete certain messages after certain time.
-- :speech_balloon:<a href="#words_to_ifttt">words_to_ifttt</a>: Send an event to IFTTT when somebody said some words
-  you interested.
-- :heart_eyes:<a href="#other-commands">special_attention_mode</a>: Get notified when someone in special attention mode said something.
+## Install
+
+From the repo:
+
+```bash
+uv sync
+uv run telefire --help
+```
+
+## Setup
+
+Telegram requires a user API ID and API hash from https://my.telegram.org.
+
+Run the interactive setup:
+
+```bash
+uv run telefire init
+```
+
+That writes `~/.telefire/config.toml`.
+
+The first Telegram command will prompt for login if the selected session file does not exist yet.
+
+The first Matrix command can bootstrap from the configured password, then persist `access_token` and `device_id` into the account store and reuse that session on later runs.
+
+## Config
+
+Current config is account-based.
+
+```toml
+[telegram]
+api_id = 123456
+api_hash = "..."
+default_account = "default"
+store_dir = "/home/you/.telefire/telegram"
+
+[telegram_accounts.default]
+session_name = "telefire"
+
+[telegram_accounts.work]
+session_name = "work"
+
+[matrix_accounts.default]
+base_url = "https://matrix.example.com"
+user_id = "@you:example.com"
+device_name = "telefire"
+store_dir = "/home/you/.telefire/matrix/default"
+password = "..."
+
+[matrix_accounts.work]
+base_url = "https://matrix.work.example"
+user_id = "@you:work.example"
+device_name = "telefire"
+store_dir = "/home/you/.telefire/matrix/work"
+password = "..."
+```
+
+Notes:
+
+- Telegram uses `--account` to resolve a configured session alias.
+- Telegram also accepts `--session` as a low-level override.
+- Matrix uses `--account` to select both config and store directory.
+- Legacy single-account config is still read for the default account, but new config should use `telegram_accounts` and `matrix_accounts`.
+
+## Storage Layout
+
+Telegram:
+
+- `~/.telefire/telegram/telefire.session`
+- `~/.telefire/telegram/work.session`
+
+Matrix:
+
+- `~/.telefire/matrix/default/session.json`
+- `~/.telefire/matrix/default/sync_store.json`
+- `~/.telefire/matrix/default/state_store.bin`
+- `~/.telefire/matrix/work/session.json`
 
 ## Usage
 
-### Setup
+Inspect available commands:
 
-0. [Login to your Telegram account](https://my.telegram.org/auth) with the phone number of the account you wish to use.
-1. Click **API Development tools**.
-2. A `Create new application` window will appear if you didn't create one. Go head and create one.
-3. Once you finish creation, get the `api_id` and `api_hash`, you will use it later.
-
-
-### get_all_chats
-
-```shell
-uv run telefire get_all_chats
-
--100XXXXXXXXXX: CHANNEL_NAME0
-    XXXXXXXXXX: CHANNEL_NAME1
-```
-Those negative IDs start with `-100` are private groups, that's the only way you can access to these groups. For public groups, you can either use id, public url, username to access to it.
-
-
-### list_messages
-
-```shell
-uv run telefire list_messages --chat [CHAT_IDENTIFIER] [Optional: --user USER_IDENTIFIER]
-```
-For `CHAT_IDENTIFIER`, it can be a chat ID you got from <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
-
-For `USER_IDENTIFIER`, it can be the user's ID or username.
-
-
-### search_messages
-
-```shell
-uv run telefire search_messages --peer [PEER_IDENTIFIER] --query [QUERY_STRING]
-```
-This command comes with some optional parameters that you can custom:
-- `--slow`: Whether to use telegram's search API or iterate through whole message history to do the search. The later can be comprehensive if you are searching UTF-8 characters such as Chinese.
-- `--limit [INTEGER]`: Set the limit of search result, default `100`.
-- `--from_id [USER_IDENTIFIER]`: The id/username of the message sender.
-
-### delete_all
-
-```shell
-uv run telefire delete_all --chat [CHAT_IDENTIFIER] [Optional: --query QUERY_STRING]
-```
-For `CHAT_IDENTIFIER`, smiliar to `CHAT_IDENTIFIER` in <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
-
-You can also using the `--query` to specify only messages containing certain string will be deleted.
-
-### plus_mode
-
-```shell
-uv run telefire plus_mode
-```
-It's a command you have to keep it running in the backgroud to use it. It's my personal favorite command! It includes several functions that's interesting and useful:
-- `Auto delete mode`: Add `\[NUMBER][s|m|h|d] ` before the message you want to auto delete after certain time, for example, add `\10s `(notice the space), then this message will be deleted automately after 10 seconds. you can also specify  minutes(`m`), hours(`h`) and days(`d`) as the message experation time.
-- `Shiny mode`: just try it, add `\shiny ` to your original message!.
-- `Search mode`: \search [CHAT] [USERNAME] [Optional: QUERY]
-
-
-### words_to_ifttt
-
-```shell
-uv run telefire words_to_ifttt --event [IFTTT EVENT] --key [IFTTT WEBHOOK KEY] [WORDS YOU INTERESTED]
-```
-
-Like `auto_delete`, you need to keep this command running to make it work. For the `event` and `key`, you can get it from [here](https://ifttt.com/maker_webhooks). For `WORDS YOU INTERESTED`, it can be something like `telefire "telefire is so cool"`, then whenever anybody said **telefire** or **telefire is so cool**, an IFTTT event will be sent and you can create an applet to do whatever you like on IFTTT, such as sending notifications, turn on a light, etc.
-
-### Other commands
-
-For all the others commands I didn't methtion or simply too lazy to add docs for it:  
-```shell
+```bash
 uv run telefire --help
-```
-to get a list of all the available commands. And:
-```shell
 uv run telefire COMMAND --help
 ```
-to learn how to use it.
 
+Telegram examples:
 
-## Docker
-
-This project also come with a `Dockerfile` so that you don't need to setup any python environment, just run the following command:
-```shell
-docker build . -t telefire
-docker run -ti --rm -v $(pwd)/telefire.py:/tg/telefire.py telefire python telefire.py [COMMAND] [OPTIONS]
+```bash
+uv run telefire get_entity me
+uv run telefire get_entity me --account=default
+uv run telefire get_entity me --session=work
+uv run telefire get_all_chats
+uv run telefire list_messages --chat=coder_ot --user=Fangliding
+uv run telefire search_messages --chat=coder_ot --query='keyword'
 ```
-And that's it, enjoy!
 
-## TODO
+Matrix examples:
 
-- :heavy_check_mark: For deleting messages, add an option to delete messages based on time instead of always delete all.
-- :heavy_check_mark: A long-running service that will notify user if someone said something contains some interested words.
+```bash
+uv run telefire matrix_whoami --account=default
+uv run telefire matrix_list_rooms --account=default
+uv run telefire matrix_list_rooms --account=work
+uv run telefire matrix_cleanup --account=default --days=30
+```
+
+Long-running commands should be kept alive in `tmux`, `screen`, or a service manager:
+
+```bash
+uv run telefire plus_mode
+uv run telefire words_to_ifttt --event=event-name --key=webhook-key outage alert
+uv run telefire matrix_plus_mode --account=default
+```
+
+## Architecture
+
+The core refactor moved the project to an explicit runtime design:
+
+- `src/telefire/runtime/command.py`
+  shared sync bridge for `run_once(...)` and `run_forever(...)`
+- `src/telefire/telegram/`
+  Telegram config, service, store, helpers, and command wrapper
+- `src/telefire/matrix/`
+  Matrix config, service, store, helpers, and command wrapper
+- `src/telefire/plugins/base.py`
+  command registry and Fire wrapper generation
+
+This keeps protocol runtime, storage, and command orchestration separate, while still letting plugin commands stay small.
+
+## Notes
+
+- TeleFire now targets Python 3.14 or newer.
+- Use `uv run telefire ...` for repo-local usage.
+- Required arguments may be positional or flags, depending on the command signature shown by `--help`.

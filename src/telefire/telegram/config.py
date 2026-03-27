@@ -2,12 +2,14 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_SESSION_NAME = "telefire"
+
 
 @dataclass(slots=True)
 class TelegramRuntimeConfig:
     api_id: int
     api_hash: str
-    session_name: str = "test"
+    session_name: str = DEFAULT_SESSION_NAME
     store_dir: Path = Path.home() / ".telefire" / "telegram"
 
     @classmethod
@@ -19,7 +21,9 @@ class TelegramRuntimeConfig:
                 "Please set TELEGRAM_API_ID and TELEGRAM_API_HASH, or run: telefire init"
             )
 
-        session_name = (session or os.environ.get("TELEGRAM_SESSION_NAME") or "test").strip() or "test"
+        session_name = (
+            session or os.environ.get("TELEGRAM_SESSION_NAME") or DEFAULT_SESSION_NAME
+        ).strip() or DEFAULT_SESSION_NAME
         store_dir = Path(
             os.environ.get("TELEGRAM_STORE_DIR") or (Path.home() / ".telefire" / "telegram")
         )

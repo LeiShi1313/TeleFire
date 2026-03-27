@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import tomllib
+from telefire.telegram.config import DEFAULT_SESSION_NAME
 
 CONFIG_DIR = Path.home() / ".telefire"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
@@ -24,7 +25,7 @@ def load_config() -> dict:
     return {
         "TELEGRAM_API_ID": os.environ.get("TELEGRAM_API_ID") or str(telegram.get("api_id", "")),
         "TELEGRAM_API_HASH": os.environ.get("TELEGRAM_API_HASH") or telegram.get("api_hash", ""),
-        "TELEGRAM_SESSION_NAME": os.environ.get("TELEGRAM_SESSION_NAME") or telegram.get("session_name", "test"),
+        "TELEGRAM_SESSION_NAME": os.environ.get("TELEGRAM_SESSION_NAME") or telegram.get("session_name", DEFAULT_SESSION_NAME),
         "TELEGRAM_STORE_DIR": os.environ.get("TELEGRAM_STORE_DIR") or telegram.get("store_dir", ""),
         "MATRIX_BASE_URL": os.environ.get("MATRIX_BASE_URL") or matrix.get("base_url", ""),
         "MATRIX_USER_ID": os.environ.get("MATRIX_USER_ID") or matrix.get("user_id", ""),
@@ -72,7 +73,7 @@ def init_config():
     print("[Telegram] (required)")
     api_id = input(f"  API ID [{tg.get('api_id', '')}]: ").strip()
     api_hash = input(f"  API Hash [{tg.get('api_hash', '')}]: ").strip()
-    session_name = input(f"  Session Name [{tg.get('session_name', 'test')}]: ").strip()
+    session_name = input(f"  Session Name [{tg.get('session_name', DEFAULT_SESSION_NAME)}]: ").strip()
     telegram_store_dir = input(
         f"  Store Dir [{tg.get('store_dir', str(CONFIG_DIR / 'telegram'))}]: "
     ).strip()
@@ -80,7 +81,7 @@ def init_config():
     telegram_config = {
         "api_id": int(api_id) if api_id else tg.get("api_id", 0),
         "api_hash": api_hash or tg.get("api_hash", ""),
-        "session_name": session_name or tg.get("session_name", "test"),
+        "session_name": session_name or tg.get("session_name", DEFAULT_SESSION_NAME),
         "store_dir": telegram_store_dir or tg.get("store_dir", str(CONFIG_DIR / "telegram")),
     }
 

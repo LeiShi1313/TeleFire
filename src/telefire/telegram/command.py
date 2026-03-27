@@ -1,13 +1,13 @@
 from telefire.runtime import ServiceCommand
 from telefire.runtime.file_logging import DailyFileLogger
-from telefire.telegram.config import TelegramRuntimeConfig
+from telefire.telegram.config import DEFAULT_SESSION_NAME, TelegramRuntimeConfig
 from telefire.telegram.helpers import TelegramHelpers
 from telefire.telegram.service import TelegramService
 from telethon import utils
 
 
 class TelegramCommand(ServiceCommand):
-    def __init__(self, session: str = "test", log_level: str = "info"):
+    def __init__(self, session: str = DEFAULT_SESSION_NAME, log_level: str = "info"):
         service = TelegramService(
             TelegramRuntimeConfig.from_env(session=session),
             log_level=log_level,

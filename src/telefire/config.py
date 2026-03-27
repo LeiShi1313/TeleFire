@@ -6,12 +6,23 @@ import os
 from pathlib import Path
 
 import tomllib
-from telefire.telegram.config import DEFAULT_SESSION_NAME
+from telefire.constants import DEFAULT_SESSION_NAME, DEFAULT_TELEGRAM_ACCOUNT
 
 CONFIG_DIR = Path.home() / ".telefire"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 DEFAULT_MATRIX_ACCOUNT = "default"
-_CLI_ENV_BLOCKLIST = {"MATRIX_ACCESS_TOKEN", "MATRIX_BASE_URL", "MATRIX_DEVICE_ID", "MATRIX_DEVICE_NAME", "MATRIX_PASSWORD", "MATRIX_STORE_DIR", "MATRIX_USER_ID"}
+_CLI_ENV_BLOCKLIST = {
+    "MATRIX_ACCESS_TOKEN",
+    "MATRIX_BASE_URL",
+    "MATRIX_DEVICE_ID",
+    "MATRIX_DEVICE_NAME",
+    "MATRIX_PASSWORD",
+    "MATRIX_STORE_DIR",
+    "MATRIX_USER_ID",
+    "TELEGRAM_ACCOUNT",
+    "TELEGRAM_SESSION_NAME",
+    "TELEGRAM_STORE_DIR",
+}
 
 
 def read_config_file() -> dict:
@@ -32,16 +43,14 @@ def load_config() -> dict:
     return {
         "TELEGRAM_API_ID": os.environ.get("TELEGRAM_API_ID") or str(telegram.get("api_id", "")),
         "TELEGRAM_API_HASH": os.environ.get("TELEGRAM_API_HASH") or telegram.get("api_hash", ""),
-        "TELEGRAM_SESSION_NAME": os.environ.get("TELEGRAM_SESSION_NAME") or telegram.get("session_name", DEFAULT_SESSION_NAME),
-        "TELEGRAM_STORE_DIR": os.environ.get("TELEGRAM_STORE_DIR") or telegram.get("store_dir", ""),
     }
 
 
 def apply_config():
     """Load CLI startup env.
 
-    Priority: existing env > config.toml Telegram settings > .env file.
-    Matrix account settings are resolved later by MatrixRuntimeConfig.
+    Priority: existing env > config.toml API settings > .env file.
+    Telegram and Matrix account settings are resolved later by runtime config.
     """
     # Load .env as lowest-priority fallback
     env_file = Path.cwd() / ".env"
@@ -73,10 +82,28 @@ def init_config():
 
     # Telegram
     tg = existing.get("telegram", {})
+    telegram_accounts = {
+        str(name): values
+        for name, values in existing.get("telegram_accounts", {}).items()
+        if isinstance(values, dict)
+    }
+    telegram_default_account = str(
+        tg.get("default_account", DEFAULT_TELEGRAM_ACCOUNT)
+    ) or DEFAULT_TELEGRAM_ACCOUNT
+    if telegram_default_account not in telegram_accounts:
+        telegram_accounts[telegram_default_account] = {
+            "session_name": tg.get("session_name", DEFAULT_SESSION_NAME) or DEFAULT_SESSION_NAME,
+        }
+
     print("[Telegram] (required)")
     api_id = input(f"  API ID [{tg.get('api_id', '')}]: ").strip()
     api_hash = input(f"  API Hash [{tg.get('api_hash', '')}]: ").strip()
-    session_name = input(f"  Session Name [{tg.get('session_name', DEFAULT_SESSION_NAME)}]: ").strip()
+    telegram_account = input(f"  Account [{telegram_default_account}]: ").strip()
+    telegram_account = telegram_account or telegram_default_account
+    telegram_account_config = telegram_accounts.get(telegram_account, {})
+    session_name = input(
+        f"  Session Name [{telegram_account_config.get('session_name', DEFAULT_SESSION_NAME)}]: "
+    ).strip()
     telegram_store_dir = input(
         f"  Store Dir [{tg.get('store_dir', str(CONFIG_DIR / 'telegram'))}]: "
     ).strip()
@@ -84,8 +111,12 @@ def init_config():
     telegram_config = {
         "api_id": int(api_id) if api_id else tg.get("api_id", 0),
         "api_hash": api_hash or tg.get("api_hash", ""),
-        "session_name": session_name or tg.get("session_name", DEFAULT_SESSION_NAME),
+        "default_account": telegram_account,
         "store_dir": telegram_store_dir or tg.get("store_dir", str(CONFIG_DIR / "telegram")),
+    }
+    telegram_accounts[telegram_account] = {
+        "session_name": session_name
+        or telegram_account_config.get("session_name", DEFAULT_SESSION_NAME),
     }
 
     # Matrix
@@ -127,8 +158,12 @@ def init_config():
     lines = ["[telegram]"]
     lines.append(f"api_id = {telegram_config['api_id']}")
     lines.append(f'api_hash = "{telegram_config["api_hash"]}"')
-    lines.append(f'session_name = "{telegram_config["session_name"]}"')
+    lines.append(f'default_account = "{telegram_config["default_account"]}"')
     lines.append(f'store_dir = "{telegram_config["store_dir"]}"')
+
+    for account_name, account_config in telegram_accounts.items():
+        lines.append(f"\n[telegram_accounts.{account_name}]")
+        lines.append(f'session_name = "{account_config["session_name"]}"')
 
     for account_name, account_config in matrix_accounts.items():
         lines.append(f"\n[matrix_accounts.{account_name}]")

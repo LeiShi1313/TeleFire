@@ -50,16 +50,12 @@ cat ~/.telefire/config.toml
 
 Minimum Telegram config:
 
-- `[telegram]` with `api_id` and `api_hash`
-- `[telegram_accounts.*]` sections are optional — only needed for multi-account setups
+- `[telegram]` with `api_id`, `api_hash`, and `session_name`
 
 Minimum Matrix config:
 
-- `[matrix_accounts.<name>]` with `base_url` and `user_id`
-- optional `device_name`
-- and either:
-  - a `password` for first-run bootstrap
-  - or an existing session file under `~/.telefire/matrix/<account>/session.json`
+- `[matrix]` with `base_url` and `user_id`
+- and either a `password` for first-run bootstrap, or an existing session file under `~/.telefire/matrix/default/session.json`
 
 2. Check the selected Telegram session file:
 
@@ -117,26 +113,29 @@ Save the output to a scratch file or memory so you can resolve chat/room names t
 
 ## Config Model
 
-Recommended shape:
+Default account fields live directly under `[telegram]` / `[matrix]`. Additional accounts are sub-tables.
 
 ```toml
 [telegram]
 api_id = 1094995
 api_hash = "..."
-default_account = "default"
+session_name = "telefire"
 store_dir = "/home/you/.telefire/telegram"
 
-[telegram_accounts.default]
-session_name = "telefire"
-
-[telegram_accounts.work]
+[telegram.work]
 session_name = "work"
 
-[matrix_accounts.default]
+[matrix]
 base_url = "https://matrix.example.com"
 user_id = "@you:example.com"
 device_name = "telefire"
 store_dir = "/home/you/.telefire/matrix/default"
+password = "..."
+
+[matrix.work]
+base_url = "https://matrix.work.example"
+user_id = "@you:work.example"
+store_dir = "/home/you/.telefire/matrix/work"
 password = "..."
 ```
 

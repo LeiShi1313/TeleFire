@@ -1,2 +1,1 @@
-DEFAULT_TELEGRAM_ACCOUNT = "default"
 DEFAULT_SESSION_NAME = "telefire"

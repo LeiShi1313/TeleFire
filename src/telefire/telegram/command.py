@@ -1,6 +1,5 @@
 from telefire.runtime import ServiceCommand
 from telefire.runtime.file_logging import DailyFileLogger
-from telefire.constants import DEFAULT_TELEGRAM_ACCOUNT
 from telefire.telegram.config import TelegramRuntimeConfig
 from telefire.telegram.helpers import TelegramHelpers
 from telefire.telegram.service import TelegramService
@@ -12,7 +11,7 @@ class TelegramCommand(ServiceCommand):
 
     def __init__(
         self,
-        account: str = DEFAULT_TELEGRAM_ACCOUNT,
+        account: str = "default",
         session: str | None = None,
         log_level: str = "info",
     ):

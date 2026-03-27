@@ -6,7 +6,7 @@ from mautrix.client.state_store import FileStateStore
 from mautrix.errors import MatrixConnectionError, MatrixError, MatrixInvalidToken
 from mautrix.types import Filter, FilterID
 
-from telefire.matrix.config import DEFAULT_MATRIX_ACCOUNT, MatrixRuntimeConfig
+from telefire.matrix.config import MatrixRuntimeConfig
 from telefire.matrix.store import FileSyncStore, MatrixSession, MatrixSessionStore
 from telefire.runtime import build_logger
 
@@ -179,7 +179,7 @@ class MatrixService:
         self.session_store.save(persisted)
 
     def _migrate_legacy_default_account_store(self) -> None:
-        if self.config.account != DEFAULT_MATRIX_ACCOUNT:
+        if self.config.account != "default":
             return
         if self.config.store_dir.name != self.config.account:
             return

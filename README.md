@@ -82,29 +82,26 @@ The first Matrix command can bootstrap from the configured password, then persis
 
 ## Config
 
-Current config is account-based.
+The default account lives directly under `[telegram]` / `[matrix]`. Additional accounts are sub-tables.
 
 ```toml
 [telegram]
 api_id = 123456
 api_hash = "..."
-default_account = "default"
+session_name = "telefire"
 store_dir = "/home/you/.telefire/telegram"
 
-[telegram_accounts.default]
-session_name = "telefire"
-
-[telegram_accounts.work]
+[telegram.work]
 session_name = "work"
 
-[matrix_accounts.default]
+[matrix]
 base_url = "https://matrix.example.com"
 user_id = "@you:example.com"
 device_name = "telefire"
 store_dir = "/home/you/.telefire/matrix/default"
 password = "..."
 
-[matrix_accounts.work]
+[matrix.work]
 base_url = "https://matrix.work.example"
 user_id = "@you:work.example"
 device_name = "telefire"
@@ -117,7 +114,6 @@ Notes:
 - Telegram uses `--account` to resolve a configured session alias.
 - Telegram also accepts `--session` as a low-level override.
 - Matrix uses `--account` to select both config and store directory.
-- Legacy single-account config is still read for the default account, but new config should use `telegram_accounts` and `matrix_accounts`.
 
 ## Storage Layout
 

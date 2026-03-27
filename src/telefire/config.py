@@ -6,11 +6,10 @@ import os
 from pathlib import Path
 
 import tomllib
-from telefire.constants import DEFAULT_SESSION_NAME, DEFAULT_TELEGRAM_ACCOUNT
+from telefire.constants import DEFAULT_SESSION_NAME
 
 CONFIG_DIR = Path.home() / ".telefire"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
-DEFAULT_MATRIX_ACCOUNT = "default"
 _CLI_ENV_BLOCKLIST = {
     "MATRIX_ACCESS_TOKEN",
     "MATRIX_BASE_URL",
@@ -80,29 +79,14 @@ def init_config():
     print("=" * 40)
     print(f"Config file: {CONFIG_FILE}\n")
 
-    # Telegram
+    # Telegram — default account fields live under [telegram]
     tg = existing.get("telegram", {})
-    telegram_accounts = {
-        str(name): values
-        for name, values in existing.get("telegram_accounts", {}).items()
-        if isinstance(values, dict)
-    }
-    telegram_default_account = str(
-        tg.get("default_account", DEFAULT_TELEGRAM_ACCOUNT)
-    ) or DEFAULT_TELEGRAM_ACCOUNT
-    if telegram_default_account not in telegram_accounts:
-        telegram_accounts[telegram_default_account] = {
-            "session_name": tg.get("session_name", DEFAULT_SESSION_NAME) or DEFAULT_SESSION_NAME,
-        }
 
     print("[Telegram] (required)")
     api_id = input(f"  API ID [{tg.get('api_id', '')}]: ").strip()
     api_hash = input(f"  API Hash [{tg.get('api_hash', '')}]: ").strip()
-    telegram_account = input(f"  Account [{telegram_default_account}]: ").strip()
-    telegram_account = telegram_account or telegram_default_account
-    telegram_account_config = telegram_accounts.get(telegram_account, {})
     session_name = input(
-        f"  Session Name [{telegram_account_config.get('session_name', DEFAULT_SESSION_NAME)}]: "
+        f"  Session Name [{tg.get('session_name', DEFAULT_SESSION_NAME)}]: "
     ).strip()
     telegram_store_dir = input(
         f"  Store Dir [{tg.get('store_dir', str(CONFIG_DIR / 'telegram'))}]: "
@@ -111,32 +95,25 @@ def init_config():
     telegram_config = {
         "api_id": int(api_id) if api_id else tg.get("api_id", 0),
         "api_hash": api_hash or tg.get("api_hash", ""),
-        "default_account": telegram_account,
+        "session_name": session_name or tg.get("session_name", DEFAULT_SESSION_NAME),
         "store_dir": telegram_store_dir or tg.get("store_dir", str(CONFIG_DIR / "telegram")),
     }
-    telegram_accounts[telegram_account] = {
-        "session_name": session_name
-        or telegram_account_config.get("session_name", DEFAULT_SESSION_NAME),
-    }
 
-    # Matrix
-    matrix_accounts = {
-        str(name): values
-        for name, values in existing.get("matrix_accounts", {}).items()
+    # Preserve existing named Telegram accounts
+    telegram_extra_accounts = {
+        name: values
+        for name, values in tg.items()
         if isinstance(values, dict)
     }
-    if DEFAULT_MATRIX_ACCOUNT not in matrix_accounts and isinstance(existing.get("matrix"), dict):
-        matrix_accounts[DEFAULT_MATRIX_ACCOUNT] = existing["matrix"]
 
-    matrix_account = input(f"  Account [{DEFAULT_MATRIX_ACCOUNT}]: ").strip()
-    matrix_account = matrix_account or DEFAULT_MATRIX_ACCOUNT
-    mx = matrix_accounts.get(matrix_account, {})
+    # Matrix — default account fields live under [matrix]
+    mx = existing.get("matrix", {})
     print("\n[Matrix] (optional, press Enter to skip)")
     base_url = input(f"  Base URL [{mx.get('base_url', '')}]: ").strip()
     user_id = input(f"  User ID [{mx.get('user_id', '')}]: ").strip()
     device_name = input(f"  Device Name [{mx.get('device_name', 'telefire')}]: ").strip()
     matrix_store_dir = input(
-        f"  Store Dir [{mx.get('store_dir', str(CONFIG_DIR / 'matrix'))}]: "
+        f"  Store Dir [{mx.get('store_dir', str(CONFIG_DIR / 'matrix' / 'default'))}]: "
     ).strip()
     password = input(f"  Password [{mx.get('password', '')}]: ").strip()
 
@@ -146,31 +123,44 @@ def init_config():
             "base_url": base_url or mx.get("base_url", ""),
             "user_id": user_id or mx.get("user_id", ""),
             "device_name": device_name or mx.get("device_name", "telefire"),
-            "store_dir": matrix_store_dir or mx.get("store_dir", str(CONFIG_DIR / "matrix" / matrix_account)),
+            "store_dir": matrix_store_dir or mx.get("store_dir", str(CONFIG_DIR / "matrix" / "default")),
         }
         if password or mx.get("password"):
             matrix_config["password"] = password or mx.get("password", "")
 
-    if matrix_config is not None:
-        matrix_accounts[matrix_account] = matrix_config
+    # Preserve existing named Matrix accounts
+    matrix_extra_accounts = {
+        name: values
+        for name, values in mx.items()
+        if isinstance(values, dict)
+    }
 
     # Write TOML
     lines = ["[telegram]"]
     lines.append(f"api_id = {telegram_config['api_id']}")
     lines.append(f'api_hash = "{telegram_config["api_hash"]}"')
-    lines.append(f'default_account = "{telegram_config["default_account"]}"')
+    lines.append(f'session_name = "{telegram_config["session_name"]}"')
     lines.append(f'store_dir = "{telegram_config["store_dir"]}"')
 
-    for account_name, account_config in telegram_accounts.items():
-        lines.append(f"\n[telegram_accounts.{account_name}]")
-        lines.append(f'session_name = "{account_config["session_name"]}"')
+    for account_name, account_config in telegram_extra_accounts.items():
+        lines.append(f"\n[telegram.{account_name}]")
+        lines.append(f'session_name = "{account_config.get("session_name", account_name)}"')
 
-    for account_name, account_config in matrix_accounts.items():
-        lines.append(f"\n[matrix_accounts.{account_name}]")
-        lines.append(f'base_url = "{account_config["base_url"]}"')
-        lines.append(f'user_id = "{account_config["user_id"]}"')
-        lines.append(f'device_name = "{account_config["device_name"]}"')
-        lines.append(f'store_dir = "{account_config["store_dir"]}"')
+    if matrix_config is not None:
+        lines.append("\n[matrix]")
+        lines.append(f'base_url = "{matrix_config["base_url"]}"')
+        lines.append(f'user_id = "{matrix_config["user_id"]}"')
+        lines.append(f'device_name = "{matrix_config["device_name"]}"')
+        lines.append(f'store_dir = "{matrix_config["store_dir"]}"')
+        if matrix_config.get("password"):
+            lines.append(f'password = "{matrix_config["password"]}"')
+
+    for account_name, account_config in matrix_extra_accounts.items():
+        lines.append(f"\n[matrix.{account_name}]")
+        lines.append(f'base_url = "{account_config.get("base_url", "")}"')
+        lines.append(f'user_id = "{account_config.get("user_id", "")}"')
+        lines.append(f'device_name = "{account_config.get("device_name", "telefire")}"')
+        lines.append(f'store_dir = "{account_config.get("store_dir", "")}"')
         if account_config.get("password"):
             lines.append(f'password = "{account_config["password"]}"')
 

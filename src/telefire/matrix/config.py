@@ -4,8 +4,6 @@ from pathlib import Path
 
 from telefire.config import read_config_file
 
-DEFAULT_MATRIX_ACCOUNT = "default"
-
 
 @dataclass(slots=True)
 class MatrixRuntimeConfig:
@@ -21,9 +19,20 @@ class MatrixRuntimeConfig:
     @classmethod
     def from_account(cls, account: str | None = None) -> "MatrixRuntimeConfig":
         selected_account = (
-            account or os.environ.get("MATRIX_ACCOUNT") or DEFAULT_MATRIX_ACCOUNT
-        ).strip() or DEFAULT_MATRIX_ACCOUNT
-        account_config = cls._load_account_config(selected_account)
+            account or os.environ.get("MATRIX_ACCOUNT") or "default"
+        ).strip() or "default"
+
+        config = read_config_file()
+        matrix = config.get("matrix", {})
+
+        # Default account reads from [matrix] directly;
+        # named accounts read from [matrix.<name>] sub-tables.
+        if selected_account == "default":
+            account_config = matrix
+        else:
+            account_config = matrix.get(selected_account)
+            if not isinstance(account_config, dict):
+                account_config = {}
 
         base_url = (os.environ.get("MATRIX_BASE_URL") or account_config.get("base_url", "")).strip().rstrip("/")
         user_id = (os.environ.get("MATRIX_USER_ID") or account_config.get("user_id", "")).strip()
@@ -54,18 +63,6 @@ class MatrixRuntimeConfig:
             access_token=access_token,
             device_id=device_id,
         )
-
-    @staticmethod
-    def _load_account_config(account: str) -> dict:
-        config = read_config_file()
-        account_config = config.get("matrix_accounts", {}).get(account)
-        if isinstance(account_config, dict):
-            return account_config
-
-        if account == DEFAULT_MATRIX_ACCOUNT and isinstance(config.get("matrix"), dict):
-            return config["matrix"]
-
-        return {}
 
     @property
     def session_path(self) -> Path:

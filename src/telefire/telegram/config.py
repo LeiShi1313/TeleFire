@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telefire.config import read_config_file
-from telefire.constants import DEFAULT_SESSION_NAME, DEFAULT_TELEGRAM_ACCOUNT
+from telefire.constants import DEFAULT_SESSION_NAME
 
 
 @dataclass(slots=True)
@@ -22,16 +22,6 @@ class TelegramRuntimeConfig:
     ) -> "TelegramRuntimeConfig":
         config = read_config_file()
         telegram = config.get("telegram", {})
-        telegram_accounts = config.get("telegram_accounts", {})
-
-        default_account = (
-            os.environ.get("TELEGRAM_DEFAULT_ACCOUNT")
-            or telegram.get("default_account")
-            or DEFAULT_TELEGRAM_ACCOUNT
-        ).strip() or DEFAULT_TELEGRAM_ACCOUNT
-        selected_account = (
-            account or os.environ.get("TELEGRAM_ACCOUNT") or default_account
-        ).strip() or default_account
 
         api_id = (os.environ.get("TELEGRAM_API_ID") or str(telegram.get("api_id", ""))).strip()
         api_hash = (os.environ.get("TELEGRAM_API_HASH") or telegram.get("api_hash", "")).strip()
@@ -40,24 +30,24 @@ class TelegramRuntimeConfig:
                 "Please set TELEGRAM_API_ID and TELEGRAM_API_HASH, or run: telefire init"
             )
 
-        account_config = telegram_accounts.get(selected_account)
-        if not isinstance(account_config, dict):
-            account_config = {}
+        selected_account = (
+            account or os.environ.get("TELEGRAM_ACCOUNT") or "default"
+        ).strip() or "default"
 
-        legacy_session_name = ""
-        if selected_account == default_account:
-            legacy_session_name = telegram.get("session_name", "")
+        # Default account reads from [telegram] directly;
+        # named accounts read from [telegram.<name>] sub-tables.
+        if selected_account == "default":
+            account_config = telegram
+        else:
+            account_config = telegram.get(selected_account)
+            if not isinstance(account_config, dict):
+                account_config = {}
 
         session_name = (
             session
             or os.environ.get("TELEGRAM_SESSION_NAME")
             or account_config.get("session_name")
-            or legacy_session_name
-            or (
-                DEFAULT_SESSION_NAME
-                if selected_account == DEFAULT_TELEGRAM_ACCOUNT
-                else selected_account
-            )
+            or (DEFAULT_SESSION_NAME if selected_account == "default" else selected_account)
         ).strip()
         store_dir = Path(
             os.environ.get("TELEGRAM_STORE_DIR")

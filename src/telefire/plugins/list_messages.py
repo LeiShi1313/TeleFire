@@ -1,4 +1,3 @@
-import jieba
 from dateutil import parser
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
@@ -10,7 +9,7 @@ from telefire.telegram import TelegramCommand
 class ListMessages(TelegramCommand, metaclass=PluginMount):
     command_name = "list_messages"
 
-    async def _list_messages_async(self, chat, user, output, print_stat=False, cut=False, before=None, after=None):
+    async def _list_messages_async(self, chat, user, output, print_stat=False, before=None, after=None):
         channel = await self.client.get_entity(chat)
         if user is not None:
             try:
@@ -36,7 +35,6 @@ class ListMessages(TelegramCommand, metaclass=PluginMount):
                 "",
                 created_channel,
                 print_stat,
-                lambda s: " ".join(jieba.cut(s)) if cut else None,
                 offset_date=offset_date,
                 min_date=min_date,
             )
@@ -57,7 +55,7 @@ class ListMessages(TelegramCommand, metaclass=PluginMount):
         self.logger.info("Listing all messages {}in {}".format(
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
 
-    def __call__(self, chat, user=None, output='log', print_stat=False, cut=False, before=None, after=None):
+    def __call__(self, chat, user=None, output='log', print_stat=False, before=None, after=None):
         self.run_once(
-            lambda: self._list_messages_async(chat, user, output, print_stat, cut, before, after)
+            lambda: self._list_messages_async(chat, user, output, print_stat, before, after)
         )

@@ -174,12 +174,11 @@ uv run telefire telegram COMMAND --help
 | `get_entity` | `ENTITY` | Resolve user/chat info (`me`, username, or chat) |
 | `find_user` | `CHAT NAME [--limit=500]` | Find username/ID from display name |
 | `search_messages` | `CHAT QUERY [--user=X] [--slow=True] [--limit=100] [--before=DATE] [--after=DATE]` | Search messages. `--slow=True` for Chinese text |
-| `list_messages` | `CHAT [--user=X] [--print_stat=True] [--cut=True] [--before=DATE] [--after=DATE]` | List messages. `--print_stat` for hourly distribution |
+| `list_messages` | `CHAT [--user=X] [--print_stat=True] [--before=DATE] [--after=DATE]` | List messages. `--print_stat` for hourly distribution |
 | `get_messages_by_ids` | `CHAT --ids=ID1,ID2` | Fetch specific messages by ID |
 | `summary_messages` | `CHAT [--user=X] [--limit=10]` | Recent messages from user |
 | `list_deleted_user_messages` | `CHAT` | Messages from deleted accounts |
 | `delete_all` | `CHAT [--before=DATE] [--after=DATE] [--query=X]` | Delete own messages (**irreversible, no dry-run**) |
-| `word_cloud` | `CHAT [--user=X] [--start=DATE] [--end=DATE]` | Generate word cloud image |
 | `chat_count` | `CHAT [--user=X]` | Message count statistics |
 | `regex_messages` | `CHAT REGEX` | Filter messages by regex |
 

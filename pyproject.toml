@@ -11,9 +11,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "aiosqlite>=0.20.0",
     "mautrix>=0.21.0",
-    "jieba>=0.42.1",
     "Pillow>=10.0.0",
-    "wordcloud>=1.9.0",
     "python-dateutil>=2.8.0",
     "loguru>=0.7.0",
 ]

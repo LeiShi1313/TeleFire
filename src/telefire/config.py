@@ -3,16 +3,9 @@ Configuration management for telefire.
 Loads from ~/.telefire/config.toml with environment variable overrides.
 """
 import os
-import sys
 from pathlib import Path
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
+import tomllib
 
 CONFIG_DIR = Path.home() / ".telefire"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
@@ -34,6 +27,7 @@ def load_config() -> dict:
         "MATRIX_BASE_URL": os.environ.get("MATRIX_BASE_URL") or matrix.get("base_url", ""),
         "MATRIX_USER_ID": os.environ.get("MATRIX_USER_ID") or matrix.get("user_id", ""),
         "MATRIX_PASSWORD": os.environ.get("MATRIX_PASSWORD") or matrix.get("password", ""),
+        "MATRIX_DEVICE_NAME": os.environ.get("MATRIX_DEVICE_NAME") or matrix.get("device_name", "telefire"),
     }
 
 
@@ -86,15 +80,18 @@ def init_config():
     print("\n[Matrix] (optional, press Enter to skip)")
     base_url = input(f"  Base URL [{mx.get('base_url', '')}]: ").strip()
     user_id = input(f"  User ID [{mx.get('user_id', '')}]: ").strip()
+    device_name = input(f"  Device Name [{mx.get('device_name', 'telefire')}]: ").strip()
     password = input(f"  Password [{mx.get('password', '')}]: ").strip()
 
     matrix_config = {}
-    if base_url or mx.get("base_url"):
+    if base_url or user_id or mx.get("base_url") or mx.get("user_id"):
         matrix_config = {
             "base_url": base_url or mx.get("base_url", ""),
             "user_id": user_id or mx.get("user_id", ""),
-            "password": password or mx.get("password", ""),
+            "device_name": device_name or mx.get("device_name", "telefire"),
         }
+        if password or mx.get("password"):
+            matrix_config["password"] = password or mx.get("password", "")
 
     # Write TOML
     lines = ["[telegram]"]
@@ -105,7 +102,9 @@ def init_config():
         lines.append("\n[matrix]")
         lines.append(f'base_url = "{matrix_config["base_url"]}"')
         lines.append(f'user_id = "{matrix_config["user_id"]}"')
-        lines.append(f'password = "{matrix_config["password"]}"')
+        lines.append(f'device_name = "{matrix_config["device_name"]}"')
+        if matrix_config.get("password"):
+            lines.append(f'password = "{matrix_config["password"]}"')
 
     CONFIG_FILE.write_text("\n".join(lines) + "\n")
     print(f"\nSaved to {CONFIG_FILE}")

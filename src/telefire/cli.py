@@ -1,4 +1,5 @@
 import fire
+import telefire.plugins
 from telefire.config import apply_config, init_config
 from telefire.plugins.base import Commands
 

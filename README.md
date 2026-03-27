@@ -37,7 +37,7 @@
 ### get_all_chats
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py get_all_chats
+uv run telefire get_all_chats
 
 -100XXXXXXXXXX: CHANNEL_NAME0
     XXXXXXXXXX: CHANNEL_NAME1
@@ -48,7 +48,7 @@ Those negative IDs start with `-100` are private groups, that's the only way you
 ### list_messages
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py list_messages --chat [CHAT_IDENTIFIER] [Optional: --user USER_IDENTIFIER]
+uv run telefire list_messages --chat [CHAT_IDENTIFIER] [Optional: --user USER_IDENTIFIER]
 ```
 For `CHAT_IDENTIFIER`, it can be a chat ID you got from <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
 
@@ -58,7 +58,7 @@ For `USER_IDENTIFIER`, it can be the user's ID or username.
 ### search_messages
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py search_messages --peer [PEER_IDENTIFIER] --query [QUERY_STRING]
+uv run telefire search_messages --peer [PEER_IDENTIFIER] --query [QUERY_STRING]
 ```
 This command comes with some optional parameters that you can custom:
 - `--slow`: Whether to use telegram's search API or iterate through whole message history to do the search. The later can be comprehensive if you are searching UTF-8 characters such as Chinese.
@@ -68,7 +68,7 @@ This command comes with some optional parameters that you can custom:
 ### delete_all
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py delete_all --chat [CHAT_IDENTIFIER] [Optional: --query QUERY_STRING]
+uv run telefire delete_all --chat [CHAT_IDENTIFIER] [Optional: --query QUERY_STRING]
 ```
 For `CHAT_IDENTIFIER`, smiliar to `CHAT_IDENTIFIER` in <a href="#get_all_chats">get_all_chats</a>, or it can be something like `t.me/LGTMer` or `LGTMer`.
 
@@ -77,7 +77,7 @@ You can also using the `--query` to specify only messages containing certain str
 ### plus_mode
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py plus_mode
+uv run telefire plus_mode
 ```
 It's a command you have to keep it running in the backgroud to use it. It's my personal favorite command! It includes several functions that's interesting and useful:
 - `Auto delete mode`: Add `\[NUMBER][s|m|h|d] ` before the message you want to auto delete after certain time, for example, add `\10s `(notice the space), then this message will be deleted automately after 10 seconds. you can also specify  minutes(`m`), hours(`h`) and days(`d`) as the message experation time.
@@ -88,7 +88,7 @@ It's a command you have to keep it running in the backgroud to use it. It's my p
 ### words_to_ifttt
 
 ```shell
-TELEGRAM_API_ID=[YOUR_API_ID] TELEGRAM_API_HASH=[YOUR_API_HASH] python telefire.py words_to_ifttt --event [IFTTT EVENT] --key [IFTTT WEBHOOK KEY] [WORDS YOU INTERESTED]
+uv run telefire words_to_ifttt --event [IFTTT EVENT] --key [IFTTT WEBHOOK KEY] [WORDS YOU INTERESTED]
 ```
 
 Like `auto_delete`, you need to keep this command running to make it work. For the `event` and `key`, you can get it from [here](https://ifttt.com/maker_webhooks). For `WORDS YOU INTERESTED`, it can be something like `telefire "telefire is so cool"`, then whenever anybody said **telefire** or **telefire is so cool**, an IFTTT event will be sent and you can create an applet to do whatever you like on IFTTT, such as sending notifications, turn on a light, etc.
@@ -97,11 +97,11 @@ Like `auto_delete`, you need to keep this command running to make it work. For t
 
 For all the others commands I didn't methtion or simply too lazy to add docs for it:  
 ```shell
-python telefire.py --help
+uv run telefire --help
 ```
 to get a list of all the available commands. And:
 ```shell
-python telefire.py COMMAND - --help
+uv run telefire COMMAND --help
 ```
 to learn how to use it.
 

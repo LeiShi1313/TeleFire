@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import pickle
 import logging
 import asyncio
 from pathlib import Path
@@ -14,11 +13,8 @@ from telethon import utils
 from telethon.sync import TelegramClient
 from telethon.hints import EntitiesLike
 from telethon.tl.types import Channel, Message, User
-from mautrix.client import Client as MatrixClient
-from mautrix.api import HTTPAPI
-from mautrix.types import UserID, FilterID, Filter, RoomID, EventID, EventType
-# from mautrix.types import Message as MatrixMessage
 
+from telefire.runtime import build_logger
 from telefire.utils import get_url, camel_to_snake
 
 
@@ -37,14 +33,8 @@ class Telegram(object):
             Path.home().joinpath('.telefire').mkdir(parents=True, exist_ok=True)
             session_path = str(home_session)
         self._client = TelegramClient(session_path, api_id, api_hash)
-
-        self._logger = logging.getLogger(__name__)
-        self._logger.setLevel(logging.INFO if log_level=='info' else logging.DEBUG)
-        # logFormatter = logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] %(message)s")
+        self._logger = build_logger(__name__, log_level=log_level)
         self._logFormatter = logging.Formatter("%(message)s")
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(self._logFormatter)
-        self._logger.addHandler(console_handler)
 
     def _set_file_handler(self, method, channel=None, user=None, query=None):
         path = Path('logs').joinpath(method)
@@ -135,70 +125,6 @@ class Telegram(object):
         if m is not None:
             return await self._get_entity(m)
         return None
-
-
-class Matrix(object):
-    room_name_cache = {}
-
-    def __init__(self, log_level='info'):
-        self.room_name_cache = pickle.load(open('room_name_cache.pkl', 'rb')) if os.path.exists('room_name_cache.pkl') else {}
-        base_url = os.environ.get("MATRIX_BASE_URL")
-        self.user_id = os.environ.get("MATRIX_USER_ID")
-        self.password = os.environ.get("MATRIX_PASSWORD")
-        self.loop = asyncio.get_event_loop()
-        if not base_url or not self.user_id or not self.password:
-            raise ValueError("Please set MATRIX_BASE_URL, MATRIX_USER_ID and MATRIX_PASSWORD as environment variables!")
-        self._client = MatrixClient(api=HTTPAPI(base_url))
-        # self._client.login(username, password)
-        self._logger = logging.getLogger(__name__)
-        self._logger.setLevel(logging.INFO if log_level=='info' else logging.DEBUG)
-        # logFormatter = logging.Formatter("%(asctime)s [%(name)s] [%(levelname)s] %(message)s")
-        self._logFormatter = logging.Formatter("%(message)s")
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(self._logFormatter)
-        self._logger.addHandler(console_handler)
-
-    def login(self):
-        async def _login():
-            await self._client.login(identifier=self.user_id, password=self.password)
-            self.profile = await self._client.get_profile(self.user_id)
-            self._logger.info(f"Logged in as {self.profile.displayname}")
-        self.loop.run_until_complete(_login())
-
-    def start(self, filter_data: FilterID | Filter | None = None):
-        self.login()
-        async def _start():
-            await self._client.start(filter_data=filter_data)
-        self.loop.run_until_complete(_start())
-
-    def stop(self):
-        self._client.api.session.close()
-        self._client.stop()
-
-    def update_room_name_cache(self, room_id: RoomID, name: str):
-        self.room_name_cache[room_id] = name
-        pickle.dump(self.room_name_cache, open('room_name_cache.pkl', 'wb'))
-
-    async def get_room_displayname(self, room_id: RoomID):
-        if room_id in self.room_name_cache:
-            return self.room_name_cache[room_id]
-        try:
-            state = await self._client.get_state_event(room_id=room_id, event_type=EventType.ROOM_NAME)
-            if state is not None:
-                self.update_room_name_cache(room_id, state.name)
-                return state.name
-        except Exception as e:
-            self._logger.debug(f"Error getting room name: {e}")
-            pass
-        try:
-            state = await self._client.get_state_event(room_id=room_id, event_type=EventType.ROOM_CANONICAL_ALIAS)
-            if state is not None:
-                self.update_room_name_cache(room_id, state.name)
-                return state.name
-        except Exception as e:
-            self._logger.debug(f"Error getting room canonical alias: {e}")
-            pass
-        return room_id
 
 class Commands(object):
     pass

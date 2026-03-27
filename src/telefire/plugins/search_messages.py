@@ -3,10 +3,11 @@ from telethon.tl.functions.messages import SearchRequest
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import InputMessagesFilterEmpty
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class SearchMessages(Telegram, metaclass=PluginMount):
+class SearchMessages(TelegramCommand, metaclass=PluginMount):
     command_name = 'search_messages'
 
     async def _search_messages_async(self, chat, query, slow, limit, user, output, before=None, after=None):
@@ -50,6 +51,6 @@ class SearchMessages(Telegram, metaclass=PluginMount):
                 self._log_message(msg, peer, sender)
 
     def __call__(self, chat, query, slow=False, limit=100, user=None, output='log', before=None, after=None):
-        self._run_command(
+        self.run_telegram(
             self._search_messages_async(chat, query, slow, limit, user, output, before, after)
         )

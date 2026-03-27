@@ -5,11 +5,12 @@ from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import TypeMessagesFilter
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.storage import Storage
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = 'regex_messages'
 
     def _not_code(self, code):
@@ -31,4 +32,4 @@ class Action(Telegram, metaclass=PluginMount):
                     traceback.print_exc()
 
     def __call__(self, chat, regex, db=None):
-        self._run_command(self._search_messages_by_regrex_async(chat, regex, db))
+        self.run_telegram(self._search_messages_by_regrex_async(chat, regex, db))

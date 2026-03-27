@@ -10,12 +10,13 @@ from telethon import utils
 from telethon.sync import events
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.plugins.yvlu import yv_lu_process_image
 from telefire.storage import Storage
 
 
-class SummaryMan(Telegram, metaclass=PluginMount):
+class SummaryMan(TelegramCommand, metaclass=PluginMount):
     command_name = 'summary_man'
 
 
@@ -55,4 +56,4 @@ class SummaryMan(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('summary_man')
         self.chats = defaultdict(list)
-        self._run_forever_command(setup=setup)
+        self.run_telegram_forever(setup=setup)

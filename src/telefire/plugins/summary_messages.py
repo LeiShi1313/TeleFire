@@ -2,10 +2,11 @@ import jieba
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class SummaryMessages(Telegram, metaclass=PluginMount):
+class SummaryMessages(TelegramCommand, metaclass=PluginMount):
     command_name = 'summary_messages'
 
     async def _list_messages_async(self, chat, user, limit):
@@ -21,4 +22,4 @@ class SummaryMessages(Telegram, metaclass=PluginMount):
         print('\n'.join(msgs[::-1]))
 
     def __call__(self, chat, user=None, limit=10):
-        self._run_command(self._list_messages_async(chat, user, limit))
+        self.run_telegram(self._list_messages_async(chat, user, limit))

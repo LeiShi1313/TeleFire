@@ -1,10 +1,11 @@
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class ListMessages(Telegram, metaclass=PluginMount):
+class ListMessages(TelegramCommand, metaclass=PluginMount):
     command_name = 'list_deleted_user_messages'
 
     async def _list_messages_async(self, chat):
@@ -15,4 +16,4 @@ class ListMessages(Telegram, metaclass=PluginMount):
 
     def __call__(self, chat):
         self._set_file_handler(f'list_deleted_user_messages_for_[{chat}]')
-        self._run_command(self._list_messages_async(chat))
+        self.run_telegram(self._list_messages_async(chat))

@@ -1,9 +1,10 @@
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url, send_to_pushbullet
 
 
-class WordsToPushbullet(Telegram, metaclass=PluginMount):
+class WordsToPushbullet(TelegramCommand, metaclass=PluginMount):
     command_name = 'words_to_pushbullet'
 
     def __call__(self, token, device, *words):
@@ -23,4 +24,4 @@ class WordsToPushbullet(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('words_to_pushbullet')
         self._logger.info("Sending messages to Pushbullet for words:{}".format(words))
-        self._run_forever_command()
+        self.run_telegram_forever()

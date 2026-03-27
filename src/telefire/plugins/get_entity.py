@@ -5,14 +5,15 @@ from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import TypeMessagesFilter
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = 'get_entity'
 
     async def _get_entity_async(self, entity):
         print(await self._get_entity(entity))
 
     def __call__(self, entity):
-        self._run_command(self._get_entity_async(entity))
+        self.run_telegram(self._get_entity_async(entity))

@@ -1,9 +1,10 @@
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
-class WordsNotify(Telegram, metaclass=PluginMount):
+class WordsNotify(TelegramCommand, metaclass=PluginMount):
     command_name = 'words_notify'
 
     def __call__(self, chats, *words):
@@ -19,4 +20,4 @@ class WordsNotify(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('words_notify')
         self._logger.info("Sending messages to chats {} for words:{}".format(chats, words))
-        self._run_forever_command()
+        self.run_telegram_forever()

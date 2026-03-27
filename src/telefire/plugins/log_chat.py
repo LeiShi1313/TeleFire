@@ -1,9 +1,10 @@
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telethon import utils
 
 
-class LogChat(Telegram, metaclass=PluginMount):
+class LogChat(TelegramCommand, metaclass=PluginMount):
     command_name = 'log_chat'
 
     def __call__(self, chat=None):
@@ -18,4 +19,4 @@ class LogChat(Telegram, metaclass=PluginMount):
             #         self._logger.info(msg)
 
         self._set_file_handler('log_chat')
-        self._run_forever_command()
+        self.run_telegram_forever()

@@ -5,10 +5,11 @@ from telethon import utils, events, Button
 from telethon.tl.types import TypeMessagesFilter
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = 'jarryxiaobot'
 
     def __call__(self):
@@ -25,4 +26,4 @@ class Action(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("jarryxiaobot")
         self._logger.info("jarryxiaobot start")
-        self._run_forever_command()
+        self.run_telegram_forever()

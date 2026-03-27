@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 from telethon import utils
 from telethon.sync import events
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.storage import Storage
 
-class ChatCount(Telegram, metaclass=PluginMount):
+class ChatCount(TelegramCommand, metaclass=PluginMount):
     command_name = 'chat_count'
 
     def __call__(self, chat, limit=10, db=None):
@@ -59,4 +60,4 @@ class ChatCount(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("chat_count")
         self._logger.info(f"chat_count start for chat: {chat}")
-        self._run_forever_command()
+        self.run_telegram_forever()

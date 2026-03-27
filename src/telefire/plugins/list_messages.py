@@ -3,10 +3,11 @@ from dateutil import parser
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class ListMessages(Telegram, metaclass=PluginMount):
+class ListMessages(TelegramCommand, metaclass=PluginMount):
     command_name = 'list_messages'
 
     async def _list_messages_async(self, chat, user, output, print_stat=False, cut=False, before=None, after=None):
@@ -40,6 +41,6 @@ class ListMessages(Telegram, metaclass=PluginMount):
             'for {} '.format(utils.get_display_name(user)) if user else '', channel.title))
 
     def __call__(self, chat, user=None, output='log', print_stat=False, cut=False, before=None, after=None):
-        self._run_command(
+        self.run_telegram(
             self._list_messages_async(chat, user, output, print_stat, cut, before, after)
         )

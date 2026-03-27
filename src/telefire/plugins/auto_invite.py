@@ -5,12 +5,13 @@ import traceback
 from collections import defaultdict
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 from telefire.storage import Storage
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "auto_invite"
     prefix = "auto_invite_"
 
@@ -81,4 +82,4 @@ class Action(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("auto_invite")
         self._logger.info("Auto invite start")
-        self._run_forever_command(setup=setup)
+        self.run_telegram_forever(setup=setup)

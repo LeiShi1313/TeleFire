@@ -5,11 +5,12 @@ import traceback
 from collections import defaultdict, deque
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "auto_repeat"
 
     def __call__(self, chat):
@@ -27,4 +28,4 @@ class Action(Telegram, metaclass=PluginMount):
         
         self._set_file_handler("auto_repeat")
         self._logger.info(f"Auto reply repeat for chat: {chat}")
-        self._run_forever_command()
+        self.run_telegram_forever()

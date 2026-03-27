@@ -8,11 +8,12 @@ from telethon import utils
 from telethon.sync import events
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.plugins.yvlu import yv_lu_process_image
 
 
-class PlusMode(Telegram, metaclass=PluginMount):
+class PlusMode(TelegramCommand, metaclass=PluginMount):
     command_name = "plus_mode"
 
     async def _auto_delete_async(self, msg, t, text):
@@ -328,4 +329,4 @@ class PlusMode(Telegram, metaclass=PluginMount):
             self._logger.info(f"Plus mode is running as {self.me.username}")
 
         self._set_file_handler("plus_mode")
-        self._run_forever_command(setup=prepare)
+        self.run_telegram_forever(setup=prepare)

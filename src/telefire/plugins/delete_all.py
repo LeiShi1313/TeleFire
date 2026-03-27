@@ -2,10 +2,11 @@ import traceback
 from datetime import timezone
 from dateutil import parser
 from telethon import utils
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class DeleteAll(Telegram, metaclass=PluginMount):
+class DeleteAll(TelegramCommand, metaclass=PluginMount):
     command_name = 'delete_all'
 
     async def _delete_all_async(self, chat: str, before: str, after:str, query: str) -> None:
@@ -37,4 +38,4 @@ class DeleteAll(Telegram, metaclass=PluginMount):
                     
 
     def __call__(self, chat: str, before=None, after=None, query=None) -> None:
-        self._run_command(self._delete_all_async(chat, before, after, query))
+        self.run_telegram(self._delete_all_async(chat, before, after, query))

@@ -5,10 +5,11 @@ from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 from telethon.tl.types import TypeMessagesFilter
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = 'get_messages_by_ids'
 
     async def _get_message_by_ids_async(self, chat, ids):
@@ -16,4 +17,4 @@ class Action(Telegram, metaclass=PluginMount):
             print(msg)
 
     def __call__(self, chat, *ids):
-        self._run_command(self._get_message_by_ids_async(chat, ids))
+        self.run_telegram(self._get_message_by_ids_async(chat, ids))

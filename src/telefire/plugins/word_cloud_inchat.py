@@ -11,11 +11,12 @@ from telethon import utils
 from telethon.sync import events
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.storage import Storage
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "wordcloud"
     prefix = "wordcloud_"
 
@@ -126,4 +127,4 @@ class Action(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("word_cloud_inchat")
         self._logger.info("Wordcloud inchat mode start")
-        self._run_forever_command(setup=setup)
+        self.run_telegram_forever(setup=setup)

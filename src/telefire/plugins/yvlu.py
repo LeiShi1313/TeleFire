@@ -5,7 +5,8 @@ from os import makedirs, remove
 from PIL import Image, ImageFont, ImageDraw
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
@@ -101,7 +102,7 @@ async def resize_image(photo, num):
         image.thumbnail(maxsize)
     return image
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "yvlu"
 
     async def _yvlu_async(self, chat, user, msg):
@@ -123,4 +124,4 @@ class Action(Telegram, metaclass=PluginMount):
         )
 
     def __call__(self, chat, user, msg):
-        self._run_command(self._yvlu_async(chat, user, msg))
+        self.run_telegram(self._yvlu_async(chat, user, msg))

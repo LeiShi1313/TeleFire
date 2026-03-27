@@ -1,10 +1,11 @@
 from telethon.sync import events
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
-class SpecialAttentionMode(Telegram, metaclass=PluginMount):
+class SpecialAttentionMode(TelegramCommand, metaclass=PluginMount):
     command_name = 'special_attention_mode'
 
     def __call__(self, event, key, *people):
@@ -21,4 +22,4 @@ class SpecialAttentionMode(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('special_attention_mode')
         self._logger.info("Sending messages to IFTTT for people:{}".format(people))
-        self._run_forever_command()
+        self.run_telegram_forever()

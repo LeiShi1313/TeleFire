@@ -10,12 +10,13 @@ from telethon import utils
 from telethon.sync import events
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.plugins.yvlu import yv_lu_process_image
 from telefire.storage import Storage
 
 
-class ChatToRedis(Telegram, metaclass=PluginMount):
+class ChatToRedis(TelegramCommand, metaclass=PluginMount):
     command_name = 'chat_to_redis'
     ignore_senders = set()
 
@@ -66,4 +67,4 @@ class ChatToRedis(Telegram, metaclass=PluginMount):
         async def setup():
             await self.store.connect()
 
-        self._run_forever_command(setup=setup)
+        self.run_telegram_forever(setup=setup)

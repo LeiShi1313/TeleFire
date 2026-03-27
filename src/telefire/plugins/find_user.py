@@ -1,9 +1,10 @@
 from telethon import utils
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class FindUser(Telegram, metaclass=PluginMount):
+class FindUser(TelegramCommand, metaclass=PluginMount):
     command_name = 'find_user'
 
     async def _find_user_async(self, chat, name, limit):
@@ -19,4 +20,4 @@ class FindUser(Telegram, metaclass=PluginMount):
             print(f"No user matching '{name}' found in last {limit} messages")
 
     def __call__(self, chat, name, limit=500):
-        self._run_command(self._find_user_async(chat, name, limit))
+        self.run_telegram(self._find_user_async(chat, name, limit))

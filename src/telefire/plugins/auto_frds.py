@@ -5,11 +5,12 @@ import traceback
 from collections import defaultdict
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "auto_frds"
 
     def __call__(self, regex, reply, chat=None, sender=None):
@@ -38,4 +39,4 @@ class Action(Telegram, metaclass=PluginMount):
         chat_entity, sender_entity = None, None 
         self._set_file_handler("auto_reply")
         self._logger.info(f"Auto reply start for regex: {regex}, reply: {reply}, chat: {chat}, from: {sender}")
-        self._run_forever_command()
+        self.run_telegram_forever()

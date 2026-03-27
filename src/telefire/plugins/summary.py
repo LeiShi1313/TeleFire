@@ -1,11 +1,12 @@
 from telethon import utils
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.storage import Storage
 
 
-class summary(Telegram, metaclass=PluginMount):
+class summary(TelegramCommand, metaclass=PluginMount):
     command_name = 'summary'
 
     async def _summary_messages_async(self, db, chat, limit):
@@ -18,4 +19,4 @@ class summary(Telegram, metaclass=PluginMount):
 
 
     def __call__(self, db=None, chat=None, limit=30):
-        self._run_command(self._summary_messages_async(db, chat, limit))
+        self.run_telegram(self._summary_messages_async(db, chat, limit))

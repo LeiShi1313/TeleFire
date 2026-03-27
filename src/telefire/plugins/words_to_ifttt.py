@@ -1,9 +1,10 @@
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
-class WordsToIfttt(Telegram, metaclass=PluginMount):
+class WordsToIfttt(TelegramCommand, metaclass=PluginMount):
     command_name = 'words_to_ifttt'
 
     def __call__(self, event, key, *words):
@@ -19,4 +20,4 @@ class WordsToIfttt(Telegram, metaclass=PluginMount):
 
         self._set_file_handler('words_to_ifttt')
         self._logger.info("Sending messages to IFTTT for words:{}".format(words))
-        self._run_forever_command()
+        self.run_telegram_forever()

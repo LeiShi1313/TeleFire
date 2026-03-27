@@ -1,8 +1,9 @@
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class GetAllChats(Telegram, metaclass=PluginMount):
+class GetAllChats(TelegramCommand, metaclass=PluginMount):
     command_name = 'get_all_chats'
 
     def __call__(self):
@@ -10,4 +11,4 @@ class GetAllChats(Telegram, metaclass=PluginMount):
             async for dialog in self._client.iter_dialogs():
                 self._logger.info('{:>14}: {}'.format(dialog.id, dialog.title))
 
-        self._run_command(lambda: _get_all_chats(self))
+        self.run_telegram(lambda: _get_all_chats(self))

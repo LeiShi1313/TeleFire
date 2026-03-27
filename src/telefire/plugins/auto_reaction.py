@@ -5,12 +5,13 @@ import traceback
 from collections import defaultdict, deque
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telethon.tl import functions, types
 from telefire.utils import get_url
 
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "auto_reaction"
 
     def __call__(self, chat, user):
@@ -36,4 +37,4 @@ class Action(Telegram, metaclass=PluginMount):
 
         self._set_file_handler("auto_reaction")
         self._logger.info(f"Auto reaction for chat: {chat}")
-        self._run_forever_command()
+        self.run_telegram_forever()

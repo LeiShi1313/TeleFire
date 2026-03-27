@@ -1,26 +1,21 @@
-import jieba
-from telethon import utils
-from telethon.tl.functions.channels import CreateChannelRequest
-
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 
 
-class SummaryMessages(Telegram, metaclass=PluginMount):
-    command_name = 'summary_messages'
+class SummaryMessages(TelegramCommand, metaclass=PluginMount):
+    command_name = "summary_messages"
 
     async def _list_messages_async(self, chat, user, limit):
         if user is not None:
-            user = await self._get_entity(user)
+            user = await self.helpers.entities.get(user)
         msgs = []
-        async for msg in self._client.iter_messages(chat, from_user=user):
+        async for msg in self.client.iter_messages(chat, from_user=user):
             if msg.text:
-                sender = await self._get_sender(msg)
-                msgs.append(f'{sender}: {msg.text}')
+                sender = await self.helpers.messages.sender_name(msg)
+                msgs.append(f"{sender}: {msg.text}")
                 if len(msgs) >= limit:
                     break
-        print('\n'.join(msgs[::-1]))
+        print("\n".join(msgs[::-1]))
 
     def __call__(self, chat, user=None, limit=10):
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._list_messages_async(chat, user, limit))
+        self.run_once(lambda: self._list_messages_async(chat, user, limit))

@@ -1,24 +1,17 @@
-import os
-import pickle
-import random
-import traceback
-from collections import defaultdict
-from telethon import utils as telethon_utils
-from telethon.sync import events
-from telefire.plugins.base import Matrix, PluginMount
-from mautrix.types import EventType, Filter, RoomFilter, MessageEvent
+from telefire.matrix import MatrixCommand
+from telefire.plugins.base import PluginMount
+from mautrix.types import EventType, MessageEvent
 
 
-class Action(Matrix, metaclass=PluginMount):
+class Action(MatrixCommand, metaclass=PluginMount):
     command_name = "matrix_plus_mode"
 
-    def __call__(self,):
+    def __call__(self):
+        def setup():
+            @self.client.on(EventType.ROOM_MESSAGE)
+            async def _inner(event: MessageEvent):
+                if event.sender != self.service.user_id:
+                    return
+                self.logger.info(str(event))
 
-        @self._client.on(EventType.ROOM_MESSAGE)
-        async def _inner(event: MessageEvent):
-            if event.sender != self.user_id:
-                return
-            print(event)
-
-        self.start()
-
+        self.run_forever(setup=setup)

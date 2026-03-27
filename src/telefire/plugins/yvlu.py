@@ -5,7 +5,8 @@ from os import makedirs, remove
 from PIL import Image, ImageFont, ImageDraw
 from telethon import utils as telethon_utils
 from telethon.sync import events
-from telefire.plugins.base import Telegram, PluginMount
+from telefire.plugins.base import PluginMount
+from telefire.telegram import TelegramCommand
 from telefire.utils import get_url
 
 
@@ -101,29 +102,26 @@ async def resize_image(photo, num):
         image.thumbnail(maxsize)
     return image
 
-class Action(Telegram, metaclass=PluginMount):
+class Action(TelegramCommand, metaclass=PluginMount):
     command_name = "yvlu"
 
     async def _yvlu_async(self, chat, user, msg):
-        chat = await self._get_entity(chat)
-        user = await self._get_entity(user)
+        chat = await self.helpers.entities.get(chat)
+        user = await self.helpers.entities.get(user)
 
         name = user.first_name
         if user.last_name:
             name += f' {user.last_name}'
 
         if not exists(f'plugins/yvlu/{user.id}.jpg'):
-            await self._client.download_profile_photo(user, f'plugins/yvlu/{user.id}.jpg')
+            await self.client.download_profile_photo(user, f'plugins/yvlu/{user.id}.jpg')
 
         file = await yv_lu_process_image(name, msg, f'{user.id}.jpg', "plugins/yvlu/")
-        await self._client.send_file(
+        await self.client.send_file(
             chat,
             file,
             force_document=False,
         )
 
     def __call__(self, chat, user, msg):
-
-        with self._client:
-            self._client.loop.run_until_complete(
-                    self._yvlu_async(chat, user, msg))
+        self.run_once(lambda: self._yvlu_async(chat, user, msg))

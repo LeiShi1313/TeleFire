@@ -1,26 +1,15 @@
-import os
-import pickle
-import random
-import traceback
-from collections import defaultdict
-from telethon import utils as telethon_utils
-from telethon.sync import events
-from telefire.plugins.base import Matrix, PluginMount
-from mautrix.types import EventType, Filter, RoomFilter
+from telefire.matrix import MatrixCommand
+from telefire.plugins.base import PluginMount
 
 
-class Action(Matrix, metaclass=PluginMount):
+class Action(MatrixCommand, metaclass=PluginMount):
     command_name = "matrix_list_rooms"
 
     def __call__(self):
-
         async def _inner():
-            rooms = await self._client.get_joined_rooms()
+            rooms = await self.client.get_joined_rooms()
             for room in rooms:
-                name = await self.get_room_displayname(room)
-                self._logger.info(f"{room}: {name}")
+                name = await self.helpers.rooms.display_name(room)
+                self.logger.info(f"{room}: {name}")
 
-
-        self.login()
-        self.loop.run_until_complete(_inner())
-
+        self.run_once(_inner)

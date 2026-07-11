@@ -259,6 +259,22 @@ def test_store_rejects_embedding_space_mismatch(tmp_path, fake_provider):
 
 
 @pytest.mark.asyncio
+async def test_ingest_rejects_unsafe_filter_identifiers(tmp_path, fake_provider):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+
+    with pytest.raises(ValueError, match="ASCII namespace characters"):
+        await core.ingest(
+            "client:user:o'hara",
+            "client:scope:1",
+            "unsafe identifier probe",
+            datetime(2026, 7, 11, tzinfo=UTC),
+        )
+
+    assert fake_provider.chat_calls == 0
+    assert fake_provider.embedding_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_malformed_extraction_does_not_create_partial_memory(
     tmp_path, fake_provider
 ):

@@ -76,6 +76,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             ),
             memory=self._memory,
             logger=self.logger,
+            allowed_chat_ids=self._settings.allowed_chat_ids,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())
         self.logger.info("Telegram AI userbot started")

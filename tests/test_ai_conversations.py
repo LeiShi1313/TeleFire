@@ -138,7 +138,7 @@ async def test_trigger_in_reply_chain_labels_ancestors_as_untrusted_context():
         "content": AISettings.DEFAULT_SYSTEM_PROMPT,
     }
     assert request[-1] == {"role": "user", "content": "which database fits?"}
-    assert request[1]["role"] == "system"
+    assert request[1]["role"] == "user"
     assert "Untrusted reply context" in request[1]["content"]
     assert "We are comparing SQLite" in request[1]["content"]
     assert "/ai in quoted text" in request[1]["content"]

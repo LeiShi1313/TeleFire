@@ -182,6 +182,24 @@ async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
 
 
 @pytest.mark.asyncio
+async def test_runtime_chat_allowlist_blocks_events_outside_e2e_chat():
+    gateway = FakeGateway(["must not be used"])
+    handler = AIConversationHandler(
+        owner_id=10,
+        responder=AIResponder(gateway, edit_cadence=0),
+        store=FakeStore(),
+        prompt_builder=PromptBuilder(),
+        allowed_chat_ids=frozenset({-1001}),
+    )
+    trigger = FakeMessage("/ai secret")
+    trigger.chat_id = -1002
+
+    assert await handler.handle(trigger) is False
+    assert trigger.replies == []
+    assert gateway.requests == []
+
+
+@pytest.mark.asyncio
 async def test_empty_prompt_finishes_with_usage_without_calling_provider():
     gateway = FakeGateway(["must not be used"])
     handler = make_handler(

@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ _QUERY_INSTRUCTION = (
     "Instruct: Given a memory query, retrieve relevant facts and episodes about "
     "the user\nQuery: "
 )
+_IDENTIFIER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+\-]{0,255}\Z")
 
 
 class EmbeddingConfigurationMismatch(ValueError):
@@ -778,8 +780,11 @@ def _validate_identifier(value: str, name: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{name} must be a string")
     value = value.strip()
-    if not value or len(value) > 256:
-        raise ValueError(f"{name} must contain between 1 and 256 characters")
+    if not _IDENTIFIER_PATTERN.fullmatch(value):
+        raise ValueError(
+            f"{name} must use 1-256 ASCII namespace characters: "
+            "letters, digits, colon, dot, underscore, slash, at, plus, or hyphen"
+        )
     return value
 
 
@@ -833,7 +838,9 @@ def _fingerprint(
 
 
 def _filter_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+    if "'" in value:
+        raise ValueError("Unsafe value cannot be used in a Zvec filter")
+    return f"'{value}'"
 
 
 def _rank_score(doc: zvec.Doc, now: datetime) -> float:

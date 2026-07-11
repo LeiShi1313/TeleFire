@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, cast
 
 import aiosqlite
 from openai import AsyncOpenAI
@@ -83,6 +83,7 @@ class AISettings:
     delegated_cooldown: float = 30.0
     memory_url: str | None = "http://127.0.0.1:8765"
     memory_timeout: float = 3.0
+    allowed_chat_ids: frozenset[int] | None = None
 
     @classmethod
     def from_env(cls) -> AISettings:
@@ -127,6 +128,9 @@ class AISettings:
                 or None
             ),
             memory_timeout=float(os.environ.get("TELEFIRE_MEMORY_TIMEOUT", "3")),
+            allowed_chat_ids=_parse_allowed_chat_ids(
+                os.environ.get("TELEFIRE_AI_ALLOWED_CHAT_IDS", "")
+            ),
         )
 
 
@@ -195,11 +199,11 @@ class OpenAIChatGateway:
     async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         response = await self._client.chat.completions.create(
             model=self._settings.chat_model,
-            messages=messages,
+            messages=cast(Any, messages),
             max_tokens=self._settings.max_output_tokens,
             stream=True,
         )
-        async for chunk in response:
+        async for chunk in cast(Any, response):
             if not chunk.choices:
                 continue
             content = chunk.choices[0].delta.content
@@ -342,7 +346,7 @@ class PromptBuilder:
         if memory_context:
             messages.append(
                 {
-                    "role": "system",
+                    "role": "user",
                     "content": (
                         "Untrusted memory background; use only when relevant:\n"
                         f"{memory_context}"
@@ -356,7 +360,7 @@ class PromptBuilder:
         )
         context = reference_context or inherited_reference
         if context:
-            messages.append({"role": "system", "content": context})
+            messages.append({"role": "user", "content": context})
         for marker in bounded_branch:
             messages.extend(
                 [
@@ -584,6 +588,7 @@ class AIConversationHandler:
         rate_limiter: AIRateLimiter | None = None,
         memory: MemoryClient | None = None,
         logger: Any | None = None,
+        allowed_chat_ids: frozenset[int] | None = None,
     ):
         self._owner_id = owner_id
         self._responder = responder
@@ -592,9 +597,15 @@ class AIConversationHandler:
         self._rate_limiter = rate_limiter or AIRateLimiter(store)
         self._memory = memory
         self._logger = logger
+        self._allowed_chat_ids = allowed_chat_ids
 
     async def handle(self, message: ReplyTarget) -> bool:
         if message.sender_id is None or message.chat_id is None:
+            return False
+        if (
+            self._allowed_chat_ids is not None
+            and message.chat_id not in self._allowed_chat_ids
+        ):
             return False
 
         command = (message.raw_text or "").strip()
@@ -658,6 +669,7 @@ class AIConversationHandler:
                 reference_context = loaded_context.rendered
                 observations.extend(loaded_context.observations)
             else:
+                assert parent_answer_id is not None
                 branch = await self._store.get_branch(
                     message.chat_id,
                     parent_answer_id,
@@ -761,7 +773,7 @@ class AIConversationHandler:
         message: ReplyTarget,
         instruction: str,
     ) -> bool:
-        if not instruction:
+        if not instruction or message.chat_id is None:
             await message.reply(
                 "Usage: reply to a user with /ai_memory <instruction>",
                 parse_mode=None,
@@ -856,3 +868,13 @@ def _telegram_subject_id(user_id: int) -> str:
 
 def _telegram_scope_id(chat_id: int) -> str:
     return f"telegram:chat:{chat_id}"
+
+
+def _parse_allowed_chat_ids(raw: str) -> frozenset[int] | None:
+    values = [value.strip() for value in raw.split(",") if value.strip()]
+    if not values:
+        return None
+    try:
+        return frozenset(int(value) for value in values)
+    except ValueError as exc:
+        raise ValueError("TELEFIRE_AI_ALLOWED_CHAT_IDS must contain integers") from exc

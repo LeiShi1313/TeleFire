@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -189,6 +188,7 @@ async def test_requester_only_memory_precedes_reply_context_and_participants_are
         }
     ]
     request = gateway.requests[0]
+    assert request[1]["role"] == "user"
     assert request[1]["content"].startswith("Untrusted memory background")
     assert "telegram:user:10" in request[1]["content"]
     assert "Untrusted reply context" in request[2]["content"]
@@ -235,7 +235,7 @@ async def test_followup_uses_only_current_requester_memory_and_ingests_current_h
     memory_messages = [
         message["content"]
         for message in gateway.requests[1]
-        if message["role"] == "system" and "memory background" in message["content"]
+        if "memory background" in message["content"]
     ]
     assert memory_messages == [
         "Untrusted memory background; use only when relevant:\n"
@@ -388,11 +388,7 @@ async def test_revised_profile_augments_only_the_target_users_later_request():
     await handler.handle(target_request)
     await handler.handle(other_request)
 
-    target_system = [
-        item["content"] for item in gateway.requests[0] if item["role"] == "system"
-    ]
-    other_system = [
-        item["content"] for item in gateway.requests[1] if item["role"] == "system"
-    ]
-    assert any("Prefers coffee" in item for item in target_system)
-    assert all("Prefers coffee" not in item for item in other_system)
+    target_context = [item["content"] for item in gateway.requests[0]]
+    other_context = [item["content"] for item in gateway.requests[1]]
+    assert any("Prefers coffee" in item for item in target_context)
+    assert all("Prefers coffee" not in item for item in other_context)

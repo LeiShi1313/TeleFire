@@ -25,6 +25,9 @@ telefire = "telefire.cli:main"
 [tool.hatch.version]
 source = "vcs"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"

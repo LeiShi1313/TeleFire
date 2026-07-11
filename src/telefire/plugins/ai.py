@@ -11,6 +11,7 @@ from telefire.ai import (
     OpenAIChatGateway,
     PromptBuilder,
 )
+from telefire.ai_memory import HTTPMemoryClient
 from telefire.plugins.base import PluginMount
 from telefire.telegram import TelegramCommand
 
@@ -35,6 +36,11 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         )
         self._settings = settings
         self._store = AIStateRepository(settings.state_path)
+        self._memory = (
+            HTTPMemoryClient(settings.memory_url, timeout=settings.memory_timeout)
+            if settings.memory_url
+            else None
+        )
         self._handler: AIConversationHandler | None = None
 
     def __call__(self) -> None:
@@ -47,6 +53,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             await self._setup()
             await self.service.wait_until_disconnected()
         finally:
+            if self._memory is not None:
+                await self._memory.close()
             await self._store.close()
             await self.service.close()
 
@@ -66,6 +74,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 self._store,
                 cooldown_seconds=self._settings.delegated_cooldown,
             ),
+            memory=self._memory,
+            logger=self.logger,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())
         self.logger.info("Telegram AI userbot started")

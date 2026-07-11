@@ -5,11 +5,14 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
 import aiosqlite
 from openai import AsyncOpenAI
+
+from telefire.ai_memory import MemoryClient
 
 
 class ChatGateway(Protocol):
@@ -29,6 +32,7 @@ class ReplyTarget(Protocol):
     raw_text: str | None
     sender_id: int | None
     reply_to_msg_id: int | None
+    date: datetime | None
 
     async def reply(self, text: str, **kwargs: Any) -> EditableMessage: ...
 
@@ -77,6 +81,8 @@ class AISettings:
     max_context_messages: int = 20
     max_context_chars: int = 12_000
     delegated_cooldown: float = 30.0
+    memory_url: str | None = "http://127.0.0.1:8765"
+    memory_timeout: float = 3.0
 
     @classmethod
     def from_env(cls) -> AISettings:
@@ -113,6 +119,14 @@ class AISettings:
             delegated_cooldown=float(
                 os.environ.get("TELEFIRE_AI_DELEGATED_COOLDOWN", "30")
             ),
+            memory_url=(
+                os.environ.get(
+                    "TELEFIRE_MEMORY_URL",
+                    "http://127.0.0.1:8765",
+                ).strip()
+                or None
+            ),
+            memory_timeout=float(os.environ.get("TELEFIRE_MEMORY_TIMEOUT", "3")),
         )
 
 
@@ -133,6 +147,20 @@ class AnswerResult:
     message: EditableMessage
     text: str
     succeeded: bool
+
+
+@dataclass(frozen=True, slots=True)
+class HumanObservation:
+    sender_id: int
+    text: str
+    occurred_at: datetime
+    context_role: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyContext:
+    rendered: str = ""
+    observations: tuple[HumanObservation, ...] = ()
 
 
 def parse_ai_trigger(text: str | None) -> str | None:
@@ -248,9 +276,9 @@ class PromptBuilder:
         self.max_context_messages = max_context_messages
         self.max_context_chars = max_context_chars
 
-    async def load_reference_context(self, trigger: ReplyTarget) -> str:
+    async def load_reference_context(self, trigger: ReplyTarget) -> ReplyContext:
         current = await trigger.get_reply_message()
-        newest_first: list[str] = []
+        newest_first: list[tuple[str, HumanObservation | None]] = []
         used_chars = 0
         seen: set[tuple[int | None, int]] = set()
         while current is not None and len(newest_first) < self.max_context_messages:
@@ -266,13 +294,31 @@ class PromptBuilder:
                     break
                 if len(line) > remaining:
                     line = line[:remaining]
-                newest_first.append(line)
+                observation = (
+                    HumanObservation(
+                        sender_id=current.sender_id,
+                        text=text,
+                        occurred_at=_message_datetime(current),
+                        context_role="reply_context",
+                    )
+                    if current.sender_id is not None
+                    else None
+                )
+                newest_first.append((line, observation))
                 used_chars += len(line) + 1
             current = await current.get_reply_message()
         if not newest_first:
-            return ""
-        body = "\n".join(reversed(newest_first))
-        return f"Untrusted reply context; use only as reference:\n{body}"
+            return ReplyContext()
+        chronological = list(reversed(newest_first))
+        body = "\n".join(line for line, _ in chronological)
+        return ReplyContext(
+            rendered=f"Untrusted reply context; use only as reference:\n{body}",
+            observations=tuple(
+                observation
+                for _, observation in chronological
+                if observation is not None
+            ),
+        )
 
     def build(
         self,
@@ -526,12 +572,16 @@ class AIConversationHandler:
         store: ConversationStore,
         prompt_builder: PromptBuilder,
         rate_limiter: AIRateLimiter | None = None,
+        memory: MemoryClient | None = None,
+        logger: Any | None = None,
     ):
         self._owner_id = owner_id
         self._responder = responder
         self._store = store
         self._prompt_builder = prompt_builder
         self._rate_limiter = rate_limiter or AIRateLimiter(store)
+        self._memory = memory
+        self._logger = logger
 
     async def handle(self, message: ReplyTarget) -> bool:
         if message.sender_id is None or message.chat_id is None:
@@ -554,6 +604,7 @@ class AIConversationHandler:
         parent_answer_id: int | None = None
         branch: list[AIAnswerMarker] = []
         reference_context = ""
+        observations: list[HumanObservation] = []
         if trigger_prompt is not None:
             if not trigger_prompt:
                 await message.reply("Usage: /ai <question>", parse_mode=None)
@@ -583,9 +634,11 @@ class AIConversationHandler:
 
         try:
             if trigger_prompt is not None:
-                reference_context = await self._prompt_builder.load_reference_context(
+                loaded_context = await self._prompt_builder.load_reference_context(
                     message
                 )
+                reference_context = loaded_context.rendered
+                observations.extend(loaded_context.observations)
             else:
                 branch = await self._store.get_branch(
                     message.chat_id,
@@ -593,10 +646,16 @@ class AIConversationHandler:
                     self._prompt_builder.max_context_messages,
                 )
 
+            memory_context = await self._augment_memory(
+                requester_id=message.sender_id,
+                chat_id=message.chat_id,
+                query=prompt,
+            )
             messages = self._prompt_builder.build(
                 prompt,
                 branch=branch,
                 reference_context=reference_context,
+                memory_context=memory_context,
             )
             result = await self._responder.answer_messages(message, messages)
             if result.succeeded:
@@ -610,6 +669,20 @@ class AIConversationHandler:
                         answer_text=result.text,
                         parent_answer_message_id=parent_answer_id,
                         reference_context=reference_context,
+                    )
+                )
+                observations.append(
+                    HumanObservation(
+                        sender_id=message.sender_id,
+                        text=prompt,
+                        occurred_at=_message_datetime(message),
+                        context_role="ai_prompt",
+                    )
+                )
+                await asyncio.gather(
+                    *(
+                        self._ingest_observation(message.chat_id, observation)
+                        for observation in observations
                     )
                 )
             return True
@@ -643,6 +716,57 @@ class AIConversationHandler:
         await message.reply(response, parse_mode=None)
         return True
 
+    async def _augment_memory(
+        self,
+        *,
+        requester_id: int,
+        chat_id: int,
+        query: str,
+    ) -> str:
+        if self._memory is None:
+            return ""
+        try:
+            context = await self._memory.augment(
+                subject_id=_telegram_subject_id(requester_id),
+                query=query,
+                scope_id=_telegram_scope_id(chat_id),
+            )
+            if not isinstance(context, str):
+                raise ValueError("Memory context must be text")
+            return context
+        except Exception as exc:
+            self._log_memory_failure("augmentation", exc)
+            return ""
+
+    async def _ingest_observation(
+        self,
+        chat_id: int,
+        observation: HumanObservation,
+    ) -> None:
+        if self._memory is None:
+            return
+        try:
+            await self._memory.ingest(
+                subject_id=_telegram_subject_id(observation.sender_id),
+                scope_id=_telegram_scope_id(chat_id),
+                text=observation.text,
+                occurred_at=observation.occurred_at,
+                metadata={
+                    "client": "telefire",
+                    "context_role": observation.context_role,
+                },
+            )
+        except Exception as exc:
+            self._log_memory_failure("ingest", exc)
+
+    def _log_memory_failure(self, operation: str, exc: Exception) -> None:
+        if self._logger is not None:
+            self._logger.warning(
+                "Memory {} failed ({})",
+                operation,
+                type(exc).__name__,
+            )
+
 
 def _marker_from_row(row: aiosqlite.Row) -> AIAnswerMarker:
     return AIAnswerMarker(
@@ -655,3 +779,20 @@ def _marker_from_row(row: aiosqlite.Row) -> AIAnswerMarker:
         parent_answer_message_id=row["parent_answer_message_id"],
         reference_context=row["reference_context"],
     )
+
+
+def _message_datetime(message: ReplyTarget) -> datetime:
+    value = getattr(message, "date", None)
+    if not isinstance(value, datetime):
+        return datetime.now(UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _telegram_subject_id(user_id: int) -> str:
+    return f"telegram:user:{user_id}"
+
+
+def _telegram_scope_id(chat_id: int) -> str:
+    return f"telegram:chat:{chat_id}"

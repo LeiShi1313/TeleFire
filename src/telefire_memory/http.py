@@ -17,6 +17,7 @@ def create_app(core: MemoryCore) -> web.Application:
     app.router.add_get("/health", _health)
     app.router.add_post("/v1/memory/ingest", _ingest)
     app.router.add_post("/v1/memory/augment", _augment)
+    app.router.add_post("/v1/memory/revise", _revise)
     return app
 
 
@@ -53,6 +54,20 @@ async def _augment(request: web.Request) -> web.Response:
             max_chars=int(payload.get("max_chars", 4_000)),
         )
         return web.json_response(context.to_dict())
+    except (ValueError, TypeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+
+async def _revise(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+        result = await request.app[CORE_KEY].revise(
+            subject_id=_required_string(payload, "subject_id"),
+            instruction=_required_string(payload, "instruction"),
+            evidence=payload.get("evidence"),
+            scope_id=payload.get("scope_id"),
+        )
+        return web.json_response(result.to_dict())
     except (ValueError, TypeError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
 

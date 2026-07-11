@@ -39,8 +39,35 @@ class FakeOpenAIProvider:
     async def chat_completion(self, request: web.Request):
         self.chat_calls += 1
         payload = await request.json()
+        system = payload["messages"][0]["content"]
         content = payload["messages"][-1]["content"]
-        if "malformed extraction" in content:
+        if "Revise a subject profile" in system:
+            revision = json.loads(content)
+            instruction = revision["instruction"].lower()
+            if "malformed revision" in instruction:
+                result = "not-json"
+            else:
+                candidates = revision["derived_candidates"]
+                suppress = []
+                if "forget tea" in instruction:
+                    suppress = [
+                        index
+                        for index, candidate in enumerate(candidates)
+                        if "tea" in candidate["text"].lower()
+                    ]
+                    profile = "# User Profile\n\nNo retained tea preference."
+                elif "coffee" in instruction:
+                    profile = "# User Profile\n\n- Prefers coffee."
+                else:
+                    evidence = revision.get("evidence") or "Uses vector databases."
+                    profile = f"# User Profile\n\n- {evidence}"
+                result = json.dumps(
+                    {
+                        "profile_markdown": profile,
+                        "suppress_indexes": suppress,
+                    }
+                )
+        elif "malformed extraction" in content:
             result = "not-json"
         elif "tea" in content.lower():
             result = json.dumps(
@@ -252,6 +279,104 @@ async def test_malformed_extraction_does_not_create_partial_memory(
 
 
 @pytest.mark.asyncio
+async def test_revise_creates_and_corrects_one_cross_scope_markdown_profile(
+    tmp_path, fake_provider
+):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+
+    created = await core.revise(
+        subject_id="telegram:user:42",
+        instruction="Remember this profile fact",
+        evidence="Builds retrieval systems.",
+        scope_id="telegram:chat:7",
+    )
+    initial = await core.augment(
+        "telegram:user:42",
+        "What does this user build?",
+        scope_id=None,
+    )
+    corrected = await core.revise(
+        subject_id="telegram:user:42",
+        instruction="Correct the preference to coffee",
+        scope_id=None,
+    )
+    final = await core.augment(
+        "telegram:user:42",
+        "What does this user prefer?",
+        scope_id=None,
+    )
+
+    assert created.profile_updated is True
+    assert created.suppressed_count == 0
+    assert initial.profile == "# User Profile\n\n- Builds retrieval systems."
+    assert initial.facts == ()
+    assert corrected.profile_updated is True
+    assert final.profile == "# User Profile\n\n- Prefers coffee."
+    assert core._store.count_records(
+        subject_id="telegram:user:42",
+        scope_id="",
+        record_type="profile",
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_revision_suppresses_scoped_derived_memory_but_retains_observation(
+    tmp_path, fake_provider
+):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+    occurred_at = datetime(2026, 7, 11, tzinfo=UTC)
+    await core.ingest(
+        "telegram:user:42", "telegram:chat:7", "Alice likes tea", occurred_at
+    )
+    await core.ingest(
+        "telegram:user:42", "telegram:chat:8", "Alice likes tea", occurred_at
+    )
+
+    revised = await core.revise(
+        "telegram:user:42",
+        "Forget tea",
+        scope_id="telegram:chat:7",
+    )
+    forgotten_scope = await core.augment(
+        "telegram:user:42", "tea", scope_id="telegram:chat:7"
+    )
+    untouched_scope = await core.augment(
+        "telegram:user:42", "tea", scope_id="telegram:chat:8"
+    )
+
+    assert revised.suppressed_count == 2
+    assert forgotten_scope.facts == ()
+    assert forgotten_scope.episodes == ()
+    assert untouched_scope.facts
+    assert untouched_scope.episodes
+    assert core._store.count_records(
+        subject_id="telegram:user:42",
+        scope_id="telegram:chat:7",
+        record_type="observation",
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_malformed_revision_leaves_profile_and_memory_unchanged(
+    tmp_path, fake_provider
+):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+    await core.revise(
+        "telegram:user:42",
+        "Correct the preference to coffee",
+    )
+    before = await core.augment("telegram:user:42", "preference")
+
+    with pytest.raises(ValueError, match="valid JSON"):
+        await core.revise("telegram:user:42", "malformed revision")
+
+    after = await core.augment("telegram:user:42", "preference")
+    other = await core.augment("telegram:user:99", "preference")
+    assert after.profile == before.profile
+    assert other.profile is None
+
+
+@pytest.mark.asyncio
 async def test_http_service_matches_direct_core_semantics(tmp_path, fake_provider):
     core = MemoryCore(memory_settings(tmp_path, fake_provider))
     runner = web.AppRunner(create_app(core))
@@ -290,5 +415,33 @@ async def test_http_service_matches_direct_core_semantics(tmp_path, fake_provide
             assert payload["scope_id"] == "telegram:chat:7"
             assert payload["facts"]
             assert payload["episodes"]
+
+            revise_response = await session.post(
+                f"http://127.0.0.1:{port}/v1/memory/revise",
+                json={
+                    "subject_id": "telegram:user:42",
+                    "scope_id": "telegram:chat:7",
+                    "instruction": "Remember this profile fact",
+                    "evidence": "Builds retrieval systems.",
+                },
+            )
+            assert revise_response.status == 200
+            revision_payload = await revise_response.json()
+            assert revision_payload == {
+                "profile_updated": True,
+                "suppressed_count": 0,
+            }
+
+            profile_response = await session.post(
+                f"http://127.0.0.1:{port}/v1/memory/augment",
+                json={
+                    "subject_id": "telegram:user:42",
+                    "query": "profile",
+                },
+            )
+            assert profile_response.status == 200
+            assert (await profile_response.json())["profile"].startswith(
+                "# User Profile"
+            )
     finally:
         await runner.cleanup()

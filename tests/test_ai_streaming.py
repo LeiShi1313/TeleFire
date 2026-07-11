@@ -70,6 +70,15 @@ class FakeStore:
     async def save_answer(self, marker):
         self.saved.append(marker)
 
+    async def is_allowed(self, user_id):
+        return False
+
+    async def get_last_request_at(self, user_id):
+        return None
+
+    async def set_last_request_at(self, user_id, timestamp):
+        return None
+
 
 def make_handler(owner_id, responder):
     return AIConversationHandler(

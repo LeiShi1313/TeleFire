@@ -89,6 +89,15 @@ class FakeStore:
     async def save_answer(self, marker: AIAnswerMarker):
         self.markers[(marker.chat_id, marker.answer_message_id)] = marker
 
+    async def is_allowed(self, user_id: int):
+        return False
+
+    async def get_last_request_at(self, user_id: int):
+        return None
+
+    async def set_last_request_at(self, user_id: int, timestamp: float):
+        return None
+
 
 def make_handler(gateway, store=None, **builder_options):
     store = store or FakeStore()

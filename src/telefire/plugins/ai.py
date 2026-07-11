@@ -4,6 +4,7 @@ import asyncio
 
 from telefire.ai import (
     AIConversationHandler,
+    AIRateLimiter,
     AIResponder,
     AISettings,
     AIStateRepository,
@@ -60,6 +61,10 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 system_prompt=self._settings.system_prompt,
                 max_context_messages=self._settings.max_context_messages,
                 max_context_chars=self._settings.max_context_chars,
+            ),
+            rate_limiter=AIRateLimiter(
+                self._store,
+                cooldown_seconds=self._settings.delegated_cooldown,
             ),
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())

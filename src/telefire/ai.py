@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import AsyncIterator, Callable
@@ -45,6 +46,16 @@ class ConversationStore(Protocol):
 
     async def save_answer(self, marker: AIAnswerMarker) -> None: ...
 
+    async def is_allowed(self, user_id: int) -> bool: ...
+
+    async def allow_user(self, user_id: int) -> None: ...
+
+    async def deny_user(self, user_id: int) -> None: ...
+
+    async def get_last_request_at(self, user_id: int) -> float | None: ...
+
+    async def set_last_request_at(self, user_id: int, timestamp: float) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class AISettings:
@@ -65,6 +76,7 @@ class AISettings:
     state_path: Path = Path.home() / ".telefire" / "ai.db"
     max_context_messages: int = 20
     max_context_chars: int = 12_000
+    delegated_cooldown: float = 30.0
 
     @classmethod
     def from_env(cls) -> AISettings:
@@ -97,6 +109,9 @@ class AISettings:
             ),
             max_context_chars=int(
                 os.environ.get("TELEFIRE_AI_MAX_CONTEXT_CHARS", "12000")
+            ),
+            delegated_cooldown=float(
+                os.environ.get("TELEFIRE_AI_DELEGATED_COOLDOWN", "30")
             ),
         )
 
@@ -336,6 +351,22 @@ class AIStateRepository:
             )
             """
         )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_whitelist (
+                user_id INTEGER PRIMARY KEY,
+                allowed_at REAL NOT NULL
+            )
+            """
+        )
+        await self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_usage (
+                user_id INTEGER PRIMARY KEY,
+                last_request_at REAL NOT NULL
+            )
+            """
+        )
         await self._connection.commit()
         self.path.chmod(0o600)
         return self
@@ -398,10 +429,93 @@ class AIStateRepository:
         )
         await connection.commit()
 
+    async def is_allowed(self, user_id: int) -> bool:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            "SELECT 1 FROM ai_whitelist WHERE user_id = ?",
+            (user_id,),
+        )
+        return await cursor.fetchone() is not None
+
+    async def allow_user(self, user_id: int) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            "INSERT INTO ai_whitelist (user_id, allowed_at) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET allowed_at = excluded.allowed_at",
+            (user_id, time.time()),
+        )
+        await connection.commit()
+
+    async def deny_user(self, user_id: int) -> None:
+        connection = self._require_connection()
+        await connection.execute("DELETE FROM ai_whitelist WHERE user_id = ?", (user_id,))
+        await connection.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
+        await connection.commit()
+
+    async def get_last_request_at(self, user_id: int) -> float | None:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            "SELECT last_request_at FROM ai_usage WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return float(row["last_request_at"]) if row else None
+
+    async def set_last_request_at(self, user_id: int, timestamp: float) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            "INSERT INTO ai_usage (user_id, last_request_at) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "last_request_at = excluded.last_request_at",
+            (user_id, timestamp),
+        )
+        await connection.commit()
+
     def _require_connection(self) -> aiosqlite.Connection:
         if self._connection is None:
             raise RuntimeError("AI state repository is not connected")
         return self._connection
+
+
+class AIRateLimiter:
+    def __init__(
+        self,
+        store: ConversationStore,
+        *,
+        cooldown_seconds: float = 30.0,
+        clock: Callable[[], float] = time.time,
+    ):
+        if cooldown_seconds < 0:
+            raise ValueError("cooldown_seconds cannot be negative")
+        self._store = store
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._in_flight: set[int] = set()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, *, user_id: int, is_owner: bool) -> bool:
+        if is_owner:
+            return True
+        async with self._lock:
+            if user_id in self._in_flight:
+                return False
+            last_request_at = await self._store.get_last_request_at(user_id)
+            if (
+                last_request_at is not None
+                and self._clock() - last_request_at < self._cooldown_seconds
+            ):
+                return False
+            self._in_flight.add(user_id)
+            return True
+
+    async def release(self, *, user_id: int, is_owner: bool) -> None:
+        if is_owner:
+            return
+        async with self._lock:
+            try:
+                await self._store.set_last_request_at(user_id, self._clock())
+            finally:
+                self._in_flight.discard(user_id)
 
 
 class AIConversationHandler:
@@ -411,17 +525,32 @@ class AIConversationHandler:
         responder: AIResponder,
         store: ConversationStore,
         prompt_builder: PromptBuilder,
+        rate_limiter: AIRateLimiter | None = None,
     ):
         self._owner_id = owner_id
         self._responder = responder
         self._store = store
         self._prompt_builder = prompt_builder
+        self._rate_limiter = rate_limiter or AIRateLimiter(store)
 
     async def handle(self, message: ReplyTarget) -> bool:
-        if message.sender_id != self._owner_id or message.chat_id is None:
+        if message.sender_id is None or message.chat_id is None:
             return False
 
+        command = (message.raw_text or "").strip()
+        if command in {"/ai_allow", "/ai_deny"}:
+            if message.sender_id != self._owner_id:
+                return False
+            return await self._handle_access_command(message, command)
+
         trigger_prompt = parse_ai_trigger(message.raw_text)
+        if trigger_prompt is None and message.reply_to_msg_id is None:
+            return False
+
+        is_owner = message.sender_id == self._owner_id
+        if not is_owner and not await self._store.is_allowed(message.sender_id):
+            return False
+
         parent_answer_id: int | None = None
         branch: list[AIAnswerMarker] = []
         reference_context = ""
@@ -430,9 +559,6 @@ class AIConversationHandler:
                 await message.reply("Usage: /ai <question>", parse_mode=None)
                 return True
             prompt = trigger_prompt
-            reference_context = await self._prompt_builder.load_reference_context(
-                message
-            )
         else:
             parent_answer_id = message.reply_to_msg_id
             if parent_answer_id is None:
@@ -443,31 +569,78 @@ class AIConversationHandler:
             prompt = (message.raw_text or "").strip()
             if not prompt:
                 return False
-            branch = await self._store.get_branch(
-                message.chat_id,
-                parent_answer_id,
-                self._prompt_builder.max_context_messages,
+
+        acquired = await self._rate_limiter.acquire(
+            user_id=message.sender_id,
+            is_owner=is_owner,
+        )
+        if not acquired:
+            await message.reply(
+                "AI rate limit active. Try again shortly.",
+                parse_mode=None,
+            )
+            return True
+
+        try:
+            if trigger_prompt is not None:
+                reference_context = await self._prompt_builder.load_reference_context(
+                    message
+                )
+            else:
+                branch = await self._store.get_branch(
+                    message.chat_id,
+                    parent_answer_id,
+                    self._prompt_builder.max_context_messages,
+                )
+
+            messages = self._prompt_builder.build(
+                prompt,
+                branch=branch,
+                reference_context=reference_context,
+            )
+            result = await self._responder.answer_messages(message, messages)
+            if result.succeeded:
+                await self._store.save_answer(
+                    AIAnswerMarker(
+                        chat_id=message.chat_id,
+                        answer_message_id=result.message.id,
+                        trigger_message_id=message.id,
+                        requester_id=message.sender_id,
+                        prompt=prompt,
+                        answer_text=result.text,
+                        parent_answer_message_id=parent_answer_id,
+                        reference_context=reference_context,
+                    )
+                )
+            return True
+        finally:
+            await self._rate_limiter.release(
+                user_id=message.sender_id,
+                is_owner=is_owner,
             )
 
-        messages = self._prompt_builder.build(
-            prompt,
-            branch=branch,
-            reference_context=reference_context,
-        )
-        result = await self._responder.answer_messages(message, messages)
-        if result.succeeded:
-            await self._store.save_answer(
-                AIAnswerMarker(
-                    chat_id=message.chat_id,
-                    answer_message_id=result.message.id,
-                    trigger_message_id=message.id,
-                    requester_id=message.sender_id,
-                    prompt=prompt,
-                    answer_text=result.text,
-                    parent_answer_message_id=parent_answer_id,
-                    reference_context=reference_context,
-                )
+    async def _handle_access_command(
+        self,
+        message: ReplyTarget,
+        command: str,
+    ) -> bool:
+        target = await message.get_reply_message()
+        if target is None or target.sender_id is None:
+            await message.reply(
+                f"Usage: reply to a user with {command}",
+                parse_mode=None,
             )
+            return True
+        if target.sender_id == self._owner_id:
+            await message.reply("Owner access is always enabled.", parse_mode=None)
+            return True
+        if command == "/ai_allow":
+            await self._store.allow_user(target.sender_id)
+            response = "AI access allowed."
+        else:
+            await self._store.deny_user(target.sender_id)
+            response = "AI access denied."
+        await message.reply(response, parse_mode=None)
         return True
 
 

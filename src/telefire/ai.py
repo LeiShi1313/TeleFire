@@ -173,6 +173,16 @@ def parse_ai_trigger(text: str | None) -> str | None:
     return None
 
 
+def parse_memory_revision(text: str | None) -> str | None:
+    if text is None:
+        return None
+    if text == "/ai_memory":
+        return ""
+    if text.startswith(("/ai_memory ", "/ai_memory\n", "/ai_memory\t")):
+        return text[len("/ai_memory") :].strip()
+    return None
+
+
 class OpenAIChatGateway:
     def __init__(self, settings: AISettings):
         self._settings = settings
@@ -588,6 +598,14 @@ class AIConversationHandler:
             return False
 
         command = (message.raw_text or "").strip()
+        memory_instruction = parse_memory_revision(message.raw_text)
+        if memory_instruction is not None:
+            if message.sender_id != self._owner_id:
+                return False
+            return await self._handle_memory_revision(
+                message,
+                memory_instruction,
+            )
         if command in {"/ai_allow", "/ai_deny"}:
             if message.sender_id != self._owner_id:
                 return False
@@ -737,6 +755,48 @@ class AIConversationHandler:
         except Exception as exc:
             self._log_memory_failure("augmentation", exc)
             return ""
+
+    async def _handle_memory_revision(
+        self,
+        message: ReplyTarget,
+        instruction: str,
+    ) -> bool:
+        if not instruction:
+            await message.reply(
+                "Usage: reply to a user with /ai_memory <instruction>",
+                parse_mode=None,
+            )
+            return True
+        target = await message.get_reply_message()
+        if target is None or target.sender_id is None:
+            await message.reply(
+                "Usage: reply to a user with /ai_memory <instruction>",
+                parse_mode=None,
+            )
+            return True
+        if self._memory is None:
+            await message.reply(
+                "Memory update failed. Existing memory was not changed.",
+                parse_mode=None,
+            )
+            return True
+        evidence = (target.raw_text or "").strip() or None
+        try:
+            await self._memory.revise(
+                subject_id=_telegram_subject_id(target.sender_id),
+                instruction=instruction,
+                evidence=evidence,
+                scope_id=_telegram_scope_id(message.chat_id),
+            )
+        except Exception as exc:
+            self._log_memory_failure("revision", exc)
+            await message.reply(
+                "Memory update failed. Existing memory was not changed.",
+                parse_mode=None,
+            )
+            return True
+        await message.reply("Memory updated.", parse_mode=None)
+        return True
 
     async def _ingest_observation(
         self,

@@ -25,6 +25,15 @@ class MemoryClient(Protocol):
         metadata: dict[str, Any] | None = None,
     ) -> None: ...
 
+    async def revise(
+        self,
+        *,
+        subject_id: str,
+        instruction: str,
+        evidence: str | None,
+        scope_id: str | None,
+    ) -> dict[str, int | bool]: ...
+
 
 class MemoryClientError(RuntimeError):
     pass
@@ -90,6 +99,37 @@ class HTTPMemoryClient:
         )
         if not isinstance(payload.get("created"), bool):
             raise MemoryClientError("Memory ingest response is malformed")
+
+    async def revise(
+        self,
+        *,
+        subject_id: str,
+        instruction: str,
+        evidence: str | None,
+        scope_id: str | None,
+    ) -> dict[str, int | bool]:
+        payload = await self._post(
+            "/v1/memory/revise",
+            {
+                "subject_id": subject_id,
+                "instruction": instruction,
+                "evidence": evidence,
+                "scope_id": scope_id,
+            },
+        )
+        profile_updated = payload.get("profile_updated")
+        suppressed_count = payload.get("suppressed_count")
+        if (
+            not isinstance(profile_updated, bool)
+            or isinstance(suppressed_count, bool)
+            or not isinstance(suppressed_count, int)
+            or suppressed_count < 0
+        ):
+            raise MemoryClientError("Memory revision response is malformed")
+        return {
+            "profile_updated": profile_updated,
+            "suppressed_count": suppressed_count,
+        }
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._session is None:

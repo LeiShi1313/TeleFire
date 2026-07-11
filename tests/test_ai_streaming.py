@@ -8,6 +8,7 @@ from telefire.ai import (
     AISettings,
     PromptBuilder,
     parse_ai_trigger,
+    parse_memory_revision,
 )
 from telefire.plugins.base import command_registry
 import telefire.plugins.ai  # noqa: F401
@@ -102,6 +103,19 @@ def make_handler(owner_id, responder):
 )
 def test_parse_ai_trigger_has_an_exact_command_boundary(text, expected):
     assert parse_ai_trigger(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/ai_memory remember this", "remember this"),
+        ("/ai_memory\nforget that", "forget that"),
+        ("/ai_memory", ""),
+        ("/ai_memoryx no", None),
+    ],
+)
+def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
+    assert parse_memory_revision(text) == expected
 
 
 def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatch):

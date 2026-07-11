@@ -80,6 +80,49 @@ async def test_http_memory_client_validates_and_uses_platform_neutral_contract()
 
 
 @pytest.mark.asyncio
+async def test_http_memory_client_revision_exposes_no_internal_ids():
+    received = {}
+
+    async def augment(request):
+        return web.json_response({})
+
+    async def revise(request):
+        received.update(await request.json())
+        return web.json_response(
+            {"profile_updated": True, "suppressed_count": 2}
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/memory/augment", augment)
+    app.router.add_post("/v1/memory/ingest", augment)
+    app.router.add_post("/v1/memory/revise", revise)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    client = HTTPMemoryClient(f"http://127.0.0.1:{port}")
+    try:
+        result = await client.revise(
+            subject_id="telegram:user:20",
+            instruction="Forget tea",
+            evidence="I prefer tea",
+            scope_id="telegram:chat:-1001",
+        )
+        assert result == {"profile_updated": True, "suppressed_count": 2}
+        assert received == {
+            "subject_id": "telegram:user:20",
+            "instruction": "Forget tea",
+            "evidence": "I prefer tea",
+            "scope_id": "telegram:chat:-1001",
+        }
+        assert not any("id" in key for key in result)
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_http_memory_client_rejects_malformed_augmentation():
     async def malformed(request):
         await request.json()

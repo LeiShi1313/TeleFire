@@ -98,12 +98,21 @@ class FakeStore:
 
 
 class FakeMemory:
-    def __init__(self, *, augment_error=None, augment_value=None, ingest_error=None):
+    def __init__(
+        self,
+        *,
+        augment_error=None,
+        augment_value=None,
+        ingest_error=None,
+        revise_error=None,
+    ):
         self.augment_error = augment_error
         self.augment_value = augment_value
         self.ingest_error = ingest_error
+        self.revise_error = revise_error
         self.augment_calls = []
         self.ingest_calls = []
+        self.revise_calls = []
 
     async def augment(self, *, subject_id, query, scope_id):
         self.augment_calls.append(
@@ -119,6 +128,12 @@ class FakeMemory:
         self.ingest_calls.append(payload)
         if self.ingest_error:
             raise self.ingest_error
+
+    async def revise(self, **payload):
+        self.revise_calls.append(payload)
+        if self.revise_error:
+            raise self.revise_error
+        return {"profile_updated": True, "suppressed_count": 0}
 
 
 class FakeLogger:
@@ -270,3 +285,114 @@ async def test_memory_ingest_failure_and_unrelated_traffic_do_not_break_answers(
     unrelated = FakeMessage("ordinary chat", sender_id=10)
     assert await handler.handle(unrelated) is False
     assert len(memory.ingest_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    [
+        "Remember that this user likes tea",
+        "Correct the preference to coffee",
+        "Forget tea",
+    ],
+)
+@pytest.mark.asyncio
+async def test_owner_revises_replied_user_without_ingesting_command_or_evidence(
+    instruction,
+):
+    memory = FakeMemory()
+    gateway = FakeGateway(["unused"])
+    handler = make_handler(gateway, memory)
+    target = FakeMessage("I prefer tea", sender_id=20)
+    command = FakeMessage(
+        f"/ai_memory {instruction}",
+        sender_id=10,
+        reply_to=target,
+    )
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == "Memory updated."
+    assert memory.revise_calls == [
+        {
+            "subject_id": "telegram:user:20",
+            "instruction": instruction,
+            "evidence": "I prefer tea",
+            "scope_id": "telegram:chat:-1001",
+        }
+    ]
+    assert memory.ingest_calls == []
+    assert memory.augment_calls == []
+    assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_memory_revision_is_owner_only_and_failure_is_bounded():
+    logger = FakeLogger()
+    memory = FakeMemory(revise_error=ValueError("internal model output"))
+    gateway = FakeGateway(["unused"])
+    handler = make_handler(gateway, memory, allowed={20}, logger=logger)
+    target = FakeMessage("evidence", sender_id=30)
+
+    unauthorized = FakeMessage(
+        "/ai_memory change profile",
+        sender_id=20,
+        reply_to=target,
+    )
+    assert await handler.handle(unauthorized) is False
+    assert unauthorized.replies == []
+    assert memory.revise_calls == []
+
+    owner = FakeMessage(
+        "/ai_memory change profile",
+        sender_id=10,
+        reply_to=target,
+    )
+    assert await handler.handle(owner) is True
+    assert owner.replies[0].text == (
+        "Memory update failed. Existing memory was not changed."
+    )
+    assert logger.warnings
+
+
+class ProfileMemory(FakeMemory):
+    def __init__(self):
+        super().__init__()
+        self.profiles = {}
+
+    async def augment(self, *, subject_id, query, scope_id):
+        self.augment_calls.append(
+            {"subject_id": subject_id, "query": query, "scope_id": scope_id}
+        )
+        return self.profiles.get(subject_id, "")
+
+    async def revise(self, **payload):
+        self.revise_calls.append(payload)
+        self.profiles[payload["subject_id"]] = "# User Profile\n\n- Prefers coffee."
+        return {"profile_updated": True, "suppressed_count": 0}
+
+
+@pytest.mark.asyncio
+async def test_revised_profile_augments_only_the_target_users_later_request():
+    memory = ProfileMemory()
+    gateway = FakeGateway(["target answer", "other answer"])
+    handler = make_handler(gateway, memory, allowed={20, 30})
+    target = FakeMessage("I now prefer coffee", sender_id=20)
+    command = FakeMessage(
+        "/ai_memory Correct the preference",
+        sender_id=10,
+        reply_to=target,
+    )
+    await handler.handle(command)
+
+    target_request = FakeMessage("/ai what do I prefer?", sender_id=20)
+    other_request = FakeMessage("/ai what do I prefer?", sender_id=30)
+    await handler.handle(target_request)
+    await handler.handle(other_request)
+
+    target_system = [
+        item["content"] for item in gateway.requests[0] if item["role"] == "system"
+    ]
+    other_system = [
+        item["content"] for item in gateway.requests[1] if item["role"] == "system"
+    ]
+    assert any("Prefers coffee" in item for item in target_system)
+    assert all("Prefers coffee" not in item for item in other_system)

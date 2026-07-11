@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+import stat
 
 import pytest
 
@@ -233,6 +234,18 @@ async def test_answer_marker_survives_repository_restart(tmp_path):
         ]
     finally:
         await second_store.close()
+
+
+@pytest.mark.asyncio
+async def test_state_repository_preserves_existing_parent_permissions(tmp_path):
+    tmp_path.chmod(0o755)
+    path = tmp_path / "state.db"
+
+    store = await AIStateRepository(path).connect()
+    await store.close()
+
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio

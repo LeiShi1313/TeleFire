@@ -40,7 +40,7 @@ class MemoryClientError(RuntimeError):
 
 
 class HTTPMemoryClient:
-    def __init__(self, base_url: str, *, timeout: float = 3.0):
+    def __init__(self, base_url: str, *, timeout: float = 10.0):
         if timeout <= 0:
             raise ValueError("Memory timeout must be positive")
         self._base_url = base_url.rstrip("/")

@@ -82,7 +82,7 @@ class AISettings:
     max_context_chars: int = 12_000
     delegated_cooldown: float = 30.0
     memory_url: str | None = "http://127.0.0.1:8765"
-    memory_timeout: float = 3.0
+    memory_timeout: float = 10.0
     allowed_chat_ids: frozenset[int] | None = None
 
     @classmethod
@@ -127,7 +127,7 @@ class AISettings:
                 ).strip()
                 or None
             ),
-            memory_timeout=float(os.environ.get("TELEFIRE_MEMORY_TIMEOUT", "3")),
+            memory_timeout=float(os.environ.get("TELEFIRE_MEMORY_TIMEOUT", "10")),
             allowed_chat_ids=_parse_allowed_chat_ids(
                 os.environ.get("TELEFIRE_AI_ALLOWED_CHAT_IDS", "")
             ),
@@ -273,7 +273,7 @@ class AIResponder:
 
     def _log_failure(self, exc: Exception) -> None:
         if self._logger is not None:
-            self._logger.error("AI provider request failed ({})", type(exc).__name__)
+            self._logger.error("AI provider request failed (%s)", type(exc).__name__)
 
 
 class PromptBuilder:
@@ -391,8 +391,10 @@ class AIStateRepository:
         self._connection: aiosqlite.Connection | None = None
 
     async def connect(self) -> AIStateRepository:
+        parent_existed = self.path.parent.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.path.parent.chmod(0o700)
+        if not parent_existed:
+            self.path.parent.chmod(0o700)
         self._connection = await aiosqlite.connect(self.path)
         self._connection.row_factory = aiosqlite.Row
         await self._connection.execute("PRAGMA journal_mode=WAL")
@@ -661,6 +663,7 @@ class AIConversationHandler:
             )
             return True
 
+        rate_released = False
         try:
             if trigger_prompt is not None:
                 loaded_context = await self._prompt_builder.load_reference_context(
@@ -701,6 +704,11 @@ class AIConversationHandler:
                         reference_context=reference_context,
                     )
                 )
+                await self._rate_limiter.release(
+                    user_id=message.sender_id,
+                    is_owner=is_owner,
+                )
+                rate_released = True
                 observations.append(
                     HumanObservation(
                         sender_id=message.sender_id,
@@ -717,10 +725,11 @@ class AIConversationHandler:
                 )
             return True
         finally:
-            await self._rate_limiter.release(
-                user_id=message.sender_id,
-                is_owner=is_owner,
-            )
+            if not rate_released:
+                await self._rate_limiter.release(
+                    user_id=message.sender_id,
+                    is_owner=is_owner,
+                )
 
     async def _handle_access_command(
         self,
@@ -834,7 +843,7 @@ class AIConversationHandler:
     def _log_memory_failure(self, operation: str, exc: Exception) -> None:
         if self._logger is not None:
             self._logger.warning(
-                "Memory {} failed ({})",
+                "Memory %s failed (%s)",
                 operation,
                 type(exc).__name__,
             )

@@ -230,6 +230,23 @@ async def test_provider_failure_replaces_loading_message():
 
 
 @pytest.mark.asyncio
+async def test_provider_failure_uses_standard_logging_format(caplog):
+    import logging
+
+    gateway = FakeGateway(error=RuntimeError("provider detail"))
+    responder = AIResponder(
+        gateway,
+        edit_cadence=0,
+        logger=logging.getLogger("telefire-ai-test"),
+    )
+    trigger = FakeMessage("/ai hello")
+
+    await responder.answer(trigger, "hello")
+
+    assert "AI provider request failed (RuntimeError)" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_output_is_bounded_and_finalized():
     gateway = FakeGateway(["abcdefghijk"])
     responder = AIResponder(gateway, edit_cadence=0, max_output_chars=10)

@@ -45,7 +45,10 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
 
     def __call__(self) -> None:
         """Run the reply-based OpenAI-compatible Telegram userbot."""
-        asyncio.run(self._run())
+        try:
+            asyncio.run(self._run())
+        except KeyboardInterrupt:
+            pass
 
     async def _run(self) -> None:
         await self.service.connect()

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -370,6 +371,18 @@ class ProfileMemory(FakeMemory):
         return {"profile_updated": True, "suppressed_count": 0}
 
 
+class BlockingIngestMemory(FakeMemory):
+    def __init__(self):
+        super().__init__(augment_value="")
+        self.ingest_started = asyncio.Event()
+        self.release_ingest = asyncio.Event()
+
+    async def ingest(self, **payload):
+        self.ingest_calls.append(payload)
+        self.ingest_started.set()
+        await self.release_ingest.wait()
+
+
 @pytest.mark.asyncio
 async def test_revised_profile_augments_only_the_target_users_later_request():
     memory = ProfileMemory()
@@ -392,3 +405,24 @@ async def test_revised_profile_augments_only_the_target_users_later_request():
     other_context = [item["content"] for item in gateway.requests[1]]
     assert any("Prefers coffee" in item for item in target_context)
     assert all("Prefers coffee" not in item for item in other_context)
+
+
+@pytest.mark.asyncio
+async def test_post_answer_memory_ingest_does_not_hold_delegated_rate_lease():
+    memory = BlockingIngestMemory()
+    gateway = FakeGateway(["first answer", "second answer"])
+    handler = make_handler(gateway, memory, allowed={20})
+
+    first = FakeMessage("/ai first", sender_id=20)
+    first_task = asyncio.create_task(handler.handle(first))
+    await memory.ingest_started.wait()
+
+    second = FakeMessage("/ai second", sender_id=20)
+    second_task = asyncio.create_task(handler.handle(second))
+    while len(gateway.requests) < 2:
+        await asyncio.sleep(0)
+    memory.release_ingest.set()
+
+    assert await asyncio.gather(first_task, second_task) == [True, True]
+    assert first.replies[0].text == "first answer"
+    assert second.replies[0].text == "second answer"

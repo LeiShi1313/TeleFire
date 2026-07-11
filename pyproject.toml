@@ -11,6 +11,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "aiosqlite>=0.20.0",
     "openai>=2.45.0",
+    "zvec>=0.5.1,<0.6",
     "mautrix>=0.21.0",
     "Pillow>=10.0.0",
     "python-dateutil>=2.8.0",
@@ -22,6 +23,7 @@ ai = ["g4f>=0.3.8"]
 
 [project.scripts]
 telefire = "telefire.cli:main"
+telefire-memory = "telefire_memory.cli:main"
 
 [dependency-groups]
 dev = [

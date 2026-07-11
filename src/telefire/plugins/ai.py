@@ -1,6 +1,15 @@
 from telethon import events
 
-from telefire.ai import AIMessageHandler, AIResponder, AISettings, OpenAIChatGateway
+import asyncio
+
+from telefire.ai import (
+    AIConversationHandler,
+    AIResponder,
+    AISettings,
+    AIStateRepository,
+    OpenAIChatGateway,
+    PromptBuilder,
+)
 from telefire.plugins.base import PluginMount
 from telefire.telegram import TelegramCommand
 
@@ -23,15 +32,36 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             max_output_chars=settings.max_output_chars,
             logger=self.logger,
         )
-        self._handler: AIMessageHandler | None = None
+        self._settings = settings
+        self._store = AIStateRepository(settings.state_path)
+        self._handler: AIConversationHandler | None = None
 
     def __call__(self) -> None:
         """Run the reply-based OpenAI-compatible Telegram userbot."""
-        self.run_forever(setup=self._setup)
+        asyncio.run(self._run())
+
+    async def _run(self) -> None:
+        await self.service.connect()
+        try:
+            await self._setup()
+            await self.service.wait_until_disconnected()
+        finally:
+            await self._store.close()
+            await self.service.close()
 
     async def _setup(self) -> None:
         owner = await self.client.get_me()
-        self._handler = AIMessageHandler(owner_id=owner.id, responder=self._responder)
+        await self._store.connect()
+        self._handler = AIConversationHandler(
+            owner_id=owner.id,
+            responder=self._responder,
+            store=self._store,
+            prompt_builder=PromptBuilder(
+                system_prompt=self._settings.system_prompt,
+                max_context_messages=self._settings.max_context_messages,
+                max_context_chars=self._settings.max_context_chars,
+            ),
+        )
         self.client.add_event_handler(self._on_message, events.NewMessage())
         self.logger.info("Telegram AI userbot started")
 

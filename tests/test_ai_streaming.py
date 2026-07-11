@@ -3,9 +3,10 @@ from collections.abc import AsyncIterator
 import pytest
 
 from telefire.ai import (
-    AIMessageHandler,
+    AIConversationHandler,
     AIResponder,
     AISettings,
+    PromptBuilder,
     parse_ai_trigger,
 )
 from telefire.plugins.base import command_registry
@@ -14,6 +15,7 @@ import telefire.plugins.ai  # noqa: F401
 
 class FakeAnswer:
     def __init__(self, text: str):
+        self.id = 100
         self.text = text
         self.edits: list[str] = []
 
@@ -25,9 +27,15 @@ class FakeAnswer:
 
 class FakeMessage:
     def __init__(self, text: str, sender_id: int = 10):
+        self.id = 1
+        self.chat_id = -1001
         self.raw_text = text
         self.sender_id = sender_id
+        self.reply_to_msg_id = None
         self.replies: list[FakeAnswer] = []
+
+    async def get_reply_message(self):
+        return None
 
     async def reply(self, text: str, **kwargs):
         answer = FakeAnswer(text)
@@ -47,6 +55,29 @@ class FakeGateway:
             raise self.error
         for chunk in self.chunks:
             yield chunk
+
+
+class FakeStore:
+    def __init__(self):
+        self.saved = []
+
+    async def get_answer(self, chat_id, answer_message_id):
+        return None
+
+    async def get_branch(self, chat_id, answer_message_id, limit):
+        return []
+
+    async def save_answer(self, marker):
+        self.saved.append(marker)
+
+
+def make_handler(owner_id, responder):
+    return AIConversationHandler(
+        owner_id=owner_id,
+        responder=responder,
+        store=FakeStore(),
+        prompt_builder=PromptBuilder(),
+    )
 
 
 @pytest.mark.parametrize(
@@ -97,7 +128,7 @@ async def test_owner_gets_one_progressively_edited_answer():
     gateway = FakeGateway(["Hello", " ", "world"])
     times = iter([0.0, 1.0, 2.0, 3.0])
     responder = AIResponder(gateway, edit_cadence=0.5, clock=lambda: next(times))
-    handler = AIMessageHandler(owner_id=10, responder=responder)
+    handler = make_handler(owner_id=10, responder=responder)
     trigger = FakeMessage("/ai greet me")
 
     handled = await handler.handle(trigger)
@@ -116,7 +147,7 @@ async def test_owner_gets_one_progressively_edited_answer():
 @pytest.mark.asyncio
 async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
     gateway = FakeGateway(["must not be used"])
-    handler = AIMessageHandler(
+    handler = make_handler(
         owner_id=10,
         responder=AIResponder(gateway, edit_cadence=0),
     )
@@ -130,7 +161,7 @@ async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
 @pytest.mark.asyncio
 async def test_empty_prompt_finishes_with_usage_without_calling_provider():
     gateway = FakeGateway(["must not be used"])
-    handler = AIMessageHandler(
+    handler = make_handler(
         owner_id=10,
         responder=AIResponder(gateway, edit_cadence=0),
     )
@@ -145,7 +176,7 @@ async def test_empty_prompt_finishes_with_usage_without_calling_provider():
 @pytest.mark.asyncio
 async def test_provider_failure_replaces_loading_message():
     gateway = FakeGateway(error=RuntimeError("provider secret detail"))
-    handler = AIMessageHandler(
+    handler = make_handler(
         owner_id=10,
         responder=AIResponder(gateway, edit_cadence=0),
     )

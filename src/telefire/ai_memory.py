@@ -134,7 +134,9 @@ class HTTPMemoryClient:
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
-        async with self._session.post(f"{self._base_url}{path}", json=payload) as response:
+        async with self._session.post(
+            f"{self._base_url}{path}", json=payload
+        ) as response:
             if response.status < 200 or response.status >= 300:
                 raise MemoryClientError(
                     f"Memory service request failed with status {response.status}"

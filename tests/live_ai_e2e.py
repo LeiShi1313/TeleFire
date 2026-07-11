@@ -110,7 +110,9 @@ async def run() -> None:
         raise RuntimeError("Set TELEFIRE_RUN_E2E=1 to run the mutating live test")
     chat_raw = os.environ.get("TELEFIRE_E2E_CHAT_ID", "")
     if not chat_raw.startswith("-100"):
-        raise RuntimeError("TELEFIRE_E2E_CHAT_ID must be an explicit numeric megagroup ID")
+        raise RuntimeError(
+            "TELEFIRE_E2E_CHAT_ID must be an explicit numeric megagroup ID"
+        )
     chat_id = int(chat_raw)
     allowed_ids = {
         int(value)
@@ -143,9 +145,14 @@ async def run() -> None:
 
         chat = await owner.get_entity(chat_id)
         peer_chat = await peer.get_entity(chat_id)
-        if utils.get_peer_id(chat) != chat_id or utils.get_peer_id(peer_chat) != chat_id:
+        if (
+            utils.get_peer_id(chat) != chat_id
+            or utils.get_peer_id(peer_chat) != chat_id
+        ):
             raise RuntimeError("Both sessions must resolve the exact E2E chat")
-        participants = [participant async for participant in owner.iter_participants(chat)]
+        participants = [
+            participant async for participant in owner.iter_participants(chat)
+        ]
         if {participant.id for participant in participants} != {
             owner_identity.id,
             peer_identity.id,
@@ -306,7 +313,9 @@ async def run() -> None:
         forgotten = await get_profile(memory_url, subject_id, tea, scope_id=scope_id)
         forgotten_text = forgotten.get("rendered") or ""
         if tea in forgotten_text or coffee in forgotten_text:
-            raise RuntimeError("Telegram memory forget left matching retrievable content")
+            raise RuntimeError(
+                "Telegram memory forget left matching retrievable content"
+            )
         print("memory_forget=ok")
 
         deny = await owner.send_message(chat, "/ai_deny", reply_to=access_target.id)

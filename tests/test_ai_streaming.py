@@ -161,10 +161,12 @@ async def test_owner_gets_one_progressively_edited_answer():
     assert trigger.replies[0].text == "Hello world"
     assert trigger.replies[0].edits[-1] == "Hello world"
     assert any(edit == "Hello" for edit in trigger.replies[0].edits)
-    assert gateway.requests == [[
-        {"role": "system", "content": AISettings.DEFAULT_SYSTEM_PROMPT},
-        {"role": "user", "content": "greet me"},
-    ]]
+    assert gateway.requests == [
+        [
+            {"role": "system", "content": AISettings.DEFAULT_SYSTEM_PROMPT},
+            {"role": "user", "content": "greet me"},
+        ]
+    ]
 
 
 @pytest.mark.asyncio

@@ -98,8 +98,12 @@ class AISettings:
             raise ValueError(f"Missing AI configuration: {names}")
         return cls(
             **required,
-            max_output_tokens=int(os.environ.get("TELEFIRE_AI_MAX_OUTPUT_TOKENS", "1000")),
-            max_output_chars=int(os.environ.get("TELEFIRE_AI_MAX_OUTPUT_CHARS", "3900")),
+            max_output_tokens=int(
+                os.environ.get("TELEFIRE_AI_MAX_OUTPUT_TOKENS", "1000")
+            ),
+            max_output_chars=int(
+                os.environ.get("TELEFIRE_AI_MAX_OUTPUT_CHARS", "3900")
+            ),
             edit_cadence=float(os.environ.get("TELEFIRE_AI_EDIT_CADENCE", "0.8")),
             request_timeout=float(os.environ.get("TELEFIRE_AI_REQUEST_TIMEOUT", "90")),
             system_prompt=os.environ.get(
@@ -510,7 +514,9 @@ class AIStateRepository:
 
     async def deny_user(self, user_id: int) -> None:
         connection = self._require_connection()
-        await connection.execute("DELETE FROM ai_whitelist WHERE user_id = ?", (user_id,))
+        await connection.execute(
+            "DELETE FROM ai_whitelist WHERE user_id = ?", (user_id,)
+        )
         await connection.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
         await connection.commit()
 

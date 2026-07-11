@@ -8,7 +8,9 @@ from telefire_memory.http import create_app
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the standalone Telefire memory service")
+    parser = argparse.ArgumentParser(
+        description="Run the standalone Telefire memory service"
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get("TELEFIRE_MEMORY_HOST", "127.0.0.1"),
@@ -19,7 +21,11 @@ def main() -> None:
         type=int,
     )
     args = parser.parse_args()
-    web.run_app(create_app(MemoryCore(MemorySettings.from_env())), host=args.host, port=args.port)
+    web.run_app(
+        create_app(MemoryCore(MemorySettings.from_env())),
+        host=args.host,
+        port=args.port,
+    )
 
 
 if __name__ == "__main__":

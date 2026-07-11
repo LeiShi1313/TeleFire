@@ -101,9 +101,7 @@ def reset_message_ids():
 @pytest.mark.asyncio
 async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
     gateway = FakeGateway(["root", "continued", "forked"])
-    handler, store = await make_handler(
-        tmp_path / "state.db", gateway, cooldown=0
-    )
+    handler, store = await make_handler(tmp_path / "state.db", gateway, cooldown=0)
     try:
         target = FakeMessage("hello", sender_id=20)
         allow = FakeMessage("/ai_allow", sender_id=10, reply_to=target)
@@ -122,8 +120,7 @@ async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
 
         assert len(gateway.requests) == 3
         assert all(
-            "continue" not in message["content"]
-            for message in gateway.requests[2]
+            "continue" not in message["content"] for message in gateway.requests[2]
         )
     finally:
         await store.close()

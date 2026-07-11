@@ -198,19 +198,17 @@ async def test_requester_only_memory_precedes_reply_context_and_participants_are
         "content": "which database should we use?",
     }
 
-    assert {
-        (item["subject_id"], item["text"])
-        for item in memory.ingest_calls
-    } == {
+    assert {(item["subject_id"], item["text"]) for item in memory.ingest_calls} == {
         ("telegram:user:20", "I use Postgres at work"),
         ("telegram:user:10", "which database should we use?"),
     }
     assert all(
-        item["scope_id"] == "telegram:chat:-1001"
-        for item in memory.ingest_calls
+        item["scope_id"] == "telegram:chat:-1001" for item in memory.ingest_calls
     )
     assert all(item["text"] != "Use Postgres" for item in memory.ingest_calls)
-    assert all("message_id" not in item.get("metadata", {}) for item in memory.ingest_calls)
+    assert all(
+        "message_id" not in item.get("metadata", {}) for item in memory.ingest_calls
+    )
 
 
 @pytest.mark.asyncio

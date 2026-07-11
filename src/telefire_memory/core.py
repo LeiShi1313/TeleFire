@@ -81,15 +81,11 @@ class MemorySettings:
             embedding_api_key=os.environ.get(
                 "TELEFIRE_AI_EMBEDDING_API_KEY", chat_api_key
             ).strip(),
-            embedding_model=os.environ.get(
-                "TELEFIRE_AI_EMBEDDING_MODEL", ""
-            ).strip(),
+            embedding_model=os.environ.get("TELEFIRE_AI_EMBEDDING_MODEL", "").strip(),
             embedding_dimension=int(
                 os.environ.get("TELEFIRE_AI_EMBEDDING_DIMENSION", "1024")
             ),
-            request_timeout=float(
-                os.environ.get("TELEFIRE_AI_REQUEST_TIMEOUT", "90")
-            ),
+            request_timeout=float(os.environ.get("TELEFIRE_AI_REQUEST_TIMEOUT", "90")),
         )
 
 
@@ -179,7 +175,9 @@ class _OpenAIModels:
             timeout=settings.request_timeout,
         )
 
-    async def extract(self, text: str, occurred_at: datetime) -> tuple[list[str], list[str]]:
+    async def extract(
+        self, text: str, occurred_at: datetime
+    ) -> tuple[list[str], list[str]]:
         response = await self._chat.chat.completions.create(
             model=self._settings.chat_model,
             messages=[
@@ -293,7 +291,9 @@ class _OpenAIModels:
         normalized: list[int] = []
         for index in indexes:
             if isinstance(index, bool) or not isinstance(index, int):
-                raise ValueError("Memory revision suppress_indexes must contain integers")
+                raise ValueError(
+                    "Memory revision suppress_indexes must contain integers"
+                )
             if not 0 <= index < len(candidates):
                 raise ValueError("Memory revision returned an invalid candidate index")
             if index not in normalized:
@@ -444,9 +444,7 @@ class _ZvecMemoryStore:
             scope_id="",
             text=profile_text,
             occurred_at_ms=now_ms,
-            created_at_ms=(
-                existing.fields["created_at_ms"] if existing else now_ms
-            ),
+            created_at_ms=(existing.fields["created_at_ms"] if existing else now_ms),
             fingerprint="",
             source_observation_id="",
             metadata_json="{}",
@@ -543,7 +541,10 @@ class MemoryCore:
                 )
             ]
             for index, (record_type, derived_text) in enumerate(
-                [*(('fact', item) for item in facts), *(('episode', item) for item in episodes)],
+                [
+                    *(("fact", item) for item in facts),
+                    *(("episode", item) for item in episodes),
+                ],
                 start=1,
             ):
                 docs.append(
@@ -658,7 +659,9 @@ class MemoryCore:
 
         async with self._write_lock:
             query_text = f"{instruction}\n{evidence or ''}".strip()
-            query_vector = (await self._models.embed([f"{_QUERY_INSTRUCTION}{query_text}"]))[0]
+            query_vector = (
+                await self._models.embed([f"{_QUERY_INSTRUCTION}{query_text}"])
+            )[0]
             candidates = self._store.search_for_revision(
                 subject_id=subject_id,
                 scope_id=scope_id,
@@ -672,7 +675,9 @@ class MemoryCore:
                 evidence=evidence,
                 candidates=candidates,
             )
-            profile_vector = (await self._models.embed([profile_text or "Empty subject profile"]))[0]
+            profile_vector = (
+                await self._models.embed([profile_text or "Empty subject profile"])
+            )[0]
             self._store.apply_revision(
                 subject_id=subject_id,
                 profile_text=profile_text,
@@ -817,7 +822,9 @@ def _canonical_metadata(metadata: dict[str, Any] | None) -> str:
     if not isinstance(metadata, dict):
         raise ValueError("metadata must be a JSON object")
     try:
-        return json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
     except (TypeError, ValueError) as exc:
         raise ValueError("metadata must be JSON serializable") from exc
 

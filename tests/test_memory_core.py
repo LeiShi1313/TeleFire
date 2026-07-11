@@ -179,11 +179,14 @@ async def test_ingest_retains_observation_derives_memory_and_deduplicates_retry(
     assert retry.created is False
     assert fake_provider.chat_calls == 1
     assert fake_provider.embedding_calls == 1
-    assert core._store.count_records(
-        subject_id="telegram:user:42",
-        scope_id="telegram:chat:7",
-        record_type="observation",
-    ) == 1
+    assert (
+        core._store.count_records(
+            subject_id="telegram:user:42",
+            scope_id="telegram:chat:7",
+            record_type="observation",
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -288,10 +291,13 @@ async def test_malformed_extraction_does_not_create_partial_memory(
             datetime(2026, 7, 11, tzinfo=UTC),
         )
 
-    assert core._store.count_records(
-        subject_id="telegram:user:42",
-        scope_id="telegram:chat:7",
-    ) == 0
+    assert (
+        core._store.count_records(
+            subject_id="telegram:user:42",
+            scope_id="telegram:chat:7",
+        )
+        == 0
+    )
 
 
 @pytest.mark.asyncio
@@ -328,11 +334,14 @@ async def test_revise_creates_and_corrects_one_cross_scope_markdown_profile(
     assert initial.facts == ()
     assert corrected.profile_updated is True
     assert final.profile == "# User Profile\n\n- Prefers coffee."
-    assert core._store.count_records(
-        subject_id="telegram:user:42",
-        scope_id="",
-        record_type="profile",
-    ) == 1
+    assert (
+        core._store.count_records(
+            subject_id="telegram:user:42",
+            scope_id="",
+            record_type="profile",
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -365,11 +374,14 @@ async def test_revision_suppresses_scoped_derived_memory_but_retains_observation
     assert forgotten_scope.episodes == ()
     assert untouched_scope.facts
     assert untouched_scope.episodes
-    assert core._store.count_records(
-        subject_id="telegram:user:42",
-        scope_id="telegram:chat:7",
-        record_type="observation",
-    ) == 1
+    assert (
+        core._store.count_records(
+            subject_id="telegram:user:42",
+            scope_id="telegram:chat:7",
+            record_type="observation",
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio

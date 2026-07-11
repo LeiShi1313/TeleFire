@@ -88,9 +88,7 @@ async def test_http_memory_client_revision_exposes_no_internal_ids():
 
     async def revise(request):
         received.update(await request.json())
-        return web.json_response(
-            {"profile_updated": True, "suppressed_count": 2}
-        )
+        return web.json_response({"profile_updated": True, "suppressed_count": 2})
 
     app = web.Application()
     app.router.add_post("/v1/memory/augment", augment)

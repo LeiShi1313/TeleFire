@@ -79,6 +79,12 @@ uv run telefire matrix whoami
 
 The first Telegram command will prompt for login if the selected session file does not exist yet.
 
+Create a named Telegram session explicitly with:
+
+```bash
+uv run telefire telegram login --account work
+```
+
 The first Matrix command can bootstrap from the configured password, then persist `access_token` and `device_id` into the account store and reuse that session on later runs.
 
 ## Config
@@ -160,6 +166,47 @@ uv run telefire telegram get_all_chats
 uv run telefire telegram list_messages --chat=coder_ot --user=Fangliding
 uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 ```
+
+### Telegram AI and Memory
+
+Copy the settings from `.env.example` into a private `.env` and configure an
+OpenAI-compatible chat provider. The embedding model and dimension define one
+fixed vector space; changing either requires rebuilding the memory store.
+
+Start the standalone memory service:
+
+```bash
+set -a
+source .env
+set +a
+uv run telefire-memory
+```
+
+It binds to `127.0.0.1:8765` by default. In another terminal, start the
+Telegram userbot:
+
+```bash
+uv run telefire telegram ai
+```
+
+Commands and reply behavior:
+
+- `/ai <question>` starts a conversation. A replied message chain is reference
+  context; only text after `/ai` is the current instruction.
+- Reply directly to an AI answer without `/ai` to continue. Reply to an older
+  AI answer to fork from that point.
+- Reply to a user's message with `/ai_allow` or `/ai_deny` to manage delegated
+  access. The owner is always allowed.
+- Reply to a user's message with `/ai_memory <instruction>` to revise that
+  user's profile using the replied text as evidence.
+
+Unauthorized users are ignored. Delegated users get one request in flight and
+a 30-second cooldown by default. `TELEFIRE_AI_ALLOWED_CHAT_IDS` can contain a
+comma-separated numeric chat allowlist for restricted deployments.
+
+AI conversation markers, access state, and cooldown timestamps are stored in
+`~/.telefire/ai.db`. Zvec observations, facts, episodes, and profiles are stored
+under `~/.telefire/memory/`. Both locations contain private chat-derived data.
 
 Matrix examples:
 

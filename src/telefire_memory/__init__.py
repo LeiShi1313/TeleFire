@@ -5,7 +5,12 @@ from telefire_memory.core import (
     MemoryCore,
     MemoryEntry,
     MemorySettings,
+    MemorySubjectDetail,
+    MemorySubjectPage,
+    MemorySubjectSummary,
     RevisionResult,
+    StoredMemoryRecord,
+    StoredMemoryRecordPage,
 )
 
 __all__ = [
@@ -15,5 +20,10 @@ __all__ = [
     "MemoryCore",
     "MemoryEntry",
     "MemorySettings",
+    "MemorySubjectDetail",
+    "MemorySubjectPage",
+    "MemorySubjectSummary",
     "RevisionResult",
+    "StoredMemoryRecord",
+    "StoredMemoryRecordPage",
 ]

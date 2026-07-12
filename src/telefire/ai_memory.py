@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
 import aiohttp
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryIngestResult:
+    created: bool
+    facts_added: int
+    episodes_added: int
 
 
 class MemoryClient(Protocol):
@@ -23,7 +31,9 @@ class MemoryClient(Protocol):
         text: str,
         occurred_at: datetime,
         metadata: dict[str, Any] | None = None,
-    ) -> None: ...
+    ) -> MemoryIngestResult: ...
+
+    async def upsert_identities(self, identities: dict[str, str]) -> int: ...
 
     async def revise(
         self,
@@ -86,7 +96,7 @@ class HTTPMemoryClient:
         text: str,
         occurred_at: datetime,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> MemoryIngestResult:
         payload = await self._post(
             "/v1/memory/ingest",
             {
@@ -97,8 +107,41 @@ class HTTPMemoryClient:
                 "metadata": metadata,
             },
         )
-        if not isinstance(payload.get("created"), bool):
+        created = payload.get("created")
+        facts_added = payload.get("facts_added")
+        episodes_added = payload.get("episodes_added")
+        if (
+            not isinstance(created, bool)
+            or isinstance(facts_added, bool)
+            or not isinstance(facts_added, int)
+            or facts_added < 0
+            or isinstance(episodes_added, bool)
+            or not isinstance(episodes_added, int)
+            or episodes_added < 0
+        ):
             raise MemoryClientError("Memory ingest response is malformed")
+        return MemoryIngestResult(
+            created=created,
+            facts_added=facts_added,
+            episodes_added=episodes_added,
+        )
+
+    async def upsert_identities(self, identities: dict[str, str]) -> int:
+        if not identities:
+            return 0
+        payload = await self._post(
+            "/v1/memory/identities",
+            {
+                "items": [
+                    {"key": key, "display_name": identities[key]}
+                    for key in sorted(identities)
+                ]
+            },
+        )
+        updated = payload.get("updated")
+        if isinstance(updated, bool) or not isinstance(updated, int) or updated < 0:
+            raise MemoryClientError("Memory identity response is malformed")
+        return updated
 
     async def revise(
         self,

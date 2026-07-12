@@ -34,23 +34,38 @@ class MatrixRuntimeConfig:
             if not isinstance(account_config, dict):
                 account_config = {}
 
-        base_url = (os.environ.get("MATRIX_BASE_URL") or account_config.get("base_url", "")).strip().rstrip("/")
-        user_id = (os.environ.get("MATRIX_USER_ID") or account_config.get("user_id", "")).strip()
+        base_url = (
+            (os.environ.get("MATRIX_BASE_URL") or account_config.get("base_url", ""))
+            .strip()
+            .rstrip("/")
+        )
+        user_id = (
+            os.environ.get("MATRIX_USER_ID") or account_config.get("user_id", "")
+        ).strip()
 
         if not base_url or not user_id:
             raise ValueError(
                 f"Please configure Matrix account '{selected_account}' or set MATRIX_BASE_URL and MATRIX_USER_ID"
             )
 
-        password = (os.environ.get("MATRIX_PASSWORD") or account_config.get("password", "")).strip() or None
-        access_token = (os.environ.get("MATRIX_ACCESS_TOKEN") or account_config.get("access_token", "")).strip() or None
-        device_id = (os.environ.get("MATRIX_DEVICE_ID") or account_config.get("device_id", "")).strip() or None
+        password = (
+            os.environ.get("MATRIX_PASSWORD") or account_config.get("password", "")
+        ).strip() or None
+        access_token = (
+            os.environ.get("MATRIX_ACCESS_TOKEN")
+            or account_config.get("access_token", "")
+        ).strip() or None
+        device_id = (
+            os.environ.get("MATRIX_DEVICE_ID") or account_config.get("device_id", "")
+        ).strip() or None
         device_name = (
-            os.environ.get("MATRIX_DEVICE_NAME") or account_config.get("device_name", "telefire")
+            os.environ.get("MATRIX_DEVICE_NAME")
+            or account_config.get("device_name", "telefire")
         ).strip() or "telefire"
         default_store_dir = Path.home() / ".telefire" / "matrix" / selected_account
         store_dir = Path(
-            os.environ.get("MATRIX_STORE_DIR") or account_config.get("store_dir", default_store_dir)
+            os.environ.get("MATRIX_STORE_DIR")
+            or account_config.get("store_dir", default_store_dir)
         )
 
         return cls(
@@ -75,3 +90,11 @@ class MatrixRuntimeConfig:
     @property
     def state_store_path(self) -> Path:
         return self.store_dir / "state_store.bin"
+
+    @property
+    def crypto_store_path(self) -> Path:
+        return self.store_dir / "crypto.db"
+
+    @property
+    def crypto_pickle_key_path(self) -> Path:
+        return self.store_dir / "crypto_pickle.key"

@@ -1,0 +1,123 @@
+services:
+  pi:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: telefire-pi
+    environment:
+      TELEFIRE_AI_BASE_URL: ${TELEFIRE_AI_BASE_URL}
+      TELEFIRE_AI_API_KEY: ${TELEFIRE_AI_API_KEY}
+      TELEFIRE_AI_CHAT_MODEL: ${TELEFIRE_AI_CHAT_MODEL}
+      TELEFIRE_AI_REASONING_EFFORT: ${TELEFIRE_AI_REASONING_EFFORT:-none}
+      TELEFIRE_AI_MAX_OUTPUT_TOKENS: ${TELEFIRE_AI_MAX_OUTPUT_TOKENS:-4000}
+      TELEFIRE_AI_CONTEXT_WINDOW: ${TELEFIRE_AI_CONTEXT_WINDOW:-128000}
+      TELEFIRE_AI_REQUEST_TIMEOUT: ${TELEFIRE_AI_REQUEST_TIMEOUT:-90}
+      TELEFIRE_PI_HOST: "0.0.0.0"
+      TELEFIRE_PI_PORT: "8790"
+      TELEFIRE_PI_DATA_DIR: /agent-data/.telefire-pi
+      TELEFIRE_PI_TOKEN: ${TELEFIRE_PI_TOKEN}
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:${TELEFIRE_PI_EXPOSE_PORT:-18790}:8790"
+    volumes:
+      - telefire-pi-runtime:/agent-data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8790/health').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  memory:
+    build:
+      context: .
+    container_name: telefire-memory
+    command: ["python", "-m", "telefire_memory.cli", "--host", "0.0.0.0", "--port", "8765"]
+    environment:
+      PYTHONPATH: /app/src
+      HOME: /telefire-data
+      TELEFIRE_AI_BASE_URL: ${TELEFIRE_AI_BASE_URL}
+      TELEFIRE_AI_API_KEY: ${TELEFIRE_AI_API_KEY}
+      TELEFIRE_AI_CHAT_MODEL: ${TELEFIRE_AI_CHAT_MODEL}
+      TELEFIRE_AI_EMBEDDING_BASE_URL: ${TELEFIRE_AI_EMBEDDING_BASE_URL:-http://ollama-embedding-ollama-1:11434/v1}
+      TELEFIRE_AI_EMBEDDING_API_KEY: ${TELEFIRE_AI_EMBEDDING_API_KEY:-ollama}
+      TELEFIRE_AI_EMBEDDING_MODEL: ${TELEFIRE_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      TELEFIRE_AI_EMBEDDING_DIMENSION: ${TELEFIRE_AI_EMBEDDING_DIMENSION:-1024}
+      TELEFIRE_MEMORY_HOST: "0.0.0.0"
+      TELEFIRE_MEMORY_PORT: "8765"
+      TELEFIRE_MEMORY_STORE_PATH: /telefire-data/.telefire/memory
+      TELEFIRE_AI_REQUEST_TIMEOUT: ${TELEFIRE_AI_REQUEST_TIMEOUT:-90}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - ollama-embedding
+    ports:
+      - "127.0.0.1:${TELEFIRE_MEMORY_EXPOSE_PORT:-8765}:8765"
+    volumes:
+      - telefire-runtime:/telefire-data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - >
+          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()"
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  ai:
+    build:
+      context: .
+    container_name: telefire-ai
+    command: ["python", "-m", "telefire.cli", "telegram", "ai", "--account", "default"]
+    depends_on:
+      memory:
+        condition: service_healthy
+      pi:
+        condition: service_healthy
+    environment:
+      PYTHONPATH: /app/src
+      HOME: /telefire-data
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEFIRE_PI_URL: http://telefire-pi:8790
+      TELEFIRE_PI_TOKEN: ${TELEFIRE_PI_TOKEN}
+      TELEFIRE_PI_RUN_TIMEOUT: ${TELEFIRE_PI_RUN_TIMEOUT:-300}
+      TELEFIRE_MEMORY_URL: http://telefire-memory:8765
+      TELEFIRE_MEMORY_TIMEOUT: ${TELEFIRE_MEMORY_TIMEOUT:-90}
+      TELEFIRE_AI_STATE_PATH: /telefire-data/.telefire/ai.db
+      TELEFIRE_AI_MAX_OUTPUT_CHARS: ${TELEFIRE_AI_MAX_OUTPUT_CHARS:-3900}
+      TELEFIRE_AI_EDIT_CADENCE: ${TELEFIRE_AI_EDIT_CADENCE:-0.8}
+      TELEFIRE_AI_SYSTEM_PROMPT: ${TELEFIRE_AI_SYSTEM_PROMPT:-}
+      TELEFIRE_AI_MAX_CONTEXT_MESSAGES: ${TELEFIRE_AI_MAX_CONTEXT_MESSAGES:-20}
+      TELEFIRE_AI_MAX_CONTEXT_CHARS: ${TELEFIRE_AI_MAX_CONTEXT_CHARS:-12000}
+      TELEFIRE_AI_DELEGATED_COOLDOWN: ${TELEFIRE_AI_DELEGATED_COOLDOWN:-30}
+      TELEFIRE_AI_ALLOWED_CHAT_IDS: ${TELEFIRE_AI_ALLOWED_CHAT_IDS:-}
+    volumes:
+      - telefire-runtime:/telefire-data
+    restart: unless-stopped
+
+volumes:
+  telefire-runtime:
+  telefire-pi-runtime:
+
+networks:
+  default:
+  ollama-embedding:
+    external: true
+    name: ollama-embedding

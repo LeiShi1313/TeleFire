@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Telefire Memory</title>
+    <link rel="stylesheet" href="/admin/dashboard.css">
+    <script src="/admin/dashboard.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div>
+          <div class="brand-name">Telefire Memory</div>
+          <div class="brand-meta">Read-only inspector</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <a class="header-link" href="/admin/ai-flow">AI request flow</a>
+        <span id="connection-status" class="connection-status" role="status">
+          Connecting
+        </span>
+        <button id="refresh-button" class="button secondary" type="button">
+          Refresh
+        </button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="subject-panel" aria-labelledby="subjects-heading">
+        <div class="panel-heading">
+          <h1 id="subjects-heading">Subjects</h1>
+          <span id="subject-count" class="count-label">0</span>
+        </div>
+        <label class="search-field" for="subject-search">
+          <span>Find subject</span>
+          <input
+            id="subject-search"
+            type="search"
+            autocomplete="off"
+            placeholder="telegram:user:..."
+          >
+        </label>
+        <div id="subject-loading" class="subject-skeleton" aria-label="Loading subjects">
+          <span></span><span></span><span></span>
+        </div>
+        <div id="subject-list" class="subject-list"></div>
+        <div id="subject-empty" class="compact-empty" hidden>No memories stored.</div>
+      </aside>
+
+      <section class="memory-panel" aria-live="polite">
+        <div id="page-error" class="error-banner" role="alert" hidden>
+          <span id="page-error-message">Memory service unavailable.</span>
+          <button id="retry-button" class="button secondary" type="button">Retry</button>
+        </div>
+
+        <div id="no-selection" class="page-empty">
+          <h2>No subject selected</h2>
+          <p>Memory details will appear here.</p>
+        </div>
+
+        <div id="subject-view" hidden>
+          <header class="subject-header">
+            <div>
+              <div class="eyebrow">Subject</div>
+              <h2 id="subject-display-name" class="subject-title"></h2>
+              <code id="subject-id" class="subject-key"></code>
+              <div id="subject-updated" class="subject-updated"></div>
+            </div>
+            <div id="subject-stats" class="subject-stats" aria-label="Memory counts"></div>
+          </header>
+
+          <section class="profile-section" aria-labelledby="profile-heading">
+            <div class="section-heading">
+              <h3 id="profile-heading">Profile</h3>
+              <span class="format-label">Markdown</span>
+            </div>
+            <pre id="profile-content" class="profile-content"></pre>
+          </section>
+
+          <section class="records-section" aria-labelledby="records-heading">
+            <div class="section-heading records-heading">
+              <div>
+                <h3 id="records-heading">Records</h3>
+                <span id="record-count" class="record-count">0 records</span>
+              </div>
+            </div>
+
+            <form id="record-filters" class="filter-bar">
+              <label class="filter search-filter" for="record-query">
+                <span>Search</span>
+                <input id="record-query" type="search" autocomplete="off">
+              </label>
+              <label class="filter" for="scope-filter">
+                <span>Scope</span>
+                <select id="scope-filter"><option value="">All scopes</option></select>
+              </label>
+              <label class="filter" for="type-filter">
+                <span>Type</span>
+                <select id="type-filter">
+                  <option value="">All types</option>
+                  <option value="observation">Observation</option>
+                  <option value="fact">Fact</option>
+                  <option value="episode">Episode</option>
+                </select>
+              </label>
+              <label class="filter" for="status-filter">
+                <span>Status</span>
+                <select id="status-filter">
+                  <option value="active">Active</option>
+                  <option value="suppressed">Suppressed</option>
+                  <option value="all">All</option>
+                </select>
+              </label>
+            </form>
+
+            <div id="records-loading" class="records-loading" aria-label="Loading records" hidden>
+              <span></span><span></span><span></span>
+            </div>
+            <div id="record-list" class="record-list"></div>
+            <div id="records-empty" class="records-empty" hidden>No matching records.</div>
+            <button id="load-more" class="button load-more" type="button" hidden>
+              Load more
+            </button>
+          </section>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

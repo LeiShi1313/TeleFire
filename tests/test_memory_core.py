@@ -1,5 +1,7 @@
 import json
 from datetime import UTC, datetime
+import os
+from urllib.parse import quote
 
 from aiohttp import ClientSession, web
 import pytest
@@ -190,6 +192,50 @@ async def test_ingest_retains_observation_derives_memory_and_deduplicates_retry(
 
 
 @pytest.mark.asyncio
+async def test_identity_display_names_are_generic_persistent_and_do_not_add_records(
+    tmp_path, fake_provider
+):
+    settings = memory_settings(tmp_path, fake_provider)
+    core = MemoryCore(settings)
+
+    assert (
+        await core.upsert_identities(
+            {
+                "telegram:user:42": "Alice Example",
+                "telegram:chat:7": "Engineering Group",
+            }
+        )
+        == 2
+    )
+    assert (
+        await core.upsert_identities(
+            {
+                "telegram:user:42": "Alice Example",
+                "telegram:chat:7": "Engineering Group",
+            }
+        )
+        == 0
+    )
+    assert core.list_subjects().total == 0
+
+    await core.ingest(
+        "telegram:user:42",
+        "telegram:chat:7",
+        "Alice asked about vector databases",
+        datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
+    )
+    summary = core.list_subjects().items[0]
+    assert summary.subject_id == "telegram:user:42"
+    assert summary.subject_display_name == "Alice Example"
+    assert summary.scope_display_names == {"telegram:chat:7": "Engineering Group"}
+
+    assert json.loads((settings.store_path / "identities.json").read_text()) == {
+        "telegram:chat:7": "Engineering Group",
+        "telegram:user:42": "Alice Example",
+    }
+
+
+@pytest.mark.asyncio
 async def test_augment_is_hybrid_bounded_and_strictly_scoped(tmp_path, fake_provider):
     core = MemoryCore(memory_settings(tmp_path, fake_provider))
     occurred_at = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -259,6 +305,58 @@ def test_store_rejects_embedding_space_mismatch(tmp_path, fake_provider):
                 embedding_dimension=8,
             )
         )
+
+
+def test_from_env_rewrites_localhost_embedding_url_inside_docker(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEFIRE_AI_BASE_URL", "https://chat-provider.example/v1")
+    monkeypatch.setenv("TELEFIRE_AI_API_KEY", "chat-key")
+    monkeypatch.setenv("TELEFIRE_AI_CHAT_MODEL", "chat-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_API_KEY", "embedding-key")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_MODEL", "embedding-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_DIMENSION", "1024")
+
+    monkeypatch.setattr(os.path, "exists", lambda _: True)
+    monkeypatch.setattr(
+        "telefire_memory.core._can_reach",
+        lambda host, port, timeout=0.25: host == "host.docker.internal",
+    )
+    settings = MemorySettings.from_env()
+    assert settings.embedding_base_url == "http://host.docker.internal:11434/v1"
+
+
+def test_from_env_rewrites_localhost_embedding_url_to_ollama_service_when_host_not_available(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TELEFIRE_AI_BASE_URL", "https://chat-provider.example/v1")
+    monkeypatch.setenv("TELEFIRE_AI_API_KEY", "chat-key")
+    monkeypatch.setenv("TELEFIRE_AI_CHAT_MODEL", "chat-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_API_KEY", "embedding-key")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_MODEL", "embedding-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_DIMENSION", "1024")
+
+    monkeypatch.setattr(os.path, "exists", lambda _: True)
+    monkeypatch.setattr(
+        "telefire_memory.core._can_reach",
+        lambda host, port, timeout=0.25: host == "ollama-embedding-ollama-1",
+    )
+    settings = MemorySettings.from_env()
+    assert settings.embedding_base_url == "http://ollama-embedding-ollama-1:11434/v1"
+
+
+def test_from_env_keeps_localhost_embedding_url_outside_docker(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEFIRE_AI_BASE_URL", "https://chat-provider.example/v1")
+    monkeypatch.setenv("TELEFIRE_AI_API_KEY", "chat-key")
+    monkeypatch.setenv("TELEFIRE_AI_CHAT_MODEL", "chat-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_API_KEY", "embedding-key")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_MODEL", "embedding-model")
+    monkeypatch.setenv("TELEFIRE_AI_EMBEDDING_DIMENSION", "1024")
+
+    monkeypatch.setattr(os.path, "exists", lambda _: False)
+    settings = MemorySettings.from_env()
+    assert settings.embedding_base_url == "http://127.0.0.1:11434/v1"
 
 
 @pytest.mark.asyncio
@@ -414,6 +512,24 @@ async def test_http_service_matches_direct_core_semantics(tmp_path, fake_provide
     port = site._server.sockets[0].getsockname()[1]
     try:
         async with ClientSession() as session:
+            identity_response = await session.post(
+                f"http://127.0.0.1:{port}/v1/memory/identities",
+                json={
+                    "items": [
+                        {
+                            "key": "telegram:user:42",
+                            "display_name": "Alice Example",
+                        },
+                        {
+                            "key": "telegram:chat:7",
+                            "display_name": "Engineering Group",
+                        },
+                    ]
+                },
+            )
+            assert identity_response.status == 200
+            assert await identity_response.json() == {"updated": 2}
+
             ingest_response = await session.post(
                 f"http://127.0.0.1:{port}/v1/memory/ingest",
                 json={
@@ -471,5 +587,192 @@ async def test_http_service_matches_direct_core_semantics(tmp_path, fake_provide
             assert (await profile_response.json())["profile"].startswith(
                 "# User Profile"
             )
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_inspection_lists_subjects_details_and_filtered_records(
+    tmp_path, fake_provider
+):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+    await core.upsert_identities(
+        {
+            "telegram:user:42": "Alice Example",
+            "telegram:chat:7": "Engineering Group",
+        }
+    )
+    await core.ingest(
+        "telegram:user:42",
+        "telegram:chat:7",
+        "Alice likes tea",
+        datetime(2026, 7, 11, 12, 0, tzinfo=UTC),
+        metadata={"client": "telegram"},
+    )
+    await core.ingest(
+        "telegram:user:99",
+        "telegram:chat:8",
+        "Another user asked about vector databases",
+        datetime(2026, 7, 10, 12, 0, tzinfo=UTC),
+    )
+    await core.revise(
+        "telegram:user:42",
+        "Forget tea",
+        scope_id="telegram:chat:7",
+    )
+
+    runner = web.AppRunner(create_app(core))
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        async with ClientSession() as session:
+            subjects_response = await session.get(
+                f"{base_url}/v1/memory/subjects?limit=1&offset=0"
+            )
+            assert subjects_response.status == 200
+            subjects = await subjects_response.json()
+            assert subjects == {
+                "items": [
+                    {
+                        "subject_id": "telegram:user:42",
+                        "subject_display_name": "Alice Example",
+                        "scopes": ["telegram:chat:7"],
+                        "scope_display_names": {"telegram:chat:7": "Engineering Group"},
+                        "counts": {
+                            "observation": 1,
+                            "fact": 1,
+                            "episode": 1,
+                            "profile": 1,
+                        },
+                        "active_count": 2,
+                        "suppressed_count": 2,
+                        "last_occurred_at": "2026-07-11T12:00:00Z",
+                    }
+                ],
+                "limit": 1,
+                "offset": 0,
+                "total": 2,
+                "is_truncated": False,
+            }
+
+            subject_id = quote("telegram:user:42", safe="")
+            detail_response = await session.get(
+                f"{base_url}/v1/memory/subjects/{subject_id}"
+            )
+            assert detail_response.status == 200
+            detail = await detail_response.json()
+            assert detail["subject_id"] == "telegram:user:42"
+            assert detail["subject_display_name"] == "Alice Example"
+            assert detail["profile"].startswith("# User Profile")
+            assert detail["scopes"] == ["telegram:chat:7"]
+            assert detail["scope_display_names"] == {
+                "telegram:chat:7": "Engineering Group"
+            }
+
+            records_response = await session.get(
+                f"{base_url}/v1/memory/subjects/{subject_id}/records",
+                params={
+                    "scope_id": "telegram:chat:7",
+                    "record_type": "fact",
+                    "status": "suppressed",
+                    "query": "tea",
+                    "limit": "20",
+                },
+            )
+            assert records_response.status == 200
+            records = await records_response.json()
+            assert records["total"] == 1
+            assert records["items"][0] == {
+                "record_id": records["items"][0]["record_id"],
+                "record_type": "fact",
+                "subject_id": "telegram:user:42",
+                "subject_display_name": "Alice Example",
+                "scope_id": "telegram:chat:7",
+                "scope_display_name": "Engineering Group",
+                "text": "The user likes tea",
+                "occurred_at": "2026-07-11T12:00:00Z",
+                "created_at": records["items"][0]["created_at"],
+                "suppressed": True,
+                "metadata": {},
+            }
+
+            invalid_response = await session.get(
+                f"{base_url}/v1/memory/subjects?limit=501"
+            )
+            assert invalid_response.status == 400
+            assert await invalid_response.json() == {
+                "error": "limit must be between 1 and 500"
+            }
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_dashboard_is_read_only_and_served_with_private_security_headers(
+    tmp_path, fake_provider
+):
+    core = MemoryCore(memory_settings(tmp_path, fake_provider))
+    runner = web.AppRunner(create_app(core))
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        async with ClientSession() as session:
+            dashboard_response = await session.get(f"{base_url}/admin")
+            assert dashboard_response.status == 200
+            assert dashboard_response.content_type == "text/html"
+            assert dashboard_response.headers["Cache-Control"] == "no-store"
+            assert dashboard_response.headers["X-Frame-Options"] == "DENY"
+            assert dashboard_response.headers["X-Content-Type-Options"] == "nosniff"
+            assert (
+                "default-src 'self'"
+                in dashboard_response.headers["Content-Security-Policy"]
+            )
+            html = await dashboard_response.text()
+            assert "Telefire Memory" in html
+            assert "/admin/dashboard.css" in html
+            assert "/admin/dashboard.js" in html
+            assert 'href="/admin/ai-flow"' in html
+            assert 'id="subject-display-name"' in html
+
+            flow_response = await session.get(f"{base_url}/admin/ai-flow")
+            assert flow_response.status == 200
+            assert flow_response.content_type == "text/html"
+            flow_html = await flow_response.text()
+            assert "一次 /ai 请求，内部发生了什么？" in flow_html
+            assert "/admin/ai-flow.css" in flow_html
+            assert "/admin/ai-flow.js" in flow_html
+
+            flow_script_response = await session.get(f"{base_url}/admin/ai-flow.js")
+            assert flow_script_response.status == 200
+            flow_script = await flow_script_response.text()
+            assert "innerHTML" not in flow_script
+
+            flow_stylesheet_response = await session.get(
+                f"{base_url}/admin/ai-flow.css"
+            )
+            assert flow_stylesheet_response.status == 200
+            flow_stylesheet = await flow_stylesheet_response.text()
+            assert "prefers-reduced-motion" in flow_stylesheet
+
+            script_response = await session.get(f"{base_url}/admin/dashboard.js")
+            assert script_response.status == 200
+            script = await script_response.text()
+            assert "innerHTML" not in script
+            assert "/v1/memory/subjects" in script
+            assert "subject_display_name" in script
+            assert "scope_display_name" in script
+
+            stylesheet_response = await session.get(f"{base_url}/admin/dashboard.css")
+            assert stylesheet_response.status == 200
+            assert "@media" in await stylesheet_response.text()
+
+            favicon_response = await session.get(f"{base_url}/favicon.ico")
+            assert favicon_response.status == 204
     finally:
         await runner.cleanup()

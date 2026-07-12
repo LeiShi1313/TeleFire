@@ -8,6 +8,8 @@ from telefire.ai import (
     AIRateLimiter,
     AIResponder,
     AIStateRepository,
+    AgentEvent,
+    AgentRunRequest,
     PromptBuilder,
 )
 
@@ -46,6 +48,7 @@ class FakeMessage:
         self.reply_to_msg_id = reply_to.id if reply_to else None
         self._reply_to = reply_to
         self.replies = []
+        self.deleted = False
 
     async def get_reply_message(self):
         return self._reply_to
@@ -55,15 +58,30 @@ class FakeMessage:
         self.replies.append(answer)
         return answer
 
+    async def delete(self):
+        self.deleted = True
+
 
 class FakeGateway:
     def __init__(self, answers):
         self.answers = iter(answers)
         self.requests = []
 
-    async def stream(self, messages) -> AsyncIterator[str]:
-        self.requests.append(messages)
-        yield next(self.answers)
+    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
+        self.requests.append(request)
+        answer = next(self.answers)
+        session_id = request.session_id or f"session-{len(self.requests)}"
+        yield AgentEvent(type="run_started", session_id=session_id)
+        yield AgentEvent(type="text_delta", delta=answer, reset=True)
+        yield AgentEvent(
+            type="run_completed",
+            session_id=session_id,
+            entry_id=f"entry-{len(self.requests)}",
+            answer=answer,
+        )
+
+    async def cancel(self, run_id: str) -> bool:
+        return True
 
 
 class BlockingGateway:
@@ -72,11 +90,23 @@ class BlockingGateway:
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def stream(self, messages) -> AsyncIterator[str]:
-        self.requests.append(messages)
+    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
+        self.requests.append(request)
         self.started.set()
         await self.release.wait()
-        yield "done"
+        session_id = request.session_id or f"session-{len(self.requests)}"
+        yield AgentEvent(type="run_started", session_id=session_id)
+        yield AgentEvent(type="text_delta", delta="done", reset=True)
+        yield AgentEvent(
+            type="run_completed",
+            session_id=session_id,
+            entry_id=f"entry-{len(self.requests)}",
+            answer="done",
+        )
+
+    async def cancel(self, run_id: str) -> bool:
+        self.release.set()
+        return True
 
 
 async def make_handler(path, gateway, *, clock=lambda: 100.0, cooldown=30.0):
@@ -109,6 +139,7 @@ async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
         assert await handler.handle(allow) is True
         assert await store.is_allowed(20) is True
         assert allow.replies[0].text == "AI access allowed."
+        assert allow.deleted is True
 
         trigger = FakeMessage("/ai root question", sender_id=20)
         assert await handler.handle(trigger) is True
@@ -119,9 +150,8 @@ async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
         assert await handler.handle(fork) is True
 
         assert len(gateway.requests) == 3
-        assert all(
-            "continue" not in message["content"] for message in gateway.requests[2]
-        )
+        assert gateway.requests[2].prompt == "fork"
+        assert gateway.requests[2].parent_entry_id == "entry-1"
     finally:
         await store.close()
 
@@ -141,6 +171,7 @@ async def test_unauthorized_and_revoked_users_are_silent(tmp_path):
         deny = FakeMessage("/ai_deny", sender_id=10, reply_to=target)
         assert await handler.handle(deny) is True
         assert deny.replies[0].text == "AI access denied."
+        assert deny.deleted is True
 
         revoked = FakeMessage("/ai private", sender_id=20)
         assert await handler.handle(revoked) is False
@@ -213,6 +244,7 @@ async def test_owner_is_exempt_and_never_added_to_whitelist(tmp_path):
         allow_owner = FakeMessage("/ai_allow", sender_id=10, reply_to=owner_message)
         assert await handler.handle(allow_owner) is True
         assert allow_owner.replies[0].text == "Owner access is always enabled."
+        assert allow_owner.deleted is True
         assert await store.is_allowed(10) is False
 
         first = FakeMessage("/ai first", sender_id=10)
@@ -225,5 +257,23 @@ async def test_owner_is_exempt_and_never_added_to_whitelist(tmp_path):
             await asyncio.sleep(0)
         gateway.release.set()
         assert await asyncio.gather(*tasks) == [True, True]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_nonowner_access_command_is_not_executed_or_deleted(tmp_path):
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway(["must not be called"]),
+    )
+    try:
+        target = FakeMessage("hello", sender_id=30)
+        command = FakeMessage("/ai_allow", sender_id=20, reply_to=target)
+
+        assert await handler.handle(command) is False
+        assert command.deleted is False
+        assert command.replies == []
+        assert await store.is_allowed(30) is False
     finally:
         await store.close()

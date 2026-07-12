@@ -7,10 +7,16 @@ from telefire.runtime import ServiceCommand
 class MatrixCommand(ServiceCommand):
     command_group = "matrix"
 
-    def __init__(self, account: str = "default", log_level: str = "info"):
+    def __init__(
+        self,
+        account: str = "default",
+        log_level: str = "info",
+        enable_crypto: bool = False,
+    ):
         service = MatrixService(
             MatrixRuntimeConfig.from_account(account=account),
             log_level=log_level,
+            enable_crypto=enable_crypto,
         )
         super().__init__(service, service.logger)
         self.helpers = MatrixHelpers(self.service, self.logger)

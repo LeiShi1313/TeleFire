@@ -1,11 +1,15 @@
 from collections.abc import AsyncIterator
 
 import pytest
+from telethon.tl import functions as telegram_functions
+from telethon.tl import types as telegram_types
 
 from telefire.ai import (
     AIConversationHandler,
     AIResponder,
     AISettings,
+    AgentEvent,
+    AgentRunRequest,
     PromptBuilder,
     parse_ai_trigger,
     parse_memory_revision,
@@ -19,10 +23,12 @@ class FakeAnswer:
         self.id = 100
         self.text = text
         self.edits: list[str] = []
+        self.edit_calls: list[tuple[str, dict]] = []
 
     async def edit(self, text: str, **kwargs):
         self.text = text
         self.edits.append(text)
+        self.edit_calls.append((text, kwargs))
         return self
 
 
@@ -48,14 +54,30 @@ class FakeGateway:
     def __init__(self, chunks=(), error: Exception | None = None):
         self.chunks = chunks
         self.error = error
-        self.requests: list[list[dict[str, str]]] = []
+        self.requests: list[AgentRunRequest] = []
 
-    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
-        self.requests.append(messages)
+    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
+        self.requests.append(request)
         if self.error:
             raise self.error
-        for chunk in self.chunks:
-            yield chunk
+        yield AgentEvent(
+            type="run_started",
+            run_id=request.run_id,
+            session_id="session-1",
+        )
+        text = ""
+        for index, chunk in enumerate(self.chunks):
+            text += chunk
+            yield AgentEvent(type="text_delta", delta=chunk, reset=index == 0)
+        yield AgentEvent(
+            type="run_completed",
+            session_id="session-1",
+            entry_id="entry-1",
+            answer=text,
+        )
+
+    async def cancel(self, run_id: str) -> bool:
+        return True
 
 
 class FakeStore:
@@ -64,9 +86,6 @@ class FakeStore:
 
     async def get_answer(self, chat_id, answer_message_id):
         return None
-
-    async def get_branch(self, chat_id, answer_message_id, limit):
-        return []
 
     async def save_answer(self, marker):
         self.saved.append(marker)
@@ -80,6 +99,12 @@ class FakeStore:
     async def set_last_request_at(self, user_id, timestamp):
         return None
 
+    async def allow_user(self, user_id):
+        return None
+
+    async def deny_user(self, user_id):
+        return None
+
 
 def make_handler(owner_id, responder):
     return AIConversationHandler(
@@ -87,6 +112,18 @@ def make_handler(owner_id, responder):
         responder=responder,
         store=FakeStore(),
         prompt_builder=PromptBuilder(),
+    )
+
+
+def make_request(prompt: str) -> AgentRunRequest:
+    return AgentRunRequest(
+        run_id="11111111-1111-4111-8111-111111111111",
+        session_id=None,
+        parent_entry_id=None,
+        prompt=prompt,
+        context=(),
+        system_prompt=PromptBuilder().system_prompt,
+        tool_policy="owner",
     )
 
 
@@ -120,23 +157,19 @@ def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
 
 def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatch):
     values = {
-        "TELEFIRE_AI_BASE_URL": "http://provider.test/v1",
-        "TELEFIRE_AI_API_KEY": "test-key",
-        "TELEFIRE_AI_CHAT_MODEL": "test-model",
-        "TELEFIRE_AI_MAX_OUTPUT_TOKENS": "321",
+        "TELEFIRE_PI_URL": "http://agent.test:8790/",
+        "TELEFIRE_PI_TOKEN": "test-agent-token",
         "TELEFIRE_AI_MAX_OUTPUT_CHARS": "1234",
         "TELEFIRE_AI_EDIT_CADENCE": "0.25",
-        "TELEFIRE_AI_REQUEST_TIMEOUT": "12",
+        "TELEFIRE_PI_RUN_TIMEOUT": "12",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
 
     settings = AISettings.from_env()
 
-    assert settings.base_url == "http://provider.test/v1"
-    assert settings.api_key == "test-key"
-    assert settings.chat_model == "test-model"
-    assert settings.max_output_tokens == 321
+    assert settings.agent_url == "http://agent.test:8790"
+    assert settings.agent_token == "test-agent-token"
     assert settings.max_output_chars == 1234
     assert settings.edit_cadence == 0.25
     assert settings.request_timeout == 12
@@ -161,12 +194,145 @@ async def test_owner_gets_one_progressively_edited_answer():
     assert trigger.replies[0].text == "Hello world"
     assert trigger.replies[0].edits[-1] == "Hello world"
     assert any(edit == "Hello" for edit in trigger.replies[0].edits)
-    assert gateway.requests == [
-        [
-            {"role": "system", "content": AISettings.DEFAULT_SYSTEM_PROMPT},
-            {"role": "user", "content": "greet me"},
-        ]
-    ]
+    assert len(gateway.requests) == 1
+    assert gateway.requests[0].prompt == "greet me"
+    assert gateway.requests[0].system_prompt == PromptBuilder().system_prompt
+    assert gateway.requests[0].tool_policy == "owner"
+
+
+def test_prompt_builder_appends_the_regular_telegram_format_guard():
+    builder = PromptBuilder(system_prompt="Keep answers factual.")
+
+    assert builder.system_prompt.startswith("Keep answers factual.")
+    assert "Telegram regular-message HTML" in builder.system_prompt
+    assert "<b>bold</b>" in builder.system_prompt
+    assert "<i>italic</i>" in builder.system_prompt
+    assert "<blockquote>quoted text</blockquote>" in builder.system_prompt
+    assert "<pre>" in builder.system_prompt
+    assert "Do not emit Markdown markers" in builder.system_prompt
+
+
+def test_response_format_switches_only_for_a_bot_rich_transport():
+    from telefire.ai import select_telegram_response_format
+
+    assert (
+        select_telegram_response_format(
+            is_bot_account=False,
+            rich_messages_available=True,
+        )
+        == "regular_html"
+    )
+    assert (
+        select_telegram_response_format(
+            is_bot_account=True,
+            rich_messages_available=False,
+        )
+        == "regular_html"
+    )
+    assert (
+        select_telegram_response_format(
+            is_bot_account=True,
+            rich_messages_available=True,
+        )
+        == "rich_markdown"
+    )
+
+    rich_builder = PromptBuilder(
+        system_prompt="Keep answers factual.",
+        response_format="rich_markdown",
+    )
+    assert "Telegram Bot API rich-message Markdown" in rich_builder.system_prompt
+    assert "| Header 1 | Header 2 |" in rich_builder.system_prompt
+
+
+@pytest.mark.asyncio
+async def test_bot_response_uses_telegram_rich_markdown_edit():
+    class FakeTelegramClient:
+        def __init__(self):
+            self.requests = []
+
+        async def __call__(self, request):
+            self.requests.append(request)
+
+    class FakeRichAnswer(FakeAnswer):
+        def __init__(self, text):
+            super().__init__(text)
+            self.client = FakeTelegramClient()
+
+        async def get_input_chat(self):
+            return telegram_types.InputPeerSelf()
+
+    class FakeRichMessage(FakeMessage):
+        async def reply(self, text: str, **kwargs):
+            answer = FakeRichAnswer(text)
+            self.replies.append(answer)
+            return answer
+
+    formatted = "**Result**\n\n| Key | Value |\n|:----|:------|\n| Mode | Rich |"
+    gateway = FakeGateway([formatted])
+    responder = AIResponder(
+        gateway,
+        edit_cadence=0,
+        response_format="rich_markdown",
+    )
+    trigger = FakeRichMessage("/ai format this")
+
+    result = await responder.answer(trigger, make_request("format this"))
+
+    answer = trigger.replies[0]
+    assert result.text == formatted
+    assert answer.edit_calls == []
+    request = answer.client.requests[-1]
+    assert isinstance(request, telegram_functions.messages.EditMessageRequest)
+    assert isinstance(request.rich_message, telegram_types.InputRichMessageMarkdown)
+    assert request.rich_message.markdown == formatted
+
+
+@pytest.mark.asyncio
+async def test_streamed_html_is_sent_as_native_telegram_entities():
+    formatted = (
+        "<b>Result</b>\n"
+        "<i>Estimate</i>\n"
+        "<blockquote>Supporting context</blockquote>\n"
+        "<pre>Team     Score\nNorway   1\nEngland  2</pre>"
+    )
+    gateway = FakeGateway([formatted])
+    responder = AIResponder(gateway, edit_cadence=0)
+    trigger = FakeMessage("/ai format this")
+
+    result = await responder.answer(trigger, make_request("format this"))
+
+    answer = trigger.replies[0]
+    assert result.text == formatted
+    assert answer.text == (
+        "Result\nEstimate\nSupporting context\nTeam     Score\nNorway   1\nEngland  2"
+    )
+    _, kwargs = answer.edit_calls[-1]
+    assert kwargs["parse_mode"] is None
+    assert {type(entity).__name__ for entity in kwargs["formatting_entities"]} == {
+        "MessageEntityBold",
+        "MessageEntityItalic",
+        "MessageEntityBlockquote",
+        "MessageEntityPre",
+    }
+
+
+@pytest.mark.asyncio
+async def test_streaming_waits_for_visible_text_when_an_html_tag_is_split():
+    gateway = FakeGateway(["<b>", "Result", "</b>"])
+    responder = AIResponder(gateway, edit_cadence=0)
+    trigger = FakeMessage("/ai format this")
+
+    result = await responder.answer(trigger, make_request("format this"))
+
+    answer = trigger.replies[0]
+    assert result.succeeded is True
+    assert all(text for text, _ in answer.edit_calls)
+    assert answer.text == "Result"
+    assert {
+        type(entity).__name__
+        for entity in answer.edit_calls[-1][1]["formatting_entities"]
+    } == {"MessageEntityBold"}
 
 
 @pytest.mark.asyncio
@@ -243,9 +409,9 @@ async def test_provider_failure_uses_standard_logging_format(caplog):
     )
     trigger = FakeMessage("/ai hello")
 
-    await responder.answer(trigger, "hello")
+    await responder.answer(trigger, make_request("hello"))
 
-    assert "AI provider request failed (RuntimeError)" in caplog.text
+    assert "AI agent request failed (RuntimeError)" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -254,6 +420,6 @@ async def test_output_is_bounded_and_finalized():
     responder = AIResponder(gateway, edit_cadence=0, max_output_chars=10)
     trigger = FakeMessage("/ai long")
 
-    await responder.answer(trigger, "long")
+    await responder.answer(trigger, make_request("long"))
 
     assert trigger.replies[0].text == "abcdefg..."

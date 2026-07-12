@@ -2,10 +2,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from telethon import utils as telegram_utils
 from telethon.tl import functions as telegram_functions
 from telethon.tl import types as telegram_types
 
-from telefire.plugins.ai import TelegramAI
+from telefire.plugins.ai import TelegramAI, _parse_telegram_message_link
 
 
 class FailingHandler:
@@ -67,15 +68,37 @@ class FakeStateRepository:
 
 
 class FakeTelegramClient:
-    def __init__(self, source_message, *, request_error=None):
+    def __init__(
+        self,
+        source_message,
+        *,
+        input_peer=None,
+        dialogs=(),
+        resolution_error=None,
+        request_error=None,
+    ):
         self.source_message = source_message
+        self.input_peer = input_peer
+        self.dialogs = dialogs
+        self.resolution_error = resolution_error
         self.request_error = request_error
+        self.get_input_entity_calls = []
         self.get_messages_calls = []
         self.requests = []
+
+    async def get_input_entity(self, peer):
+        self.get_input_entity_calls.append(peer)
+        if self.resolution_error is not None:
+            raise self.resolution_error
+        return self.input_peer if self.input_peer is not None else peer
 
     async def get_messages(self, peer, *, ids):
         self.get_messages_calls.append((peer, ids))
         return self.source_message
+
+    async def iter_dialogs(self):
+        for dialog in self.dialogs:
+            yield dialog
 
     async def __call__(self, request):
         self.requests.append(request)
@@ -93,12 +116,14 @@ class FakeSavedMessage:
         source_peer=None,
         source_message_id=42,
         forwarded=True,
+        text="",
     ):
         self.id = message_id
         self.peer_id = telegram_types.PeerUser(owner_id)
         self.chat_id = owner_id
         self.sender_id = owner_id
         self.out = True
+        self.raw_text = text
         self.fwd_from = (
             SimpleNamespace(
                 saved_from_peer=source_peer,
@@ -126,6 +151,49 @@ def make_plugin(*, handler, store, client, owner_id=10):
     plugin.service = SimpleNamespace(client=client)
     plugin.logger = RecordingLogger()
     return plugin
+
+
+@pytest.mark.parametrize(
+    ("text", "username", "channel_id", "message_id"),
+    [
+        ("https://t.me/public_group/42", "public_group", None, 42),
+        ("https://t.me/public_group/7/42", "public_group", None, 42),
+        ("https://t.me/c/1001/42", None, 1001, 42),
+        ("https://t.me/c/1001/7/42?single", None, 1001, 42),
+        ("  https://t.me/c/1001/42?thread=7  ", None, 1001, 42),
+    ],
+)
+def test_parse_telegram_message_link(
+    text,
+    username,
+    channel_id,
+    message_id,
+):
+    parsed = _parse_telegram_message_link(text)
+
+    assert parsed is not None
+    assert parsed.username == username
+    assert parsed.channel_id == channel_id
+    assert parsed.message_id == message_id
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "remember https://t.me/public_group/42",
+        "https://t.me/public_group/\n42",
+        "https://example.com/public_group/42",
+        "http://t.me/public_group/42",
+        "https://t.me/public_group/not-a-message",
+        "https://t.me/public_group/7/not-a-message",
+        "https://t.me/c/1001/not-a-message",
+        "https://t.me/c/1001/7/42?comment=99",
+        "https://t.me/public_group/42?COMMENT=99",
+        "https://t.me/c/1001/7/8/42",
+    ],
+)
+def test_parse_telegram_message_link_rejects_non_message_links(text):
+    assert _parse_telegram_message_link(text) is None
 
 
 @pytest.mark.asyncio
@@ -206,6 +274,229 @@ async def test_saved_messages_forward_receipt_prevents_duplicate_ingestion():
     assert client.get_messages_calls == [(source_peer, 42)]
     assert handler.memory_targets == [source_message]
     assert store.records == [(10, 77, -1001001, 42)]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_private_link_ingests_original_chain():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/7/42?single",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert client.get_input_entity_calls == [telegram_types.PeerChannel(1001)]
+    assert client.get_messages_calls == [(source_peer, 42)]
+    assert handler.memory_targets == [source_message]
+    assert handler.messages == []
+    assert store.records == [(10, 77, source_chat_id, 42)]
+    assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["✍"]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_public_link_resolves_channel_and_ingests_chain():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/public_group/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert client.get_input_entity_calls == ["public_group"]
+    assert client.get_messages_calls == [(source_peer, 42)]
+    assert handler.memory_targets == [source_message]
+    assert store.records == [(10, 77, source_chat_id, 42)]
+
+
+@pytest.mark.asyncio
+async def test_private_link_finds_uncached_channel_in_dialogs():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(
+        source_message,
+        dialogs=[SimpleNamespace(id=source_chat_id, input_entity=source_peer)],
+        resolution_error=ValueError("entity is not in the session cache"),
+    )
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert client.get_input_entity_calls == [telegram_types.PeerChannel(1001)]
+    assert client.get_messages_calls == [(source_peer, 42)]
+    assert handler.memory_targets == [source_message]
+    assert store.records == [(10, 77, source_chat_id, 42)]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_link_receipt_prevents_duplicate_ingestion():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    event = SimpleNamespace(message=saved_message)
+    await plugin._on_message(event)
+    await plugin._on_message(event)
+
+    assert client.get_messages_calls == [(source_peer, 42)]
+    assert handler.memory_targets == [source_message]
+    assert store.records == [(10, 77, source_chat_id, 42)]
+
+
+@pytest.mark.asyncio
+async def test_inaccessible_saved_messages_link_is_not_recorded():
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(
+        None,
+        resolution_error=ValueError("entity is not in the session cache"),
+    )
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert handler.memory_targets == []
+    assert handler.messages == []
+    assert store.records == []
+    assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["👎"]
+    assert saved_message.replies == [
+        (
+            "Memory update unavailable: the linked message could not be fetched. "
+            "Make sure this account can open it and the message still exists.",
+            {"parse_mode": None},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_link_rejects_message_from_another_chat():
+    source_peer = telegram_types.PeerChannel(1001)
+    wrong_chat_id = telegram_utils.get_peer_id(telegram_types.PeerChannel(2002))
+    source_message = SimpleNamespace(chat_id=wrong_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert handler.memory_targets == []
+    assert store.records == []
+    assert saved_message.replies == [
+        (
+            "Memory update unavailable: the linked message could not be fetched. "
+            "Make sure this account can open it and the message still exists.",
+            {"parse_mode": None},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_link_rejects_different_message_id():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=99)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert handler.memory_targets == []
+    assert store.records == []
+    assert saved_message.replies == [
+        (
+            "Memory update unavailable: the linked message could not be fetched. "
+            "Make sure this account can open it and the message still exists.",
+            {"parse_mode": None},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_saved_messages_link_ingest_uses_link_retry_instruction():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_chat_id = telegram_utils.get_peer_id(source_peer)
+    source_message = SimpleNamespace(chat_id=source_chat_id, id=42)
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler(remembered=False)
+    store = FakeStateRepository()
+    client = FakeTelegramClient(source_message, input_peer=source_peer)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert handler.memory_targets == [source_message]
+    assert store.records == []
+    assert saved_message.replies == [
+        (
+            "Memory update failed. Send the message link again to retry.",
+            {"parse_mode": None},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_saved_messages_note_containing_link_stays_an_ordinary_message():
+    saved_message = FakeSavedMessage(
+        forwarded=False,
+        text="Reference: https://t.me/c/1001/42",
+    )
+    handler = RecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(None)
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert handler.memory_targets == []
+    assert handler.messages == [saved_message]
+    assert client.get_input_entity_calls == []
+    assert client.requests == []
 
 
 @pytest.mark.asyncio
@@ -290,8 +581,8 @@ async def test_unresolvable_saved_forward_is_not_treated_as_an_ai_command():
     assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["👎"]
     assert saved_message.replies == [
         (
-            "Memory update unavailable: Telegram did not expose the original "
-            "message, so its reply chain cannot be traced.",
+            "Telegram hid the original source. Paste the original message link "
+            "in Saved Messages to remember its reply chain.",
             {"parse_mode": None},
         )
     ]

@@ -1,4 +1,6 @@
 import asyncio
+from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 from telethon import events
 from telethon import utils as telegram_utils
@@ -23,8 +25,89 @@ from telefire.plugins.base import PluginMount
 from telefire.telegram import TelegramCommand
 
 
-class _SavedMemorySourceUnavailable(RuntimeError):
+class _SavedMemoryForwardSourceUnavailable(RuntimeError):
     pass
+
+
+class _SavedMemoryLinkUnavailable(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _TelegramMessageLink:
+    username: str | None
+    channel_id: int | None
+    message_id: int
+
+
+def _parse_positive_id(value: str, *, maximum: int) -> int | None:
+    if not value.isascii() or not value.isdecimal():
+        return None
+    parsed = int(value)
+    return parsed if 0 < parsed <= maximum else None
+
+
+# https://core.telegram.org/api/links#message-links
+def _parse_telegram_message_link(text: str) -> _TelegramMessageLink | None:
+    candidate = text.strip()
+    if any(character.isspace() for character in candidate):
+        return None
+    try:
+        link = urlsplit(candidate)
+    except ValueError:
+        return None
+    if link.scheme != "https" or link.netloc.casefold() != "t.me":
+        return None
+    query_keys = parse_qs(link.query, keep_blank_values=True)
+    if any(key.casefold() == "comment" for key in query_keys):
+        return None
+
+    path = link.path.strip("/")
+    segments = path.split("/") if path else []
+    if any(not segment for segment in segments):
+        return None
+
+    max_message_id = (1 << 31) - 1
+    if segments[:1] == ["c"]:
+        if len(segments) not in {3, 4}:
+            return None
+        channel_id = _parse_positive_id(segments[1], maximum=(1 << 63) - 1)
+        if (
+            len(segments) == 4
+            and _parse_positive_id(segments[2], maximum=max_message_id) is None
+        ):
+            return None
+        message_id = _parse_positive_id(segments[-1], maximum=max_message_id)
+        if channel_id is None or message_id is None:
+            return None
+        return _TelegramMessageLink(
+            username=None,
+            channel_id=channel_id,
+            message_id=message_id,
+        )
+
+    if len(segments) not in {2, 3}:
+        return None
+    username = segments[0]
+    if (
+        len(username) > 64
+        or not username.isascii()
+        or not username.replace("_", "").isalnum()
+    ):
+        return None
+    if (
+        len(segments) == 3
+        and _parse_positive_id(segments[1], maximum=max_message_id) is None
+    ):
+        return None
+    message_id = _parse_positive_id(segments[-1], maximum=max_message_id)
+    if message_id is None:
+        return None
+    return _TelegramMessageLink(
+        username=username,
+        channel_id=None,
+        message_id=message_id,
+    )
 
 
 class TelegramAI(TelegramCommand, metaclass=PluginMount):
@@ -32,9 +115,16 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
     MEMORY_STORED_REACTION = "✍"
     MEMORY_FAILED_REACTION = "👎"
     MEMORY_FAILED_REPLY = "Memory update failed. Forward the message again to retry."
+    MEMORY_LINK_FAILED_REPLY = (
+        "Memory update failed. Send the message link again to retry."
+    )
     MEMORY_SOURCE_UNAVAILABLE_REPLY = (
-        "Memory update unavailable: Telegram did not expose the original message, "
-        "so its reply chain cannot be traced."
+        "Telegram hid the original source. Paste the original message link in "
+        "Saved Messages to remember its reply chain."
+    )
+    MEMORY_LINK_UNAVAILABLE_REPLY = (
+        "Memory update unavailable: the linked message could not be fetched. "
+        "Make sure this account can open it and the message still exists."
     )
 
     def __init__(
@@ -128,7 +218,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
     async def _on_message(self, event) -> None:
         if self._handler is not None:
             try:
-                if await self._handle_saved_memory_forward(event.message):
+                if await self._handle_saved_memory(event.message):
                     return
                 await self._handler.handle(event.message)
             except Exception:
@@ -138,9 +228,18 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     event.message.id,
                 )
 
-    async def _handle_saved_memory_forward(self, message) -> bool:
-        if not self._is_saved_messages_forward(message):
+    async def _handle_saved_memory(self, message) -> bool:
+        if not self._is_saved_messages_message(message):
             return False
+        forward = getattr(message, "fwd_from", None)
+        link = (
+            None
+            if forward is not None
+            else _parse_telegram_message_link(getattr(message, "raw_text", "") or "")
+        )
+        if forward is None and link is None:
+            return False
+
         assert self._owner_id is not None
         async with self._saved_memory_lock:
             try:
@@ -154,23 +253,26 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     )
                     return True
 
-                forward = message.fwd_from
-                source_peer = getattr(forward, "saved_from_peer", None)
-                source_message_id = getattr(forward, "saved_from_msg_id", None)
-                if source_peer is None or not isinstance(source_message_id, int):
-                    raise _SavedMemorySourceUnavailable(
-                        "forward has no Saved Messages source pointer"
-                    )
+                if link is not None:
+                    source, source_chat_id = await self._resolve_memory_link(link)
+                    source_message_id = link.message_id
+                else:
+                    source_peer = getattr(forward, "saved_from_peer", None)
+                    source_message_id = getattr(forward, "saved_from_msg_id", None)
+                    if source_peer is None or not isinstance(source_message_id, int):
+                        raise _SavedMemoryForwardSourceUnavailable(
+                            "forward has no Saved Messages source pointer"
+                        )
 
-                source = await self.client.get_messages(
-                    source_peer,
-                    ids=source_message_id,
-                )
-                source_chat_id = getattr(source, "chat_id", None)
-                if source is None or not isinstance(source_chat_id, int):
-                    raise _SavedMemorySourceUnavailable(
-                        "original Telegram message is unavailable"
+                    source = await self.client.get_messages(
+                        source_peer,
+                        ids=source_message_id,
                     )
+                    source_chat_id = getattr(source, "chat_id", None)
+                    if source is None or not isinstance(source_chat_id, int):
+                        raise _SavedMemoryForwardSourceUnavailable(
+                            "original Telegram message is unavailable"
+                        )
                 if not await self._handler.remember_reply_chain(source):
                     raise RuntimeError("reply chain has no ingestible human content")
 
@@ -192,11 +294,14 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     message,
                     self.MEMORY_FAILED_REACTION,
                 )
-                reply = (
-                    self.MEMORY_SOURCE_UNAVAILABLE_REPLY
-                    if isinstance(exc, _SavedMemorySourceUnavailable)
-                    else self.MEMORY_FAILED_REPLY
-                )
+                if isinstance(exc, _SavedMemoryForwardSourceUnavailable):
+                    reply = self.MEMORY_SOURCE_UNAVAILABLE_REPLY
+                elif isinstance(exc, _SavedMemoryLinkUnavailable):
+                    reply = self.MEMORY_LINK_UNAVAILABLE_REPLY
+                elif link is not None:
+                    reply = self.MEMORY_LINK_FAILED_REPLY
+                else:
+                    reply = self.MEMORY_FAILED_REPLY
                 await self._reply_saved_memory_failure(message, reply)
                 return True
 
@@ -213,18 +318,61 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             )
             return True
 
-    def _is_saved_messages_forward(self, message) -> bool:
+    async def _resolve_memory_link(
+        self,
+        link: _TelegramMessageLink,
+    ) -> tuple[object, int]:
+        try:
+            source_peer = await self._resolve_memory_link_peer(link)
+            expected_chat_id = telegram_utils.get_peer_id(source_peer)
+            _, peer_type = telegram_utils.resolve_id(expected_chat_id)
+            if peer_type is not telegram_types.PeerChannel:
+                raise ValueError("message link did not resolve to a channel")
+            source = await self.client.get_messages(
+                source_peer,
+                ids=link.message_id,
+            )
+        except Exception as exc:
+            raise _SavedMemoryLinkUnavailable(str(exc)) from exc
+
+        source_chat_id = getattr(source, "chat_id", None)
+        source_message_id = getattr(source, "id", None)
+        if (
+            source is None
+            or source_chat_id != expected_chat_id
+            or source_message_id != link.message_id
+        ):
+            raise _SavedMemoryLinkUnavailable("linked Telegram message is unavailable")
+        return source, source_chat_id
+
+    async def _resolve_memory_link_peer(self, link: _TelegramMessageLink):
+        if link.username is not None:
+            return await self.client.get_input_entity(link.username)
+
+        assert link.channel_id is not None
+        peer = telegram_types.PeerChannel(link.channel_id)
+        try:
+            return await self.client.get_input_entity(peer)
+        except ValueError as cache_error:
+            expected_chat_id = telegram_utils.get_peer_id(peer)
+            self.logger.info(
+                "Private message-link peer missing from entity cache; "
+                "searching dialogs (chat_id=%s)",
+                expected_chat_id,
+            )
+            async for dialog in self.client.iter_dialogs():
+                if dialog.id == expected_chat_id:
+                    return dialog.input_entity
+            raise cache_error
+
+    def _is_saved_messages_message(self, message) -> bool:
         peer = getattr(message, "peer_id", None)
         destination_id = (
             telegram_utils.get_peer_id(peer)
             if peer is not None
             else getattr(message, "chat_id", None)
         )
-        return bool(
-            self._owner_id is not None
-            and destination_id == self._owner_id
-            and getattr(message, "fwd_from", None) is not None
-        )
+        return bool(self._owner_id is not None and destination_id == self._owner_id)
 
     async def _set_saved_memory_reaction(self, message, reaction: str) -> bool:
         try:

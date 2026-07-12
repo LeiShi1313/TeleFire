@@ -300,14 +300,16 @@ Commands and reply behavior:
   human memory.
 - Forward a message to the userbot account's Saved Messages to ingest the original
   message and its bounded ancestor reply chain without posting a command in the
-  source chat. The forwarded copy remains in Saved Messages. Premium accounts get
-  a best-effort `✍` success or `👎` failure tag, while non-Premium success stays
-  silent. Failures always receive a private reply: privacy-hidden or unavailable
-  sources explain that the original reply chain cannot be traced, while transient
-  processing failures ask the owner to forward again. Every new forward to Saved
-  Messages is treated as an explicit memory request; messages typed directly there
-  are not. Telegram-delivery duplicates are suppressed, while forwarding the same
-  source again intentionally retries ingestion.
+  source chat. When Telegram hides the forward source, paste the original public
+  or private supergroup/channel message link as the entire Saved Messages message;
+  Telefire resolves the linked message with the authenticated account and ingests
+  the same bounded chain. Forum message links are supported, while channel-comment
+  links with `?comment=` are ignored in v1. Forwarded copies and pasted links remain
+  in Saved Messages. Premium accounts get a best-effort `✍` success or `👎` failure
+  tag, while non-Premium success stays silent. Failures always receive a private
+  reply with a source-access or retry instruction. Telegram-delivery duplicates
+  are suppressed, while forwarding or pasting the source again intentionally
+  retries ingestion. Other directly typed Saved Messages are not memory requests.
 - `/ai_cancel` cancels the requester's active Agent Run.
 
 Unauthorized users are ignored. Delegated users get one request in flight and
@@ -330,7 +332,7 @@ memory. Only bounded generated descriptions, OCR text, captions, and safe metada
 can enter conversation context and per-user memory.
 
 AI conversation-to-Pi mappings, access state, cooldown timestamps, and processed
-Saved Messages forward receipts are stored in `~/.telefire/ai.db`. Zvec
+Saved Messages memory-request receipts are stored in `~/.telefire/ai.db`. Zvec
 observations, facts, episodes, and profiles are stored under
 `~/.telefire/memory/`. Optional canonical-key-to-display-name labels resolved from
 Telegram are stored separately beside the memory index and shown in the read-only

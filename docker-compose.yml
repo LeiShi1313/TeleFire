@@ -94,43 +94,6 @@ services:
       retries: 10
       start_period: 10s
 
-  memory-dashboard:
-    build:
-      context: .
-    container_name: telefire-memory-dashboard
-    command: ["python", "-m", "telefire.memory_dashboard", "--host", "0.0.0.0", "--port", "8765"]
-    depends_on:
-      hindsight:
-        condition: service_healthy
-    environment:
-      PYTHONPATH: /app/src
-      HOME: /telefire-data
-      TELEFIRE_HINDSIGHT_URL: http://hindsight:8888
-      TELEFIRE_HINDSIGHT_TIMEOUT: ${TELEFIRE_HINDSIGHT_TIMEOUT:-20}
-      TELEFIRE_AI_STATE_PATH: /telefire-data/.telefire/ai.db
-    ports:
-      - "127.0.0.1:${TELEFIRE_MEMORY_DASHBOARD_EXPOSE_PORT:-18866}:8765"
-    volumes:
-      - telefire-runtime:/telefire-data:ro
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-    pids_limit: 128
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - "CMD-SHELL"
-        - >
-          python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()"
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-
   ai:
     build:
       context: .

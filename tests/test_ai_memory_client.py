@@ -65,7 +65,21 @@ async def start_server(configure):
 
 @pytest.mark.asyncio
 async def test_hindsight_client_retains_episode_and_renders_bank_recall():
-    received = {}
+    received = {"bank_profiles": []}
+
+    async def upsert_bank(request):
+        payload = await request.json()
+        received["bank_profiles"].append(
+            (request.match_info["bank_id"], payload)
+        )
+        return web.json_response(
+            {
+                "bank_id": request.match_info["bank_id"],
+                "name": payload["name"],
+                "disposition": {"empathy": 3, "literalism": 3, "skepticism": 3},
+                "mission": "",
+            }
+        )
 
     async def retain(request):
         received["retain"] = await request.json()
@@ -101,6 +115,7 @@ async def test_hindsight_client_retains_episode_and_renders_bank_recall():
         )
 
     def configure(app):
+        app.router.add_put("/v1/default/banks/{bank_id}", upsert_bank)
         app.router.add_post("/v1/default/banks/{bank_id}/memories", retain)
         app.router.add_post("/v1/default/banks/{bank_id}/memories/recall", recall)
 
@@ -115,6 +130,9 @@ async def test_hindsight_client_retains_episode_and_renders_bank_recall():
         )
 
         assert retained.accepted is True
+        assert received["bank_profiles"] == [
+            (item.scope_id, {"name": "Engineering Group"})
+        ]
         assert received["retain_bank"] == item.scope_id
         request_item = received["retain"]["items"][0]
         assert request_item["document_id"] == item.document_id
@@ -151,6 +169,7 @@ async def test_hindsight_client_retains_episode_and_renders_bank_recall():
         second = replace(item, document_id="telegram:thread:-1001:99")
         batch = await client.retain_many((item, second))
         assert batch.items_count == 2
+        assert len(received["bank_profiles"]) == 1
         assert [entry["document_id"] for entry in received["retain"]["items"]] == [
             item.document_id,
             second.document_id,

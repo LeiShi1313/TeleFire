@@ -1,0 +1,93 @@
+services:
+  memory-api:
+    image: ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a560735aaf6f314e4b63c36c73159742dfa1a7
+    container_name: memory-api
+    environment:
+      HINDSIGHT_API_LLM_PROVIDER: openai
+      HINDSIGHT_API_LLM_API_KEY: ${MEMORY_LLM_API_KEY}
+      HINDSIGHT_API_LLM_MODEL: ${MEMORY_LLM_MODEL}
+      HINDSIGHT_API_LLM_BASE_URL: ${MEMORY_LLM_BASE_URL}
+      HINDSIGHT_API_LLM_REASONING_EFFORT: ${MEMORY_LLM_REASONING_EFFORT:-low}
+      HINDSIGHT_API_LLM_TEMPERATURE: none
+      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openai
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${MEMORY_EMBEDDING_API_KEY:-ollama}
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${MEMORY_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: ${MEMORY_EMBEDDING_BASE_URL:-http://ollama-embedding-ollama-1:11434/v1}
+      HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS: ${MEMORY_EMBEDDING_DIMENSIONS:-1024}
+      HINDSIGHT_API_RERANKER_PROVIDER: rrf
+      HINDSIGHT_API_RETAIN_ENTITY_LOOKUP: full
+      HINDSIGHT_API_WORKER_ID: memory-api
+    networks:
+      - default
+      - ollama-embedding
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${MEMORY_API_EXPOSE_PORT:-18888}:8888"
+      - "127.0.0.1:${MEMORY_UI_EXPOSE_PORT:-19999}:9999"
+    volumes:
+      - memory-data:/home/hindsight/.pg0
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    pids_limit: 512
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - http://127.0.0.1:8888/health
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  memory-inspector:
+    build:
+      context: .
+    container_name: memory-inspector
+    command: ["--host", "0.0.0.0", "--port", "8765"]
+    depends_on:
+      memory-api:
+        condition: service_healthy
+    environment:
+      MEMORY_API_URL: http://memory-api:8888
+      MEMORY_API_TIMEOUT: ${MEMORY_API_TIMEOUT:-20}
+    ports:
+      - "127.0.0.1:${MEMORY_INSPECTOR_EXPOSE_PORT:-18866}:8765"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    pids_limit: 128
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  memory-data:
+    name: memory-hindsight-data
+
+networks:
+  default:
+    name: memory-platform
+  ollama-embedding:
+    external: true
+    name: ollama-embedding

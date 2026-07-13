@@ -261,6 +261,8 @@ class HindsightMemoryClient:
             raise ValueError("Hindsight URL must use http or https")
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: aiohttp.ClientSession | None = None
+        self._bank_names: dict[str, str] = {}
+        self._bank_name_lock = asyncio.Lock()
 
     async def close(self) -> None:
         if self._session is not None:
@@ -286,6 +288,15 @@ class HindsightMemoryClient:
         scope_id = episodes[0].scope_id
         if any(episode.scope_id != scope_id for episode in episodes):
             raise ValueError("One Hindsight retain batch cannot span banks")
+        supplied_names = {
+            episode.scope_display_name.strip()[:256]
+            for episode in episodes
+            if episode.scope_display_name and episode.scope_display_name.strip()
+        }
+        if len(supplied_names) > 1:
+            raise ValueError("One Hindsight retain batch cannot rename a bank twice")
+        if supplied_names:
+            await self._ensure_bank_name(scope_id, supplied_names.pop())
         payload = await self._request(
             "POST",
             self._bank_path(scope_id, "/memories"),
@@ -311,6 +322,21 @@ class HindsightMemoryClient:
             operation_id=operation_id,
             items_count=len(episodes),
         )
+
+    async def _ensure_bank_name(self, scope_id: str, name: str) -> None:
+        if self._bank_names.get(scope_id) == name:
+            return
+        async with self._bank_name_lock:
+            if self._bank_names.get(scope_id) == name:
+                return
+            payload = await self._request(
+                "PUT",
+                self._bank_path(scope_id, ""),
+                {"name": name},
+            )
+            if payload.get("bank_id") != scope_id or payload.get("name") != name:
+                raise MemoryClientError("Hindsight bank profile response is malformed")
+            self._bank_names[scope_id] = name
 
     async def get_document_content(
         self,

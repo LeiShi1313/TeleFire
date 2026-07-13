@@ -34,7 +34,6 @@ e2ee = [
 
 [project.scripts]
 telefire = "telefire.cli:main"
-telefire-memory-dashboard = "telefire.memory_dashboard:main"
 telefire-memory-migrate = "telefire.memory_migrate:main"
 
 [dependency-groups]

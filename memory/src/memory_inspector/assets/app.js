@@ -39,12 +39,6 @@ function known(value) {
   return value;
 }
 
-function booleanState(value, whenTrue, whenFalse) {
-  if (value === true) return whenTrue;
-  if (value === false) return whenFalse;
-  return "Unknown";
-}
-
 async function request(path) {
   const response = await fetch(path, { headers: { accept: "application/json" } });
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
@@ -73,7 +67,7 @@ function renderBankList() {
   const query = elements.search.value.trim().toLocaleLowerCase();
   elements.list.replaceChildren();
   const filtered = state.banks.filter((bank) => {
-    const value = `${bank.display_name || ""} ${bank.bank_id}`.toLocaleLowerCase();
+    const value = `${bank.name || ""} ${bank.bank_id}`.toLocaleLowerCase();
     return !query || value.includes(query);
   });
   for (const bank of filtered) {
@@ -81,10 +75,10 @@ function renderBankList() {
     button.type = "button";
     button.setAttribute("role", "option");
     button.setAttribute("aria-selected", String(bank.bank_id === state.activeBank));
-    button.append(node("span", bank.display_name || bank.bank_id, "bank-name"));
+    button.append(node("span", bank.name || bank.bank_id, "bank-name"));
     const meta = node("span", null, "bank-meta");
     meta.append(node("span", `${bank.fact_count || 0} memories`));
-    meta.append(node("span", booleanState(bank.enabled, "Enabled", "Manual")));
+    if (bank.last_document_at) meta.append(node("span", time(bank.last_document_at)));
     button.append(meta);
     button.addEventListener("click", () => void selectBank(bank.bank_id));
     elements.list.append(button);
@@ -96,7 +90,7 @@ async function selectBank(bankId) {
   renderBankList();
   elements.empty.hidden = true;
   elements.view.hidden = false;
-  elements.title.textContent = state.banks.find((item) => item.bank_id === bankId)?.display_name || bankId;
+  elements.title.textContent = state.banks.find((item) => item.bank_id === bankId)?.name || bankId;
   elements.key.textContent = bankId;
   for (const id of ["overview", "episodes", "memories", "entities"]) {
     document.querySelector(`#tab-${id}`).replaceChildren(node("p", "Loading"));
@@ -115,13 +109,13 @@ function status(text, kind = "") {
 
 function renderBank() {
   const data = state.activeData;
+  const stats = data.stats || {};
   elements.health.replaceChildren(
+    status(`Pending operations: ${known(stats.pending_operations)}`),
     status(
-      `Automatic capture: ${booleanState(data.enabled, "Enabled", "Disabled")}`,
-      data.enabled === true ? "enabled" : "",
+      `Failed operations: ${known(stats.failed_operations)}`,
+      stats.failed_operations > 0 ? "error" : "",
     ),
-    status(`Receipts: ${known(data.receipt_count)}`),
-    ...(data.dream?.last_error ? [status("Dream error", "error")] : []),
   );
   renderOverview(data);
   renderEpisodes(data);
@@ -142,26 +136,27 @@ function renderOverview(data) {
   const documents = listItems(data.documents);
   const entities = listItems(data.entities);
   const observationScopes = listItems(data.observations, "scopes");
-  const dreamKnown = data.dream !== null && data.dream !== undefined;
+  const stats = data.stats || {};
   const metrics = node("div", null, "metric-grid");
   metrics.append(
     metric("Memories", data.memories?.total ?? memories.length),
-    metric("Episodes", data.documents?.total ?? documents.length),
+    metric("Episodes", stats.total_documents ?? data.documents?.total ?? documents.length),
     metric("Entities", data.entities?.total ?? entities.length),
-    metric("Observations", observationScopes.reduce((total, item) => total + (item.count || 0), 0)),
+    metric(
+      "Observations",
+      stats.total_observations ?? observationScopes.reduce((total, item) => total + (item.count || 0), 0),
+    ),
   );
   const operations = table(
-    ["Capture", "Cursor", "Scanned through", "Last attempt", "Last success", "Failure"],
+    ["Total links", "Pending operations", "Failed operations", "Last consolidated"],
     [[
-      booleanState(data.enabled, "Enabled", "Disabled"),
-      dreamKnown ? data.dream.cursor_message_id ?? "None" : "Unknown",
-      dreamKnown ? time(data.dream.scanned_until_at) : "Unknown",
-      dreamKnown ? time(data.dream.last_attempt_at) : "Unknown",
-      dreamKnown ? time(data.dream.last_success_at) : "Unknown",
-      dreamKnown ? data.dream.last_error || "None" : "Unknown",
+      known(stats.total_links),
+      known(stats.pending_operations),
+      known(stats.failed_operations),
+      time(stats.last_consolidated_at),
     ]],
   );
-  panel.replaceChildren(metrics, node("h3", "Delivery State", "section-title"), operations);
+  panel.replaceChildren(metrics, node("h3", "Memory State", "section-title"), operations);
 }
 
 function table(headings, rows, widths = []) {
@@ -209,7 +204,6 @@ function renderEpisodes(data) {
 }
 
 function renderMemories(data) {
-  const labels = data.actor_labels || {};
   const rows = listItems(data.memories).map((memory) => {
     const text = node("div", memory.text || "", "memory-text");
     const entities = Array.isArray(memory.entities)
@@ -217,7 +211,7 @@ function renderMemories(data) {
       : typeof memory.entities === "string"
         ? memory.entities.split(",").map((value) => value.trim()).filter(Boolean)
         : [];
-    const entityText = entities.map((id) => labels[id] ? `${labels[id]} (${id})` : id).join(", ");
+    const entityText = entities.join(", ");
     const source = memory.document_id ? node("button", memory.document_id, "source-button") : "";
     if (source instanceof Node) {
       source.type = "button";
@@ -238,16 +232,14 @@ function renderMemories(data) {
 }
 
 function renderEntities(data) {
-  const labels = data.actor_labels || {};
   const rows = listItems(data.entities).map((entity) => [
-    labels[entity.canonical_name] || "",
     node("code", entity.canonical_name || entity.id || ""),
     entity.mention_count || 0,
     time(entity.first_seen),
     time(entity.last_seen),
   ]);
   document.querySelector("#tab-entities").replaceChildren(
-    table(["Display name", "Canonical key", "Mentions", "First seen", "Last seen"], rows, ["20%", "32%", "10%", "19%", "19%"]),
+    table(["Canonical key", "Mentions", "First seen", "Last seen"], rows, ["40%", "12%", "24%", "24%"]),
   );
 }
 

@@ -161,10 +161,23 @@ async def start_hindsight() -> tuple[web.AppRunner, str, dict[str, Any]]:
         "invalidated": False,
         "patches": [],
         "queued_reflection_ids": [],
+        "profiles": [],
         "reflects": [],
         "retains": [],
     }
     app = web.Application()
+
+    async def upsert_bank(request):
+        payload = await request.json()
+        state["profiles"].append(payload)
+        return web.json_response(
+            {
+                "bank_id": request.match_info["bank_id"],
+                "name": payload["name"],
+                "disposition": {"empathy": 3, "literalism": 3, "skepticism": 3},
+                "mission": "",
+            }
+        )
 
     async def retain(request):
         payload = await request.json()
@@ -223,6 +236,7 @@ async def start_hindsight() -> tuple[web.AppRunner, str, dict[str, Any]]:
             {"id": request.match_info["memory_id"], "state": "invalidated"}
         )
 
+    app.router.add_put("/v1/default/banks/{bank_id}", upsert_bank)
     app.router.add_post("/v1/default/banks/{bank_id}/memories", retain)
     app.router.add_get(
         "/v1/default/banks/{bank_id}/documents/{document_id}", get_document

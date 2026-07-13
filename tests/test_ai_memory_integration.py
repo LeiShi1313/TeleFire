@@ -949,7 +949,19 @@ async def test_saved_memory_entrypoint_rejects_non_human_source():
 
 @pytest.mark.asyncio
 async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boundary():
-    received = {"retain": [], "recall": []}
+    received = {"profiles": [], "retain": [], "recall": []}
+
+    async def upsert_bank(request):
+        payload = await request.json()
+        received["profiles"].append(payload)
+        return web.json_response(
+            {
+                "bank_id": request.match_info["bank_id"],
+                "name": payload["name"],
+                "disposition": {"empathy": 3, "literalism": 3, "skepticism": 3},
+                "mission": "",
+            }
+        )
 
     async def retain(request):
         received["retain"].append(await request.json())
@@ -980,6 +992,7 @@ async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boun
         )
 
     app = web.Application()
+    app.router.add_put("/v1/default/banks/{bank_id}", upsert_bank)
     app.router.add_post("/v1/default/banks/{bank_id}/memories", retain)
     app.router.add_post("/v1/default/banks/{bank_id}/memories/recall", recall)
     runner = web.AppRunner(app)
@@ -1003,6 +1016,7 @@ async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boun
         assert await handler.handle(remember) is True
         assert await handler.handle(ask) is True
 
+        assert received["profiles"] == [{"name": "Engineering Group"}]
         assert len(received["retain"]) == 1
         retained = received["retain"][0]["items"][0]
         assert retained["document_id"] == f"telegram:thread:-1001:{source.id}"

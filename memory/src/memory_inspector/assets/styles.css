@@ -56,7 +56,6 @@ code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; over
 .bank-header h2 { margin: 0 0 5px; font-size: 22px; }
 .status-strip { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .status { padding: 3px 7px; border-radius: 8px; font-size: 11px; font-weight: 650; background: #e8edf1; color: #40505d; }
-.status.enabled { color: #155b37; background: #dff2e7; }
 .status.error { color: #8a2020; background: #f8dddd; }
 .status.warning { color: #79510b; background: #faedce; }
 

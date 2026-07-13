@@ -10,11 +10,10 @@ from typing import Any
 from urllib.parse import quote
 
 import aiohttp
-import aiosqlite
 from aiohttp import web
 
 
-_STATIC_PATH = Path(__file__).with_name("memory_dashboard_assets")
+_STATIC_PATH = Path(__file__).with_name("assets")
 _BANK_RE = re.compile(r"^[A-Za-z0-9:_-]{1,256}$")
 _DOCUMENT_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,512}$")
 _MEMORY_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
@@ -38,32 +37,25 @@ _PRIVATE_HEADERS = {
 
 
 @dataclass(frozen=True, slots=True)
-class DashboardSettings:
-    hindsight_url: str = "http://127.0.0.1:18888"
-    state_path: Path = Path.home() / ".telefire" / "ai.db"
+class InspectorSettings:
+    memory_url: str = "http://127.0.0.1:18888"
     request_timeout: float = 20
 
     @classmethod
-    def from_env(cls) -> DashboardSettings:
+    def from_env(cls) -> InspectorSettings:
         return cls(
-            hindsight_url=os.environ.get(
-                "TELEFIRE_HINDSIGHT_URL",
+            memory_url=os.environ.get(
+                "MEMORY_API_URL",
                 "http://127.0.0.1:18888",
             )
             .strip()
             .rstrip("/"),
-            state_path=Path(
-                os.environ.get(
-                    "TELEFIRE_AI_STATE_PATH",
-                    Path.home() / ".telefire" / "ai.db",
-                )
-            ),
-            request_timeout=float(os.environ.get("TELEFIRE_HINDSIGHT_TIMEOUT", "20")),
+            request_timeout=float(os.environ.get("MEMORY_API_TIMEOUT", "20")),
         )
 
 
-class DashboardData:
-    def __init__(self, settings: DashboardSettings):
+class InspectorData:
+    def __init__(self, settings: InspectorSettings):
         self._settings = settings
         self._session: aiohttp.ClientSession | None = None
 
@@ -74,51 +66,39 @@ class DashboardData:
 
     async def health(self) -> bool:
         try:
-            payload, _ = await asyncio.gather(
-                self._hindsight("/health"),
-                self._operational(required=True),
-            )
+            payload = await self._memory("/health")
         except Exception:
             return False
         return payload.get("status") in {"ok", "healthy"}
 
     async def banks(self) -> dict[str, Any]:
-        remote, operational = await asyncio.gather(
-            self._hindsight("/v1/default/banks"),
-            self._operational(),
-        )
-        banks = {
-            item["bank_id"]: dict(item)
-            for item in remote.get("banks", [])
-            if isinstance(item, dict) and isinstance(item.get("bank_id"), str)
-        }
-        all_ids = set(banks) | set(operational)
-        items = []
-        for bank_id in sorted(all_ids):
-            item = banks.get(bank_id, {"bank_id": bank_id})
-            state = operational.get(bank_id, {})
-            items.append(
-                {
-                    **item,
-                    "display_name": state.get("display_name"),
-                    "enabled": state.get("enabled"),
-                    "receipt_count": state.get("receipt_count"),
-                    "dream": state.get("dream"),
-                }
-            )
+        remote = await self._memory("/v1/default/banks")
+        supplied = remote.get("banks")
+        if not isinstance(supplied, list) or len(supplied) > 10_000:
+            raise RuntimeError("Memory API returned malformed banks")
+        items: list[dict[str, Any]] = []
+        for value in supplied:
+            if not isinstance(value, dict):
+                raise RuntimeError("Memory API returned malformed banks")
+            bank_id = value.get("bank_id")
+            if not isinstance(bank_id, str) or not _BANK_RE.fullmatch(bank_id):
+                raise RuntimeError("Memory API returned malformed banks")
+            items.append(dict(value))
+        items.sort(key=lambda item: item["bank_id"])
         return {"items": items, "total": len(items)}
 
     async def bank(self, bank_id: str) -> dict[str, Any]:
         _validate_identifier(bank_id, _BANK_RE, "bank")
         encoded = quote(bank_id, safe="")
         paths = {
+            "stats": f"/v1/default/banks/{encoded}/stats",
             "memories": f"/v1/default/banks/{encoded}/memories/list?limit=100",
             "documents": f"/v1/default/banks/{encoded}/documents?limit=100",
             "entities": f"/v1/default/banks/{encoded}/entities?limit=100",
             "observations": f"/v1/default/banks/{encoded}/observations/scopes",
         }
         results = await asyncio.gather(
-            *(self._hindsight(path) for path in paths.values()),
+            *(self._memory(path) for path in paths.values()),
             return_exceptions=True,
         )
         content: dict[str, Any] = {}
@@ -129,15 +109,8 @@ class DashboardData:
                 errors[name] = "unavailable"
             else:
                 content[name] = result
-        operational = (await self._operational()).get(bank_id, {})
-        actor_labels = await self._actor_labels(bank_id)
         return {
             "bank_id": bank_id,
-            "display_name": operational.get("display_name"),
-            "enabled": operational.get("enabled"),
-            "receipt_count": operational.get("receipt_count"),
-            "dream": operational.get("dream"),
-            "actor_labels": actor_labels,
             **content,
             "errors": errors,
         }
@@ -148,13 +121,13 @@ class DashboardData:
         bank = quote(bank_id, safe="")
         document = quote(document_id, safe="")
         source, chunks = await asyncio.gather(
-            self._hindsight(f"/v1/default/banks/{bank}/documents/{document}"),
-            self._hindsight(
+            self._memory(f"/v1/default/banks/{bank}/documents/{document}"),
+            self._memory(
                 f"/v1/default/banks/{bank}/documents/{document}/chunks?limit=100"
             ),
         )
         if source.get("bank_id") != bank_id or source.get("id") != document_id:
-            raise web.HTTPBadGateway(text="Hindsight returned mismatched source")
+            raise web.HTTPBadGateway(text="Memory API returned mismatched source")
         return {"document": source, "chunks": chunks}
 
     async def memory(self, bank_id: str, memory_id: str) -> dict[str, Any]:
@@ -162,118 +135,26 @@ class DashboardData:
         _validate_identifier(memory_id, _MEMORY_RE, "memory")
         bank = quote(bank_id, safe="")
         memory = quote(memory_id, safe="")
-        detail = await self._hindsight(f"/v1/default/banks/{bank}/memories/{memory}")
+        detail = await self._memory(f"/v1/default/banks/{bank}/memories/{memory}")
         history = detail.get("history") or []
         if detail.get("id") != memory_id or not isinstance(history, list):
             raise web.HTTPBadGateway(text="Hindsight returned mismatched memory")
         return {"memory": detail, "history": history[:100]}
 
-    async def _hindsight(self, path: str) -> dict[str, Any]:
+    async def _memory(self, path: str) -> dict[str, Any]:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._settings.request_timeout)
             )
         async with self._session.get(
-            f"{self._settings.hindsight_url}{path}"
+            f"{self._settings.memory_url}{path}"
         ) as response:
             if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"Hindsight returned HTTP {response.status}")
+                raise RuntimeError(f"Memory API returned HTTP {response.status}")
             payload = await response.json()
         if not isinstance(payload, dict):
-            raise RuntimeError("Hindsight returned malformed data")
+            raise RuntimeError("Memory API returned malformed data")
         return payload
-
-    async def _state_connection(self) -> aiosqlite.Connection:
-        if not self._settings.state_path.is_file():
-            raise FileNotFoundError(self._settings.state_path)
-        connection = await aiosqlite.connect(
-            f"file:{self._settings.state_path}?mode=ro",
-            uri=True,
-        )
-        connection.row_factory = aiosqlite.Row
-        return connection
-
-    async def _operational(
-        self,
-        *,
-        required: bool = False,
-    ) -> dict[str, dict[str, Any]]:
-        try:
-            connection = await self._state_connection()
-            try:
-                labels = await _rows(
-                    connection,
-                    "SELECT scope_id, display_name FROM ai_memory_scope_labels",
-                )
-                scopes = await _rows(
-                    connection,
-                    "SELECT scope_id, enabled, display_name FROM ai_memory_scopes",
-                )
-                receipts = await _rows(
-                    connection,
-                    "SELECT scope_id, COUNT(*) AS count FROM ai_memory_documents "
-                    "GROUP BY scope_id",
-                )
-                dreams = await _rows(
-                    connection,
-                    "SELECT scope_id, cursor_message_id, scanned_until_at, last_attempt_at, "
-                    "last_success_at, last_error FROM ai_memory_dream_state",
-                )
-                if required:
-                    await _rows(
-                        connection,
-                        "SELECT scope_id, actor_id, display_name "
-                        "FROM ai_memory_actor_labels LIMIT 0",
-                    )
-            finally:
-                await connection.close()
-        except (OSError, aiosqlite.Error):
-            if required:
-                raise
-            return {}
-        state: dict[str, dict[str, Any]] = {}
-        for row in labels:
-            state.setdefault(row["scope_id"], {})["display_name"] = row["display_name"]
-        for row in scopes:
-            item = state.setdefault(row["scope_id"], {})
-            item["enabled"] = bool(row["enabled"])
-            item.setdefault("display_name", row["display_name"])
-        for row in receipts:
-            state.setdefault(row["scope_id"], {})["receipt_count"] = row["count"]
-        for row in dreams:
-            state.setdefault(row["scope_id"], {})["dream"] = {
-                "cursor_message_id": row["cursor_message_id"],
-                "scanned_until_at": row["scanned_until_at"],
-                "last_attempt_at": row["last_attempt_at"],
-                "last_success_at": row["last_success_at"],
-                "last_error": row["last_error"],
-            }
-        return state
-
-    async def _actor_labels(self, bank_id: str) -> dict[str, str]:
-        try:
-            connection = await self._state_connection()
-            try:
-                rows = await _rows(
-                    connection,
-                    "SELECT actor_id, display_name FROM ai_memory_actor_labels "
-                    "WHERE scope_id = ? ORDER BY actor_id",
-                    (bank_id,),
-                )
-            finally:
-                await connection.close()
-        except (OSError, aiosqlite.Error):
-            return {}
-        return {row["actor_id"]: row["display_name"] for row in rows}
-
-
-async def _rows(
-    connection: aiosqlite.Connection,
-    query: str,
-    parameters: tuple[Any, ...] = (),
-) -> list[aiosqlite.Row]:
-    cursor = await connection.execute(query, parameters)
-    return [row async for row in cursor]
 
 
 def _validate_identifier(value: str, pattern: re.Pattern[str], kind: str) -> None:
@@ -289,7 +170,7 @@ def _valid_host(value: str) -> bool:
     return port is None or 1 <= int(port) <= 65535
 
 
-DATA_KEY = web.AppKey("dashboard_data", DashboardData)
+DATA_KEY = web.AppKey("inspector_data", InspectorData)
 
 
 @web.middleware
@@ -314,12 +195,12 @@ async def _favicon(_: web.Request) -> web.Response:
     return web.Response(status=204)
 
 
-def create_app(settings: DashboardSettings | None = None) -> web.Application:
+def create_app(settings: InspectorSettings | None = None) -> web.Application:
     app = web.Application(
         client_max_size=64 * 1024,
         middlewares=[_private_headers],
     )
-    app[DATA_KEY] = DashboardData(settings or DashboardSettings.from_env())
+    app[DATA_KEY] = InspectorData(settings or InspectorSettings.from_env())
     app.on_cleanup.append(_close_data)
     app.router.add_get("/health", _health)
     app.router.add_get("/api/banks", _banks)
@@ -408,12 +289,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the memory inspection dashboard")
     parser.add_argument(
         "--host",
-        default=os.environ.get("TELEFIRE_MEMORY_DASHBOARD_HOST", "127.0.0.1"),
+        default=os.environ.get("MEMORY_INSPECTOR_HOST", "127.0.0.1"),
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("TELEFIRE_MEMORY_DASHBOARD_PORT", "8765")),
+        default=int(os.environ.get("MEMORY_INSPECTOR_PORT", "8765")),
     )
     args = parser.parse_args()
     web.run_app(create_app(), host=args.host, port=args.port)

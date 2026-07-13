@@ -188,12 +188,15 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 ### Telegram AI and Memory
 
 Copy the settings from `.env.example` into a private `.env` and configure an
-OpenAI-compatible chat provider. Pi uses that provider for Agent Runs; the
-Hindsight service uses it for memory extraction and reflection. The embedding
-model and dimension define one fixed vector space; changing either requires an
-explicit re-ingestion and re-embedding operation.
-`TELEFIRE_AI_REASONING_EFFORT` is optional and accepts `none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, or `max` when supported by the selected chat model.
+OpenAI-compatible chat provider. Pi uses `TELEFIRE_AI_CHAT_MODEL` and
+`TELEFIRE_AI_REASONING_EFFORT` for Agent Runs. Hindsight independently uses
+`TELEFIRE_MEMORY_LLM_MODEL` and `TELEFIRE_MEMORY_LLM_REASONING_EFFORT` for
+memory extraction, consolidation, and reflection. These memory operations share
+the same provider endpoint and credentials. The embedding model and dimension
+define one fixed vector space; changing either requires an explicit re-ingestion
+and re-embedding operation.
+Both reasoning-effort settings accept `none`, `minimal`, `low`, `medium`, `high`,
+`xhigh`, or `max` when supported by their selected models.
 `TELEFIRE_AI_EDIT_CADENCE` is the account-wide minimum interval between Telegram
 message edits and defaults to 4 seconds. Intermediate stream updates are skipped
 when the edit slot is busy; final answers wait for the next slot.

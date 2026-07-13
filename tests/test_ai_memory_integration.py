@@ -511,7 +511,17 @@ async def test_bare_memory_command_retains_one_ordered_multi_actor_episode():
 
 
 @pytest.mark.asyncio
-async def test_memory_command_appends_to_existing_dream_segment(tmp_path):
+@pytest.mark.parametrize(
+    "document_id",
+    (
+        "telegram:dream-segment:-1001:0-19",
+        "telegram:dream-session:-1001:20260713T080000Z:1",
+    ),
+)
+async def test_memory_command_appends_to_existing_dream_document(
+    tmp_path,
+    document_id,
+):
     store = FakeStore()
     memory = FakeMemory()
     handler = make_handler(
@@ -522,10 +532,9 @@ async def test_memory_command_appends_to_existing_dream_segment(tmp_path):
     )
     root = FakeMessage("Root evidence", sender_id=20)
     target = FakeMessage("New reply evidence", sender_id=30, reply_to=root)
-    segment_id = "telegram:dream-segment:-1001:0-19"
     existing = MemoryEpisode(
         scope_id="telegram:chat:-1001",
-        document_id=segment_id,
+        document_id=document_id,
         events=(
             MemoryEvent(
                 source_id=f"telegram:message:-1001:{root.id}",
@@ -537,7 +546,7 @@ async def test_memory_command_appends_to_existing_dream_segment(tmp_path):
             ),
         ),
     )
-    store.memory_documents[(existing.scope_id, segment_id)] = MemoryDocumentReceipt(
+    store.memory_documents[(existing.scope_id, document_id)] = MemoryDocumentReceipt(
         existing.content_hash,
         existing.event_versions,
     )
@@ -547,12 +556,12 @@ async def test_memory_command_appends_to_existing_dream_segment(tmp_path):
 
     call = memory.retain_calls[0]
     assert call["update_mode"] == "append"
-    assert call["episode"].document_id == segment_id
+    assert call["episode"].document_id == document_id
     assert [event.source_id for event in call["episode"].events] == [
         f"telegram:message:-1001:{root.id}",
         f"telegram:message:-1001:{target.id}",
     ]
-    receipt = store.memory_documents[(existing.scope_id, segment_id)]
+    receipt = store.memory_documents[(existing.scope_id, document_id)]
     assert len(receipt.event_versions) == 2
 
 

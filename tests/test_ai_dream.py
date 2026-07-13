@@ -170,7 +170,7 @@ async def make_scanner(
             settlement_delay=timedelta(0),
             max_messages=max_messages,
             max_thread_messages=max_thread_messages,
-            segment_root_span=1,
+            session_max_events=1,
             retain_concurrency=retain_concurrency,
             lease_seconds=lease_seconds,
         ),
@@ -217,14 +217,18 @@ async def test_manual_dream_retains_standalone_and_complete_reply_tree(tmp_path)
         episodes = {
             call["episode"].document_id: call["episode"] for call in memory.retain_calls
         }
-        assert [event.text for event in episodes["telegram:thread:-1001:1"].events] == [
-            "Standalone project decision"
-        ]
-        assert [event.text for event in episodes["telegram:thread:-1001:2"].events] == [
-            "Root plan",
-            "First branch",
-            "Second branch",
-        ]
+        assert [
+            event.text
+            for event in episodes[
+                "telegram:dream-session:-1001:20260713T115500Z:1"
+            ].events
+        ] == ["Standalone project decision"]
+        assert [
+            event.text
+            for event in episodes[
+                "telegram:dream-session:-1001:20260713T115500Z:2"
+            ].events
+        ] == ["Root plan", "First branch", "Second branch"]
         assert all(call["update_mode"] == "replace" for call in memory.retain_calls)
         assert [len(batch) for batch in memory.retain_batches] == [1, 1]
         state = await store.get_memory_dream_state("telegram:chat:-1001")
@@ -237,7 +241,249 @@ async def test_manual_dream_retains_standalone_and_complete_reply_tree(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_dream_packs_100_messages_and_retains_four_segments_concurrently(
+async def test_dream_segments_root_groups_by_message_time(tmp_path):
+    first = FakeMessage(
+        1_000,
+        "Morning plan",
+        date=NOW - timedelta(minutes=50),
+    )
+    nearby = FakeMessage(
+        9_000,
+        "Nearby follow-up",
+        date=NOW - timedelta(minutes=45),
+    )
+    after_idle_gap = FakeMessage(
+        9_001,
+        "Separate discussion",
+        date=NOW - timedelta(minutes=20),
+    )
+    source = FakeSource((first, nearby, after_idle_gap))
+    memory = FakeMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            settlement_delay=timedelta(0),
+            session_idle_gap=timedelta(minutes=15),
+            session_max_span=timedelta(hours=1),
+            session_max_events=30,
+            session_max_chars=4_000,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.documents_created == 2
+        episodes = [call["episode"] for call in memory.retain_calls]
+        assert [episode.document_id for episode in episodes] == [
+            "telegram:dream-session:-1001:20260713T111000Z:1000",
+            "telegram:dream-session:-1001:20260713T114000Z:9001",
+        ]
+        assert [[event.text for event in episode.events] for episode in episodes] == [
+            ["Morning plan", "Nearby follow-up"],
+            ["Separate discussion"],
+        ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_keeps_an_oversized_reply_tree_atomic(tmp_path):
+    root = FakeMessage(
+        2_000,
+        "Root",
+        date=NOW - timedelta(minutes=20),
+    )
+    first_reply = FakeMessage(
+        2_001,
+        "First reply",
+        reply_to=root,
+        date=NOW - timedelta(minutes=19),
+    )
+    second_reply = FakeMessage(
+        2_002,
+        "Second reply",
+        reply_to=first_reply,
+        date=NOW - timedelta(minutes=18),
+    )
+    standalone = FakeMessage(
+        2_003,
+        "Nearby standalone",
+        date=NOW - timedelta(minutes=17),
+    )
+    source = FakeSource((root, first_reply, second_reply, standalone))
+    memory = FakeMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            settlement_delay=timedelta(0),
+            session_idle_gap=timedelta(minutes=15),
+            session_max_span=timedelta(hours=1),
+            session_max_events=2,
+            session_max_chars=4_000,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.documents_created == 2
+        assert [
+            [event.text for event in call["episode"].events]
+            for call in memory.retain_calls
+        ] == [
+            ["Root", "First reply", "Second reply"],
+            ["Nearby standalone"],
+        ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_closes_a_continuous_session_at_size_and_span_bounds(tmp_path):
+    messages = (
+        FakeMessage(
+            2_100,
+            "1234567890",
+            date=NOW - timedelta(minutes=30),
+        ),
+        FakeMessage(
+            2_101,
+            "a",
+            date=NOW - timedelta(minutes=25),
+        ),
+        FakeMessage(
+            2_102,
+            "b",
+            date=NOW - timedelta(minutes=20),
+        ),
+        FakeMessage(
+            2_103,
+            "c",
+            date=NOW - timedelta(minutes=9),
+        ),
+    )
+    source = FakeSource(messages)
+    memory = FakeMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            settlement_delay=timedelta(0),
+            session_idle_gap=timedelta(minutes=15),
+            session_max_span=timedelta(minutes=15),
+            session_max_events=30,
+            session_max_chars=10,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.documents_created == 3
+        assert [
+            [event.text for event in call["episode"].events]
+            for call in memory.retain_calls
+        ] == [["1234567890"], ["a", "b"], ["c"]]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_appends_to_an_open_temporal_session_after_restart(tmp_path):
+    class MutableClock:
+        value = (NOW - timedelta(minutes=5)).timestamp()
+
+        def __call__(self):
+            return self.value
+
+    clock = MutableClock()
+    first = FakeMessage(
+        3_000,
+        "Initial discussion",
+        date=NOW - timedelta(minutes=10),
+    )
+    source = FakeSource((first,))
+    memory = FakeMemory()
+    settings = DreamSettings(
+        lookback=timedelta(hours=1),
+        settlement_delay=timedelta(0),
+        session_idle_gap=timedelta(minutes=15),
+        session_max_span=timedelta(hours=1),
+        session_max_events=30,
+        session_max_chars=4_000,
+    )
+    state_path = tmp_path / "ai.db"
+    first_store = await AIStateRepository(state_path).connect()
+    await first_store.set_memory_enabled(
+        "telegram:chat:-1001",
+        True,
+        "Dream Group",
+    )
+    first_scanner = TelegramDreamScanner(
+        source=source,
+        store=first_store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=settings,
+        clock=clock,
+    )
+    await first_scanner.run_scope(-1001)
+    await first_store.close()
+
+    second = FakeMessage(
+        3_001,
+        "Nearby continuation",
+        date=NOW - timedelta(minutes=2),
+    )
+    source.window = (second,)
+    source.by_id[second.id] = second
+    clock.value = NOW.timestamp()
+    second_store = await AIStateRepository(state_path).connect()
+    second_scanner = TelegramDreamScanner(
+        source=source,
+        store=second_store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=settings,
+        clock=clock,
+    )
+    try:
+        result = await second_scanner.run_scope(-1001)
+
+        assert result.documents_created == 1
+        assert len(memory.retain_calls) == 2
+        assert memory.retain_calls[1]["episode"].document_id == (
+            memory.retain_calls[0]["episode"].document_id
+        )
+        assert [event.text for event in memory.retain_calls[1]["episode"].events] == [
+            "Initial discussion",
+            "Nearby continuation",
+        ]
+        assert (-1001, first.id) in source.message_calls
+    finally:
+        await second_store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_bounds_a_continuous_session_and_retains_concurrently(
     tmp_path,
 ):
     class ConcurrentMemory(FakeMemory):
@@ -281,7 +527,7 @@ async def test_dream_packs_100_messages_and_retains_four_segments_concurrently(
             overlap=timedelta(minutes=10),
             settlement_delay=timedelta(0),
             max_messages=100,
-            segment_root_span=20,
+            session_max_events=20,
             retain_concurrency=4,
         ),
         clock=lambda: NOW.timestamp(),
@@ -297,11 +543,11 @@ async def test_dream_packs_100_messages_and_retains_four_segments_concurrently(
         assert identity_resolver.calls == 1
         episodes = [call["episode"] for call in memory.retain_calls]
         assert [episode.document_id for episode in episodes] == [
-            "telegram:dream-segment:-1001:1000-1019",
-            "telegram:dream-segment:-1001:1020-1039",
-            "telegram:dream-segment:-1001:1040-1059",
-            "telegram:dream-segment:-1001:1060-1079",
-            "telegram:dream-segment:-1001:1080-1099",
+            "telegram:dream-session:-1001:20260713T114000Z:1000",
+            "telegram:dream-session:-1001:20260713T114020Z:1020",
+            "telegram:dream-session:-1001:20260713T114040Z:1040",
+            "telegram:dream-session:-1001:20260713T114100Z:1060",
+            "telegram:dream-session:-1001:20260713T114120Z:1080",
         ]
         assert [len(episode.events) for episode in episodes] == [20] * 5
         assert all(len(batch) == 1 for batch in memory.retain_batches)
@@ -310,14 +556,14 @@ async def test_dream_packs_100_messages_and_retains_four_segments_concurrently(
                 "telegram:chat:-1001",
                 "telegram:message:-1001:1007",
             )
-            == "telegram:dream-segment:-1001:1000-1019"
+            == "telegram:dream-session:-1001:20260713T114000Z:1000"
         )
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_packed_segment_keeps_sibling_context_for_a_late_reply(tmp_path):
+async def test_temporal_session_keeps_sibling_context_for_a_late_reply(tmp_path):
     root = FakeMessage(100, "Root decision", date=NOW - timedelta(minutes=30))
     sibling_root = FakeMessage(
         105,
@@ -345,7 +591,6 @@ async def test_packed_segment_keeps_sibling_context_for_a_late_reply(tmp_path):
             lookback=timedelta(hours=1),
             overlap=timedelta(minutes=10),
             settlement_delay=timedelta(0),
-            segment_root_span=20,
             retain_concurrency=1,
         ),
         clock=lambda: NOW.timestamp(),
@@ -365,7 +610,9 @@ async def test_packed_segment_keeps_sibling_context_for_a_late_reply(tmp_path):
         await scanner.run_scope(-1001)
 
         updated = memory.retain_calls[-1]["episode"]
-        assert updated.document_id == "telegram:dream-segment:-1001:100-119"
+        assert updated.document_id == (
+            "telegram:dream-session:-1001:20260713T113000Z:100"
+        )
         assert [event.source_id for event in updated.events] == [
             "telegram:message:-1001:100",
             "telegram:message:-1001:105",
@@ -379,18 +626,81 @@ async def test_packed_segment_keeps_sibling_context_for_a_late_reply(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_packing_preserves_existing_thread_document_receipts(tmp_path):
+async def test_late_reply_preserves_a_legacy_packed_document(tmp_path):
+    root = FakeMessage(160, "Legacy root", date=NOW - timedelta(minutes=30))
+    sibling = FakeMessage(161, "Legacy sibling", date=NOW - timedelta(minutes=25))
+    first_reply = FakeMessage(
+        162,
+        "Legacy reply",
+        reply_to=root,
+        date=NOW - timedelta(minutes=20),
+    )
+    late_reply = FakeMessage(
+        190,
+        "New late reply",
+        reply_to=root,
+        date=NOW - timedelta(minutes=5),
+    )
+    source = FakeSource((late_reply,), ancestors=(root, sibling, first_reply))
+    memory = FakeMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    document_id = "telegram:dream-segment:-1001:160-179"
+    await store.save_memory_document_receipt(
+        "telegram:chat:-1001",
+        document_id,
+        "legacy-content",
+        tuple(
+            (f"telegram:message:-1001:{message.id}", "legacy-event")
+            for message in (root, sibling, first_reply)
+        ),
+    )
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            settlement_delay=timedelta(0),
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.documents_created == 1
+        updated = memory.retain_calls[0]["episode"]
+        assert updated.document_id == document_id
+        assert [event.text for event in updated.events] == [
+            "Legacy root",
+            "Legacy sibling",
+            "Legacy reply",
+            "New late reply",
+        ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_temporal_sessions_preserve_existing_thread_document_receipts(tmp_path):
     messages = (
         FakeMessage(200, "Existing first document"),
         FakeMessage(201, "Existing second document"),
     )
     source = FakeSource(messages)
     memory = FakeMemory()
-    store, legacy_scanner = await make_scanner(tmp_path, source, memory)
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    for message in messages:
+        await store.save_memory_document_receipt(
+            "telegram:chat:-1001",
+            f"telegram:thread:-1001:{message.id}",
+            "legacy-content",
+            ((f"telegram:message:-1001:{message.id}", "legacy-event"),),
+        )
     try:
-        await legacy_scanner.run_scope(-1001)
-
-        packed_scanner = TelegramDreamScanner(
+        scanner = TelegramDreamScanner(
             source=source,
             store=store,
             memory=memory,
@@ -399,15 +709,14 @@ async def test_packing_preserves_existing_thread_document_receipts(tmp_path):
                 lookback=timedelta(hours=1),
                 overlap=timedelta(minutes=10),
                 settlement_delay=timedelta(0),
-                segment_root_span=20,
                 retain_concurrency=4,
             ),
             clock=lambda: NOW.timestamp(),
         )
-        result = await packed_scanner.run_scope(-1001)
+        result = await scanner.run_scope(-1001)
 
-        assert result.documents_created == 0
-        assert result.documents_unchanged == 2
+        assert result.documents_created == 2
+        assert result.documents_unchanged == 0
         assert [call["episode"].document_id for call in memory.retain_calls] == [
             "telegram:thread:-1001:200",
             "telegram:thread:-1001:201",
@@ -454,7 +763,7 @@ async def test_budgeted_dream_checkpoints_completed_prefix_and_resumes(tmp_path)
             overlap=timedelta(minutes=10),
             settlement_delay=timedelta(0),
             max_messages=100,
-            segment_root_span=1,
+            session_max_events=1,
             retain_concurrency=1,
             cycle_budget_seconds=25,
         ),
@@ -480,7 +789,7 @@ async def test_budgeted_dream_checkpoints_completed_prefix_and_resumes(tmp_path)
                 overlap=timedelta(minutes=10),
                 settlement_delay=timedelta(0),
                 max_messages=100,
-                segment_root_span=1,
+                session_max_events=1,
                 retain_concurrency=1,
                 cycle_budget_seconds=3_600,
             ),
@@ -518,7 +827,9 @@ async def test_dream_fetches_ancestor_outside_window_as_context(tmp_path):
         assert result.messages_retained == 1
         assert result.documents_created == 1
         episode = memory.retain_calls[0]["episode"]
-        assert episode.document_id == "telegram:thread:-1001:10"
+        assert episode.document_id == (
+            "telegram:dream-session:-1001:20260713T100000Z:10"
+        )
         assert [event.text for event in episode.events] == [
             "Earlier root context",
             "New reply",
@@ -674,9 +985,9 @@ async def test_dream_updates_existing_root_for_late_reply_and_edit(tmp_path):
         third = await scanner.run_scope(-1001)
         assert third.documents_created == 1
         assert [call["episode"].document_id for call in memory.retain_calls] == [
-            "telegram:thread:-1001:20",
-            "telegram:thread:-1001:20",
-            "telegram:thread:-1001:20",
+            "telegram:dream-session:-1001:20260713T115500Z:20",
+            "telegram:dream-session:-1001:20260713T115500Z:20",
+            "telegram:dream-session:-1001:20260713T115500Z:20",
         ]
         assert memory.retain_calls[-1]["update_mode"] == "replace"
         assert [event.text for event in memory.retain_calls[-1]["episode"].events] == [
@@ -1112,12 +1423,28 @@ def test_scheduler_requires_valid_five_field_cron():
         DreamSchedulerSettings(cron="every hour")
 
 
+def test_dream_settings_load_temporal_session_limits(monkeypatch):
+    monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_IDLE_SECONDS", "120")
+    monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_SPAN_SECONDS", "600")
+    monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_EVENTS", "12")
+    monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_CHARS", "2048")
+
+    settings = DreamSettings.from_env()
+
+    assert settings.session_idle_gap == timedelta(minutes=2)
+    assert settings.session_max_span == timedelta(minutes=10)
+    assert settings.session_max_events == 12
+    assert settings.session_max_chars == 2_048
+
+
 @pytest.mark.asyncio
 async def test_partial_failure_keeps_cursor_and_retries_only_missing_document(tmp_path):
     first = FakeMessage(30, "First document")
     second = FakeMessage(31, "Second document")
     source = FakeSource([first, second])
-    failing = FakeMemory(fail_document="telegram:thread:-1001:31")
+    failing = FakeMemory(
+        fail_document="telegram:dream-session:-1001:20260713T115500Z:31"
+    )
     store, scanner = await make_scanner(
         tmp_path,
         source,
@@ -1146,7 +1473,7 @@ async def test_partial_failure_keeps_cursor_and_retries_only_missing_document(tm
         assert result.documents_created == 1
         assert result.documents_unchanged == 1
         assert [call["episode"].document_id for call in healthy.retain_calls] == [
-            "telegram:thread:-1001:31"
+            "telegram:dream-session:-1001:20260713T115500Z:31"
         ]
         succeeded = await store.get_memory_dream_state("telegram:chat:-1001")
         assert succeeded.cursor_message_id == 31

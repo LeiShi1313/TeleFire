@@ -1461,6 +1461,55 @@ class AIStateRepository:
                 )
         return receipts
 
+    async def find_memory_document_ids_for_sources(
+        self,
+        scope_id: str,
+        source_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        connection = self._require_connection()
+        unique_ids = tuple(dict.fromkeys(source_ids))
+        documents: dict[str, str] = {}
+        for start in range(0, len(unique_ids), 400):
+            batch = unique_ids[start : start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            query = f"""
+                SELECT document.document_id,
+                       json_extract(event.value, '$[0]') AS source_id
+                FROM ai_memory_documents AS document,
+                     json_each(document.event_versions) AS event
+                WHERE document.scope_id = ?
+                  AND json_extract(event.value, '$[0]') IN ({placeholders})
+                ORDER BY document.retained_at
+            """
+            cursor = await connection.execute(
+                query,
+                (scope_id, *batch),
+            )
+            async for row in cursor:
+                documents[str(row["source_id"])] = str(row["document_id"])
+        return documents
+
+    async def get_latest_memory_document_receipt(
+        self,
+        scope_id: str,
+        document_prefix: str,
+    ) -> tuple[str, MemoryDocumentReceipt] | None:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            """
+            SELECT document_id, content_hash, event_versions
+            FROM ai_memory_documents
+            WHERE scope_id = ? AND document_id LIKE ?
+            ORDER BY document_id DESC
+            LIMIT 1
+            """,
+            (scope_id, f"{document_prefix}%"),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return str(row["document_id"]), _memory_document_receipt_from_row(row)
+
     async def save_memory_document_receipt(
         self,
         scope_id: str,
@@ -2570,14 +2619,18 @@ class AIConversationHandler:
                 scope_id,
                 root_source_id,
             )
-            append_to_segment = bool(
+            append_to_dream_document = bool(
                 existing_document_id
-                and existing_document_id.startswith("telegram:dream-segment:")
+                and existing_document_id.startswith(
+                    ("telegram:dream-segment:", "telegram:dream-session:")
+                )
             )
             episode = _telegram_memory_episode(
                 chat_id,
                 observations,
-                document_id=(existing_document_id if append_to_segment else None),
+                document_id=(
+                    existing_document_id if append_to_dream_document else None
+                ),
             )
             await _record_episode_labels(self._store, episode)
             created = (
@@ -2586,7 +2639,7 @@ class AIConversationHandler:
                     self._store,
                     episode,
                 )
-                if append_to_segment
+                if append_to_dream_document
                 else await retain_episode_once(
                     self._memory,
                     self._store,

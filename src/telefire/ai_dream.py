@@ -117,7 +117,10 @@ class DreamSettings:
     settlement_delay: timedelta = timedelta(seconds=30)
     max_messages: int = 500
     max_thread_messages: int = 100
-    segment_root_span: int = 20
+    session_idle_gap: timedelta = timedelta(minutes=15)
+    session_max_span: timedelta = timedelta(hours=1)
+    session_max_events: int = 30
+    session_max_chars: int = 4_000
     retain_concurrency: int = 4
     preprocess_concurrency: int = 12
     cycle_budget_seconds: float = 50
@@ -130,10 +133,15 @@ class DreamSettings:
             raise ValueError("Dream lookback must be positive")
         if self.overlap < timedelta(0) or self.settlement_delay < timedelta(0):
             raise ValueError("Dream overlap and settlement delay cannot be negative")
+        if self.session_idle_gap <= timedelta(0) or self.session_max_span <= timedelta(
+            0
+        ):
+            raise ValueError("Dream session time limits must be positive")
         if (
             self.max_messages < 1
             or self.max_thread_messages < 1
-            or self.segment_root_span < 1
+            or self.session_max_events < 1
+            or self.session_max_chars < 1
             or self.retain_concurrency < 1
             or self.preprocess_concurrency < 1
         ):
@@ -175,8 +183,27 @@ class DreamSettings:
                     "100",
                 )
             ),
-            segment_root_span=int(
-                os.environ.get("TELEFIRE_MEMORY_DREAM_SEGMENT_ROOT_SPAN", "20")
+            session_idle_gap=timedelta(
+                seconds=float(
+                    os.environ.get(
+                        "TELEFIRE_MEMORY_DREAM_SESSION_IDLE_SECONDS",
+                        "900",
+                    )
+                )
+            ),
+            session_max_span=timedelta(
+                seconds=float(
+                    os.environ.get(
+                        "TELEFIRE_MEMORY_DREAM_SESSION_MAX_SPAN_SECONDS",
+                        "3600",
+                    )
+                )
+            ),
+            session_max_events=int(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_SESSION_MAX_EVENTS", "30")
+            ),
+            session_max_chars=int(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_SESSION_MAX_CHARS", "4000")
             ),
             retain_concurrency=int(
                 os.environ.get("TELEFIRE_MEMORY_DREAM_RETAIN_CONCURRENCY", "4")
@@ -251,16 +278,44 @@ class DreamThreadLimitError(RuntimeError):
     pass
 
 
-def _dream_segment_document_id(
+def _dream_session_document_id(
     chat_id: int,
     root_message_id: int,
-    root_span: int,
+    started_at: datetime,
 ) -> str:
-    if root_span == 1:
-        return f"telegram:thread:{chat_id}:{root_message_id}"
-    start = (root_message_id // root_span) * root_span
-    end = start + root_span - 1
-    return f"telegram:dream-segment:{chat_id}:{start}-{end}"
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+    stamp = started_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"telegram:dream-session:{chat_id}:{stamp}:{root_message_id}"
+
+
+def _session_accepts(
+    current: tuple[HumanObservation, ...],
+    candidate: tuple[HumanObservation, ...],
+    settings: DreamSettings,
+) -> bool:
+    if not current:
+        return True
+    current_start = min(observation.occurred_at for observation in current)
+    current_end = max(observation.occurred_at for observation in current)
+    candidate_start = min(observation.occurred_at for observation in candidate)
+    candidate_end = max(observation.occurred_at for observation in candidate)
+    if candidate_start - current_end > settings.session_idle_gap:
+        return False
+    if (
+        max(current_end, candidate_end)
+        - min(
+            current_start,
+            candidate_start,
+        )
+        > settings.session_max_span
+    ):
+        return False
+    if len(current) + len(candidate) > settings.session_max_events:
+        return False
+    return sum(len(observation.text) for observation in (*current, *candidate)) <= (
+        settings.session_max_chars
+    )
 
 
 def _completed_message_prefix(
@@ -615,47 +670,62 @@ class TelegramDreamScanner:
                 group[item.id] = item
 
         scope_id = _telegram_scope_id(chat_id)
-        candidate_document_ids: list[str] = []
-        for root_id in root_groups:
-            candidate_document_ids.append(f"telegram:thread:{chat_id}:{root_id}")
-            candidate_document_ids.append(
-                _dream_segment_document_id(
-                    chat_id,
-                    root_id,
-                    self._settings.segment_root_span,
-                )
-            )
+        source_ids = tuple(
+            f"telegram:message:{chat_id}:{message_id}"
+            for grouped in root_groups.values()
+            for message_id in grouped
+        )
+        source_documents = await self._store.find_memory_document_ids_for_sources(
+            scope_id,
+            source_ids,
+        )
+
+        assigned_documents: dict[int, str] = {}
+        for root_id, grouped in root_groups.items():
+            root_source_id = f"telegram:message:{chat_id}:{root_id}"
+            document_id = source_documents.get(root_source_id)
+            if document_id is None:
+                for message_id in grouped:
+                    source_id = f"telegram:message:{chat_id}:{message_id}"
+                    document_id = source_documents.get(source_id)
+                    if document_id is not None:
+                        break
+            if document_id is not None:
+                assigned_documents[root_id] = document_id
+
+        assigned_document_ids = tuple(dict.fromkeys(assigned_documents.values()))
         receipts = await self._store.get_memory_document_receipts(
             scope_id,
-            tuple(candidate_document_ids),
+            assigned_document_ids,
         )
 
         document_groups: dict[str, dict[int, ReplyTarget]] = {}
-        for root_id, grouped in sorted(root_groups.items()):
+        for root_id, document_id in assigned_documents.items():
+            grouped = root_groups[root_id]
             if len(grouped) > self._settings.max_thread_messages:
                 raise DreamThreadLimitError(
                     f"Thread {root_id} exceeds the configured Dream thread bound"
                 )
-            thread_id = f"telegram:thread:{chat_id}:{root_id}"
-            segment_id = _dream_segment_document_id(
-                chat_id,
-                root_id,
-                self._settings.segment_root_span,
-            )
-            segment_receipt = receipts.get(segment_id)
-            root_source_id = f"telegram:message:{chat_id}:{root_id}"
-            segment_contains_root = segment_receipt is not None and any(
-                source_id == root_source_id
-                for source_id, _ in segment_receipt.event_versions
-            )
-            if segment_id == thread_id or (
-                thread_id in receipts and not segment_contains_root
-            ):
-                document_id = thread_id
-            else:
-                document_id = segment_id
             document_group = document_groups.setdefault(document_id, {})
             document_group.update(grouped)
+
+        unassigned_root_ids = tuple(
+            root_id for root_id in root_groups if root_id not in assigned_documents
+        )
+        open_document_id: str | None = None
+        candidate_document_id: str | None = None
+        loaded_candidate_only = False
+        if unassigned_root_ids:
+            latest = await self._store.get_latest_memory_document_receipt(
+                scope_id,
+                f"telegram:dream-session:{chat_id}:",
+            )
+            if latest is not None:
+                open_document_id, receipt = latest
+                candidate_document_id = open_document_id
+                receipts[open_document_id] = receipt
+                loaded_candidate_only = open_document_id not in document_groups
+                document_groups.setdefault(open_document_id, {})
 
         await self._hydrate_previous_events(
             chat_id,
@@ -669,13 +739,82 @@ class TelegramDreamScanner:
                 sorted(
                     {
                         message.id: message
-                        for group in document_groups.values()
+                        for group in (
+                            *document_groups.values(),
+                            *(root_groups[root_id] for root_id in unassigned_root_ids),
+                        )
                         for message in group.values()
                     }.values(),
                     key=lambda message: (_message_datetime(message), message.id),
                 )
             ),
         )
+
+        open_observations = (
+            tuple(
+                observation_by_id[message_id]
+                for message_id in document_groups[open_document_id]
+                if message_id in observation_by_id
+            )
+            if open_document_id is not None
+            else ()
+        )
+        candidate_appended = False
+        unassigned_roots: list[
+            tuple[int, dict[int, ReplyTarget], tuple[HumanObservation, ...]]
+        ] = []
+        for root_id in unassigned_root_ids:
+            grouped = root_groups[root_id]
+            if len(grouped) > self._settings.max_thread_messages:
+                raise DreamThreadLimitError(
+                    f"Thread {root_id} exceeds the configured Dream thread bound"
+                )
+            observations = tuple(
+                sorted(
+                    (
+                        observation_by_id[message_id]
+                        for message_id in grouped
+                        if message_id in observation_by_id
+                    ),
+                    key=lambda observation: (
+                        observation.occurred_at,
+                        observation.message_id,
+                    ),
+                )
+            )
+            if observations:
+                unassigned_roots.append((root_id, grouped, observations))
+        unassigned_roots.sort(key=lambda item: (item[2][0].occurred_at, item[0]))
+
+        for root_id, grouped, observations in unassigned_roots:
+            if open_document_id is not None and _session_accepts(
+                open_observations,
+                observations,
+                self._settings,
+            ):
+                document_id = open_document_id
+                candidate_appended = (
+                    candidate_appended or document_id == candidate_document_id
+                )
+            else:
+                document_id = _dream_session_document_id(
+                    chat_id,
+                    root_id,
+                    observations[0].occurred_at,
+                )
+                open_document_id = document_id
+                open_observations = ()
+            document_groups.setdefault(document_id, {}).update(grouped)
+            open_observations = tuple(
+                {
+                    observation.message_id: observation
+                    for observation in (*open_observations, *observations)
+                }.values()
+            )
+
+        if loaded_candidate_only and not candidate_appended:
+            assert candidate_document_id is not None
+            document_groups.pop(candidate_document_id, None)
 
         documents: list[_DreamDocument] = []
         for document_id, grouped in document_groups.items():
@@ -753,12 +892,19 @@ class TelegramDreamScanner:
                     previous_ids.append(message_id)
                     if message_id not in known:
                         missing_ids.add(message_id)
-            limit = (
-                self._settings.max_thread_messages
-                if document_id.startswith("telegram:thread:")
-                else self._settings.max_thread_messages
-                + self._settings.segment_root_span
-            )
+            if document_id.startswith("telegram:thread:"):
+                limit = self._settings.max_thread_messages
+            elif document_id.startswith("telegram:dream-session:"):
+                limit = max(
+                    self._settings.max_thread_messages,
+                    self._settings.session_max_events,
+                )
+            else:
+                # Legacy ID-packed documents can be larger than new sessions.
+                limit = max(
+                    self._settings.max_messages,
+                    self._settings.max_thread_messages,
+                )
             if len(grouped) + len(previous_ids) > limit:
                 raise DreamThreadLimitError(
                     f"Document {document_id} exceeds its configured Dream bound"

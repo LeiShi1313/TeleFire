@@ -17,6 +17,7 @@ from telefire.ai import (
     AgentRunRequest,
     MessageIdentity,
     MentionedUser,
+    MemoryBackfillRequest,
     MemoryDreamResult,
     MemoryDreamState,
     PromptBuilder,
@@ -40,10 +41,13 @@ class FakeAnswer:
     def __init__(self, text):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
+        self.initial_text = text
         self.text = text
+        self.edits = []
 
     async def edit(self, text, **kwargs):
         self.text = text
+        self.edits.append(text)
         return self
 
 
@@ -1085,9 +1089,21 @@ class FakeDreamRunner:
     def __init__(self, error=None):
         self.error = error
         self.calls = []
+        self.backfill_calls = []
 
     async def run_scope(self, chat_id):
         self.calls.append(chat_id)
+        if self.error:
+            raise self.error
+        return MemoryDreamResult(
+            messages_seen=4,
+            messages_retained=3,
+            documents_created=2,
+            documents_unchanged=1,
+        )
+
+    async def run_backfill(self, chat_id, request):
+        self.backfill_calls.append((chat_id, request))
         if self.error:
             raise self.error
         return MemoryDreamResult(
@@ -1142,4 +1158,86 @@ async def test_failed_manual_dream_remains_visible_for_retry():
     assert command.replies[0].text == (
         "Dream Cycle failed. It will retry from the previous cursor."
     )
+    assert command.deleted is False
+
+
+@pytest.mark.parametrize(
+    ("command_text", "expected_request", "progress"),
+    [
+        (
+            "/ai_memory_backfill days 7",
+            MemoryBackfillRequest(mode="days", value=7),
+            "Backfilling the last 7 days...",
+        ),
+        (
+            "/ai_memory_backfill messages 500",
+            MemoryBackfillRequest(mode="messages", value=500),
+            "Backfilling the latest 500 messages...",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_owner_runs_backfill_while_automatic_memory_is_disabled(
+    command_text,
+    expected_request,
+    progress,
+):
+    store = FakeStore()
+    runner = FakeDreamRunner()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=store,
+        dream_runner=runner,
+    )
+    command = FakeMessage(command_text, sender_id=10)
+
+    assert await handler.handle(command) is True
+    assert runner.backfill_calls == [(-1001, expected_request)]
+    assert command.replies[0].edits == [
+        "Memory backfill complete: scanned 4 messages; retained 3 in "
+        "2 updated threads; 1 unchanged."
+    ]
+    assert command.replies[0].initial_text == progress
+    assert command.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_invalid_and_non_owner_backfill_commands_do_not_start_work():
+    runner = FakeDreamRunner()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=FakeStore(allowed={20}),
+        dream_runner=runner,
+    )
+    invalid = FakeMessage("/ai_memory_backfill days 31", sender_id=10)
+    non_owner = FakeMessage("/ai_memory_backfill days 7", sender_id=20)
+
+    assert await handler.handle(invalid) is True
+    assert invalid.replies[0].text == (
+        "Usage: /ai_memory_backfill days <1-30> or "
+        "/ai_memory_backfill messages <1-5000>"
+    )
+    assert invalid.deleted is False
+    assert await handler.handle(non_owner) is False
+    assert non_owner.replies == []
+    assert runner.backfill_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_backfill_edits_progress_and_keeps_command_for_retry():
+    runner = FakeDreamRunner(error=ConnectionError("memory unavailable"))
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=FakeStore(),
+        dream_runner=runner,
+    )
+    command = FakeMessage("/ai_memory_backfill messages 50", sender_id=10)
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].edits == [
+        "Memory backfill failed. Accepted documents are safe; retry the same command."
+    ]
     assert command.deleted is False

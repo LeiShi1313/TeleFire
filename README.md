@@ -342,6 +342,16 @@ Commands and reply behavior:
   grouped by their bounded root. The fixed scan watermark advances only after all
   document updates are accepted. A window or thread over its configured bound fails
   without advancing, so the owner can narrow the lookback or raise the bound safely.
+- `/ai_memory_backfill days 7` performs a one-shot scan of the rolling seven-day
+  window ending at the configured settlement cutoff. `/ai_memory_backfill messages
+  500` instead scans the latest 500 settled seed messages. Both forms are owner-only,
+  operate on the current chat Bank, and work even when automatic memory is disabled.
+  Reply ancestors may be added as context, so retained event count can exceed the
+  requested seed count. Backfill shares the per-chat Dream lease and ingestion
+  pipeline but never changes the scheduled Dream watermark. The first version
+  accepts 1-30 days or 1-5,000 messages; a day window containing over 5,000 messages
+  fails before retention. Safely rerun the same command after interruption because
+  accepted Episode documents are receipt-backed and idempotent.
 
 Unauthorized users are ignored. Delegated users get one request in flight and
 a 30-second cooldown by default. AI invocation is controlled by the owner and

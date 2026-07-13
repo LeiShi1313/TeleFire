@@ -11,8 +11,10 @@ from telefire.ai import (
     AISettings,
     AgentEvent,
     AgentRunRequest,
+    MemoryBackfillRequest,
     PromptBuilder,
     parse_ai_trigger,
+    parse_memory_backfill,
     parse_memory_revision,
 )
 from telefire.plugins.base import command_registry
@@ -154,6 +156,29 @@ def test_parse_ai_trigger_has_an_exact_command_boundary(text, expected):
 )
 def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
     assert parse_memory_revision(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "/ai_memory_backfill days 7",
+            MemoryBackfillRequest(mode="days", value=7),
+        ),
+        (
+            "/ai_memory_backfill\nmessages\t500",
+            MemoryBackfillRequest(mode="messages", value=500),
+        ),
+        ("/ai_memory_backfill days 0", None),
+        ("/ai_memory_backfill days 31", None),
+        ("/ai_memory_backfill messages 5001", None),
+        ("/ai_memory_backfill weeks 2", None),
+        ("/ai_memory_backfill days 7 extra", None),
+        ("/ai_memory_backfillx days 7", None),
+    ],
+)
+def test_parse_memory_backfill_has_bounded_exact_syntax(text, expected):
+    assert parse_memory_backfill(text) == expected
 
 
 def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatch):

@@ -87,6 +87,8 @@ AgentEventType = Literal[
     "run_failed",
 ]
 MAX_AGENT_MEMORY_REFERENCES = 50
+MAX_MEMORY_BACKFILL_DAYS = 30
+MAX_MEMORY_BACKFILL_MESSAGES = 5_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,8 +472,29 @@ class MemoryDreamResult:
     documents_unchanged: int
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryBackfillRequest:
+    mode: Literal["days", "messages"]
+    value: int
+
+    def __post_init__(self) -> None:
+        limit = (
+            MAX_MEMORY_BACKFILL_DAYS
+            if self.mode == "days"
+            else MAX_MEMORY_BACKFILL_MESSAGES
+        )
+        if self.mode not in {"days", "messages"} or not 1 <= self.value <= limit:
+            raise ValueError("Memory backfill request is outside its supported bounds")
+
+
 class MemoryDreamRunner(Protocol):
     async def run_scope(self, chat_id: int) -> MemoryDreamResult: ...
+
+    async def run_backfill(
+        self,
+        chat_id: int,
+        request: MemoryBackfillRequest,
+    ) -> MemoryDreamResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -682,6 +705,25 @@ def parse_memory_revision(text: str | None) -> str | None:
     if text.startswith(("/ai_memory ", "/ai_memory\n", "/ai_memory\t")):
         return text[len("/ai_memory") :].strip()
     return None
+
+
+def parse_memory_backfill(text: str | None) -> MemoryBackfillRequest | None:
+    if text is None:
+        return None
+    parts = text.split()
+    if len(parts) != 3 or parts[0] != "/ai_memory_backfill":
+        return None
+    if parts[1] == "days":
+        mode: Literal["days", "messages"] = "days"
+    elif parts[1] == "messages":
+        mode = "messages"
+    else:
+        return None
+    try:
+        value = int(parts[2])
+        return MemoryBackfillRequest(mode=mode, value=value)
+    except ValueError:
+        return None
 
 
 def _memory_message_text(text: str) -> str:
@@ -1778,6 +1820,7 @@ class AIConversationHandler:
         if message.sender_id is None or message.chat_id is None:
             return False
         command = (message.raw_text or "").strip()
+        command_name = command.split(maxsplit=1)[0] if command else ""
         memory_instruction = parse_memory_revision(message.raw_text)
         if memory_instruction is not None:
             if message.sender_id != self._owner_id:
@@ -1786,6 +1829,19 @@ class AIConversationHandler:
                 message,
                 memory_instruction,
             )
+        if command_name == "/ai_memory_backfill":
+            if message.sender_id != self._owner_id:
+                return False
+            request = parse_memory_backfill(command)
+            if request is None:
+                await self._reply_memory_excluded(
+                    message,
+                    "Usage: /ai_memory_backfill days <1-30> or "
+                    "/ai_memory_backfill messages <1-5000>",
+                    kind="memory-control",
+                )
+                return True
+            return await self._handle_memory_backfill(message, request)
         if command in {
             "/ai_memory_enable",
             "/ai_memory_disable",
@@ -2140,6 +2196,49 @@ class AIConversationHandler:
             kind="memory-control",
         )
         await self._delete_command_message(message, "/ai_memory_dream")
+        return True
+
+    async def _handle_memory_backfill(
+        self,
+        message: ReplyTarget,
+        request: MemoryBackfillRequest,
+    ) -> bool:
+        assert message.chat_id is not None
+        if self._dream_runner is None:
+            await self._reply_memory_excluded(
+                message,
+                "Memory backfill is unavailable.",
+                kind="memory-control",
+            )
+            return True
+        if request.mode == "days":
+            progress_text = f"Backfilling the last {request.value} days..."
+        else:
+            progress_text = f"Backfilling the latest {request.value} messages..."
+        progress = await self._reply_memory_excluded(
+            message,
+            progress_text,
+            kind="memory-control",
+        )
+        try:
+            result = await self._dream_runner.run_backfill(message.chat_id, request)
+        except Exception as exc:
+            self._log_memory_failure("backfill", exc)
+            await progress.edit(
+                "Memory backfill failed. Accepted documents are safe; "
+                "retry the same command.",
+                parse_mode=None,
+            )
+            return True
+        await progress.edit(
+            "Memory backfill complete: "
+            f"scanned {_pluralize(result.messages_seen, 'message')}; "
+            f"retained {result.messages_retained} in "
+            f"{_pluralize(result.documents_created, 'updated thread')}; "
+            f"{result.documents_unchanged} unchanged.",
+            parse_mode=None,
+        )
+        await self._delete_command_message(message, "/ai_memory_backfill")
         return True
 
     async def _reply_memory_excluded(

@@ -128,6 +128,10 @@ _Avoid_: Citation label, ground truth
 A scheduled integration job that fetches a configured time window of messages from memory-enabled scopes, assigns replies to thread documents, treats non-replies as one-message roots, submits the document updates to Hindsight, and advances a durable scan cursor after successful acceptance. It is not an answer-agent reflection call; reply grouping is context enrichment rather than an ingestion requirement.
 _Avoid_: Cron recall, model dream
 
+**Memory Backfill**:
+An owner-triggered, bounded historical scan of one explicit memory scope by rolling days or latest seed-message count. It reuses Dream ingestion, leases, receipts, and thread enrichment, but does not require automatic enablement and never changes the scheduled Dream cursor.
+_Avoid_: Scheduled Dream, global chat import
+
 **Ingestion Receipt**:
 Durable delivery state recording that a normalized source event or version was assigned to a Hindsight document. Receipts and scan cursors provide retry and overlap idempotency but are not a second memory store.
 _Avoid_: Memory fact, source message contract

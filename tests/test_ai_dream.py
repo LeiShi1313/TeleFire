@@ -8,11 +8,13 @@ from telethon.errors import FloodWaitError
 from telefire.ai import (
     AIAnswerMarker,
     AIStateRepository,
+    MemoryBackfillRequest,
     MessageIdentity,
     PromptBuilder,
 )
 from telefire.ai_dream import (
     DreamCycleBusyError,
+    DreamBackfillLimitError,
     DreamScheduleResult,
     DreamScheduler,
     DreamSchedulerSettings,
@@ -257,6 +259,107 @@ async def test_dream_overlap_is_idempotent_through_document_receipts(tmp_path):
         assert second.documents_unchanged == 1
         assert len(memory.retain_calls) == 1
         assert source.window_calls[1]["since"] == NOW - timedelta(minutes=10)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_days_backfill_uses_rolling_window_without_moving_dream_watermark(
+    tmp_path,
+):
+    outside = FakeMessage(
+        21,
+        "Older than the requested window",
+        date=NOW - timedelta(days=8),
+    )
+    inside = FakeMessage(
+        22,
+        "Evidence from this week",
+        date=NOW - timedelta(days=2),
+    )
+    source = FakeSource([outside, inside])
+    memory = FakeMemory()
+    store, scanner = await make_scanner(tmp_path, source, memory)
+    previous_watermark = (NOW - timedelta(hours=3)).timestamp()
+    await store.record_memory_dream_success(
+        "telegram:chat:-1001",
+        cursor_message_id=900,
+        scanned_until_at=previous_watermark,
+        succeeded_at=previous_watermark,
+    )
+    before = await store.get_memory_dream_state("telegram:chat:-1001")
+    try:
+        result = await scanner.run_backfill(
+            -1001,
+            MemoryBackfillRequest(mode="days", value=7),
+        )
+
+        assert result.messages_seen == 1
+        assert result.messages_retained == 1
+        assert [event.text for event in memory.retain_calls[0]["episode"].events] == [
+            "Evidence from this week"
+        ]
+        assert source.window_calls == [
+            {
+                "chat_id": -1001,
+                "since": NOW - timedelta(days=7),
+                "until": NOW,
+                "limit": 5_001,
+            }
+        ]
+        assert await store.get_memory_dream_state("telegram:chat:-1001") == before
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_message_backfill_works_while_disabled_and_is_idempotent(tmp_path):
+    first = FakeMessage(31, "Old first", date=NOW - timedelta(days=10))
+    second = FakeMessage(32, "Recent second", date=NOW - timedelta(days=2))
+    third = FakeMessage(33, "Recent third", date=NOW - timedelta(days=1))
+    source = FakeSource([first, second, third])
+    memory = FakeMemory()
+    store, scanner = await make_scanner(tmp_path, source, memory)
+    await store.set_memory_enabled("telegram:chat:-1001", False)
+    request = MemoryBackfillRequest(mode="messages", value=2)
+    try:
+        first_result = await scanner.run_backfill(-1001, request)
+        second_result = await scanner.run_backfill(-1001, request)
+
+        assert first_result.messages_seen == 2
+        assert first_result.messages_retained == 2
+        assert first_result.documents_created == 2
+        assert second_result.documents_created == 0
+        assert second_result.documents_unchanged == 2
+        assert [call["episode"].events[0].text for call in memory.retain_calls] == [
+            "Recent second",
+            "Recent third",
+        ]
+        assert all(call["since"].year == 1 for call in source.window_calls)
+        assert all(call["limit"] == 2 for call in source.window_calls)
+        state = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert state.scanned_until_at is None
+        assert state.last_attempt_at is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_days_backfill_rejects_a_window_above_its_separate_limit(tmp_path):
+    repeated = FakeMessage(40, "High volume", date=NOW - timedelta(hours=1))
+    source = FakeSource([repeated] * 5_001)
+    memory = FakeMemory()
+    store, scanner = await make_scanner(tmp_path, source, memory)
+    try:
+        with pytest.raises(DreamBackfillLimitError, match="5,000"):
+            await scanner.run_backfill(
+                -1001,
+                MemoryBackfillRequest(mode="days", value=1),
+            )
+
+        assert memory.retain_calls == []
+        state = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert state.scanned_until_at is None
     finally:
         await store.close()
 

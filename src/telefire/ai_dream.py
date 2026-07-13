@@ -15,6 +15,8 @@ from telethon.errors import FloodWaitError
 from telefire.ai import (
     AIStateRepository,
     HumanObservation,
+    MAX_MEMORY_BACKFILL_MESSAGES,
+    MemoryBackfillRequest,
     MemoryDreamResult,
     PromptBuilder,
     ReplyTarget,
@@ -198,6 +200,10 @@ class DreamCycleBusyError(RuntimeError):
     pass
 
 
+class DreamBackfillLimitError(RuntimeError):
+    pass
+
+
 class DreamWindowLimitError(RuntimeError):
     pass
 
@@ -231,6 +237,23 @@ class TelegramDreamScanner:
         self._lease_owner = uuid4().hex
 
     async def run_scope(self, chat_id: int) -> MemoryDreamResult:
+        return await self._run_exclusive(chat_id, lambda: self._run_scope(chat_id))
+
+    async def run_backfill(
+        self,
+        chat_id: int,
+        request: MemoryBackfillRequest,
+    ) -> MemoryDreamResult:
+        return await self._run_exclusive(
+            chat_id,
+            lambda: self._run_backfill(chat_id, request),
+        )
+
+    async def _run_exclusive(
+        self,
+        chat_id: int,
+        operation: Callable[[], Awaitable[MemoryDreamResult]],
+    ) -> MemoryDreamResult:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             scope_id = _telegram_scope_id(chat_id)
@@ -243,10 +266,10 @@ class TelegramDreamScanner:
             )
             if not acquired:
                 raise DreamCycleBusyError(
-                    "Another Dream Cycle is already running for this chat"
+                    "Another Dream operation is already running for this chat"
                 )
             try:
-                work = asyncio.create_task(self._run_scope(chat_id))
+                work = asyncio.create_task(operation())
                 heartbeat = asyncio.create_task(self._renew_lease(scope_id))
                 done, _ = await asyncio.wait(
                     {work, heartbeat},
@@ -278,6 +301,36 @@ class TelegramDreamScanner:
                 lease_seconds=self._settings.lease_seconds,
             ):
                 raise DreamCycleBusyError("Dream Cycle lease was lost")
+
+    async def _run_backfill(
+        self,
+        chat_id: int,
+        request: MemoryBackfillRequest,
+    ) -> MemoryDreamResult:
+        until = (
+            datetime.fromtimestamp(self._clock(), UTC) - self._settings.settlement_delay
+        )
+        if request.mode == "days":
+            since = until - timedelta(days=request.value)
+            limit = MAX_MEMORY_BACKFILL_MESSAGES + 1
+        else:
+            since = datetime.min.replace(tzinfo=UTC)
+            limit = request.value
+        messages = await self._retry_telegram(
+            lambda: self._source.fetch_window(
+                chat_id,
+                since=since,
+                until=until,
+                limit=limit,
+            )
+        )
+        if request.mode == "days" and len(messages) > MAX_MEMORY_BACKFILL_MESSAGES:
+            raise DreamBackfillLimitError(
+                "Memory backfill exceeds the 5,000-message limit; use message mode "
+                "or request a shorter day range"
+            )
+        result, _ = await self._retain_threads(chat_id, messages)
+        return result
 
     async def _run_scope(self, chat_id: int) -> MemoryDreamResult:
         scope_id = _telegram_scope_id(chat_id)

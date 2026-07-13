@@ -1938,11 +1938,12 @@ class AIConversationHandler:
             current_attachment = await self._prompt_builder.describe_attachment(message)
             current_identity = await self._prompt_builder.resolve_identity(message)
             current_mentions = await self._prompt_builder.resolve_mentions(message)
-            if trigger_prompt is not None:
+            if trigger_prompt is not None or self._memory is not None:
                 loaded_context = await self._prompt_builder.load_reference_context(
                     message
                 )
-                reference_context = loaded_context.rendered
+                if trigger_prompt is not None:
+                    reference_context = loaded_context.rendered
                 observations.extend(
                     await self._exclude_ai_observations(
                         message.chat_id,

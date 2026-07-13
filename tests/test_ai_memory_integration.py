@@ -38,17 +38,29 @@ from telefire.ai_memory import (
 class FakeAnswer:
     next_id = 100
 
-    def __init__(self, text):
+    def __init__(self, text, *, reply_to):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
         self.initial_text = text
         self.text = text
+        self.raw_text = text
+        self.sender_id = reply_to.sender_id
+        self.chat_id = reply_to.chat_id
+        self.reply_to_msg_id = reply_to.id
+        self.date = reply_to.date
+        self.file = None
+        self.is_human = True
+        self._reply_to = reply_to
         self.edits = []
 
     async def edit(self, text, **kwargs):
         self.text = text
+        self.raw_text = text
         self.edits.append(text)
         return self
+
+    async def get_reply_message(self):
+        return self._reply_to
 
 
 class FakeMessage:
@@ -82,7 +94,7 @@ class FakeMessage:
         return self._reply_to
 
     async def reply(self, text, **kwargs):
-        answer = FakeAnswer(text)
+        answer = FakeAnswer(text, reply_to=self)
         self.replies.append(answer)
         return answer
 
@@ -1004,6 +1016,46 @@ async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabl
     assert await handler.handle(disable) is True
     assert disable.deleted is True
     assert disable.replies[0].text == "Automatic memory disabled for this chat."
+
+
+@pytest.mark.asyncio
+async def test_enabled_continuation_retains_human_chain_across_ai_answer():
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = FakeMemory(recall_result=MemoryRecall("telegram:chat:-1001", ()))
+    gateway = FakeGateway(["first answer", "follow-up answer"])
+    handler = make_handler(
+        gateway,
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+
+    ancestor = FakeMessage("The Transformer code is trivial", sender_id=20)
+    trigger = FakeMessage(
+        "/ai what do they mean?",
+        sender_id=10,
+        reply_to=ancestor,
+    )
+    assert await handler.handle(trigger) is True
+
+    follow_up = FakeMessage(
+        "They meant your implementation",
+        sender_id=10,
+        reply_to=trigger.replies[0],
+    )
+    assert await handler.handle(follow_up) is True
+
+    assert len(memory.retain_calls) == 2
+    episode = memory.retain_calls[1]["episode"]
+    assert episode.document_id == f"telegram:thread:-1001:{ancestor.id}"
+    assert [(event.actor_id, event.text) for event in episode.events] == [
+        ("telegram:user:20", "The Transformer code is trivial"),
+        ("telegram:user:10", "what do they mean?"),
+        ("telegram:user:10", "They meant your implementation"),
+    ]
+    assert "User 20 (telegram:user:20)" in memory.recall_calls[1]["query"]
+    assert not any(item.kind == "reply" for item in gateway.requests[1].context)
 
 
 @pytest.mark.asyncio

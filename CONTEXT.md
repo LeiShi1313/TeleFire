@@ -125,7 +125,7 @@ The source episode, chunk, quotation, timestamp, and authorship metadata that su
 _Avoid_: Citation label, ground truth
 
 **Dream Cycle**:
-A scheduled integration job that fetches a configured time window of messages from memory-enabled scopes, assigns replies to thread documents, treats non-replies as one-message roots, submits the document updates to Hindsight, and advances a durable scan cursor after successful acceptance. It is not an answer-agent reflection call; reply grouping is context enrichment rather than an ingestion requirement.
+A scheduled integration job that fetches bounded messages from memory-enabled scopes, groups nearby reply roots into deterministic conversation-segment documents, submits those document updates to Hindsight with bounded concurrency, and checkpoints each accepted chronological prefix. Existing thread documents keep their identities, and every segment preserves actor, timestamp, source, and reply relationships. It is not an answer-agent reflection call; reply grouping is context enrichment rather than an ingestion requirement.
 _Avoid_: Cron recall, model dream
 
 **Memory Backfill**:

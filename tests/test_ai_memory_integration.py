@@ -27,8 +27,10 @@ from telefire.ai import (
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import (
     HindsightMemoryClient,
-    MemoryRecall,
     MemoryDocumentReceipt,
+    MemoryEpisode,
+    MemoryEvent,
+    MemoryRecall,
     MemoryRetainResult,
     MemoryRevisionResult,
     RecalledMemory,
@@ -177,6 +179,19 @@ class FakeStore:
             content_hash,
             event_versions,
         )
+
+    async def find_memory_document_id_for_source(self, scope_id, source_id):
+        for (stored_scope_id, document_id), receipt in reversed(
+            tuple(self.memory_documents.items())
+        ):
+            if stored_scope_id != scope_id:
+                continue
+            if any(
+                stored_source_id == source_id
+                for stored_source_id, _ in receipt.event_versions
+            ):
+                return document_id
+        return None
 
     async def record_memory_labels(
         self,
@@ -493,6 +508,52 @@ async def test_bare_memory_command_retains_one_ordered_multi_actor_episode():
     receipt = store.memory_documents[(item.scope_id, item.document_id)]
     assert receipt.content_hash == item.content_hash
     assert receipt.event_versions == item.event_versions
+
+
+@pytest.mark.asyncio
+async def test_memory_command_appends_to_existing_dream_segment(tmp_path):
+    store = FakeStore()
+    memory = FakeMemory()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+    root = FakeMessage("Root evidence", sender_id=20)
+    target = FakeMessage("New reply evidence", sender_id=30, reply_to=root)
+    segment_id = "telegram:dream-segment:-1001:0-19"
+    existing = MemoryEpisode(
+        scope_id="telegram:chat:-1001",
+        document_id=segment_id,
+        events=(
+            MemoryEvent(
+                source_id=f"telegram:message:-1001:{root.id}",
+                actor_id="telegram:user:20",
+                actor_display_name="User 20",
+                occurred_at=root.date,
+                mentioned_at=root.date,
+                text=root.raw_text,
+            ),
+        ),
+    )
+    store.memory_documents[(existing.scope_id, segment_id)] = MemoryDocumentReceipt(
+        existing.content_hash,
+        existing.event_versions,
+    )
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+
+    assert await handler.handle(command) is True
+
+    call = memory.retain_calls[0]
+    assert call["update_mode"] == "append"
+    assert call["episode"].document_id == segment_id
+    assert [event.source_id for event in call["episode"].events] == [
+        f"telegram:message:-1001:{root.id}",
+        f"telegram:message:-1001:{target.id}",
+    ]
+    receipt = store.memory_documents[(existing.scope_id, segment_id)]
+    assert len(receipt.event_versions) == 2
 
 
 @pytest.mark.asyncio

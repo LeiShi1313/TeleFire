@@ -575,6 +575,51 @@ async def retain_episode_once(
     )[0]
 
 
+async def append_episode_once(
+    memory: MemoryClient,
+    receipts: MemoryReceiptStore,
+    episode: MemoryEpisode,
+) -> bool:
+    previous = await receipts.get_memory_document_receipt(
+        episode.scope_id,
+        episode.document_id,
+    )
+    previous_versions = dict(previous.event_versions) if previous else {}
+    if previous is not None and all(
+        previous_versions.get(source_id) == version
+        for source_id, version in episode.event_versions
+    ):
+        return False
+    result = await memory.retain_many((episode,), update_mode="append")
+    if not result.accepted or result.items_count != 1:
+        raise MemoryClientError("Hindsight did not accept the appended Episode")
+    merged_versions = dict(previous_versions)
+    merged_versions.update(episode.event_versions)
+    ordered_source_ids = [
+        source_id for source_id, _ in (previous.event_versions if previous else ())
+    ]
+    ordered_source_ids.extend(
+        source_id
+        for source_id, _ in episode.event_versions
+        if source_id not in previous_versions
+    )
+    event_versions = tuple(
+        (source_id, merged_versions[source_id]) for source_id in ordered_source_ids
+    )
+    # The next complete Dream replacement deliberately differs from this
+    # delivery-only hash and canonicalizes Hindsight's appended document body.
+    receipt_hash = hashlib.sha256(
+        json.dumps(event_versions, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    await receipts.save_memory_document_receipt(
+        episode.scope_id,
+        episode.document_id,
+        receipt_hash,
+        event_versions,
+    )
+    return True
+
+
 async def _save_receipts(
     receipts: MemoryReceiptStore,
     episodes: tuple[MemoryEpisode, ...],

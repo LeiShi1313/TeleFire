@@ -30,6 +30,7 @@ from telefire.ai import (
 from telefire.ai_memory import (
     MemoryClient,
     MemoryClientError,
+    MemoryDocumentReceipt,
     MemoryEpisode,
     retain_episodes_once,
 )
@@ -43,6 +44,8 @@ class DreamMessageSource(Protocol):
         since: datetime,
         until: datetime,
         limit: int,
+        after_message_id: int | None = None,
+        oldest_first: bool = False,
     ) -> tuple[ReplyTarget, ...]: ...
 
     async def fetch_message(
@@ -63,8 +66,26 @@ class TelegramHistorySource:
         since: datetime,
         until: datetime,
         limit: int,
+        after_message_id: int | None = None,
+        oldest_first: bool = False,
     ) -> tuple[ReplyTarget, ...]:
         messages: list[ReplyTarget] = []
+        if oldest_first:
+            kwargs: dict[str, Any] = {
+                "limit": limit,
+                "reverse": True,
+            }
+            if after_message_id is not None:
+                kwargs["min_id"] = after_message_id
+            else:
+                kwargs["offset_date"] = since
+            async for message in self._client.iter_messages(chat_id, **kwargs):
+                occurred_at = _message_datetime(message)
+                if occurred_at > until:
+                    break
+                if occurred_at >= since:
+                    messages.append(message)
+            return tuple(messages)
         async for message in self._client.iter_messages(
             chat_id,
             offset_date=until,
@@ -96,7 +117,10 @@ class DreamSettings:
     settlement_delay: timedelta = timedelta(seconds=30)
     max_messages: int = 500
     max_thread_messages: int = 100
-    retain_batch_size: int = 10
+    segment_root_span: int = 20
+    retain_concurrency: int = 4
+    preprocess_concurrency: int = 12
+    cycle_budget_seconds: float = 50
     lease_seconds: float = 3_600
     retry_attempts: int = 3
     max_retry_delay: float = 30
@@ -109,9 +133,13 @@ class DreamSettings:
         if (
             self.max_messages < 1
             or self.max_thread_messages < 1
-            or self.retain_batch_size < 1
+            or self.segment_root_span < 1
+            or self.retain_concurrency < 1
+            or self.preprocess_concurrency < 1
         ):
             raise ValueError("Dream message limits must be positive")
+        if self.cycle_budget_seconds <= 0:
+            raise ValueError("Dream cycle budget must be positive")
         if self.lease_seconds <= 0:
             raise ValueError("Dream lease duration must be positive")
         if self.retry_attempts < 1 or self.max_retry_delay < 0:
@@ -147,8 +175,17 @@ class DreamSettings:
                     "100",
                 )
             ),
-            retain_batch_size=int(
-                os.environ.get("TELEFIRE_MEMORY_DREAM_RETAIN_BATCH_SIZE", "10")
+            segment_root_span=int(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_SEGMENT_ROOT_SPAN", "20")
+            ),
+            retain_concurrency=int(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_RETAIN_CONCURRENCY", "4")
+            ),
+            preprocess_concurrency=int(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_PREPROCESS_CONCURRENCY", "12")
+            ),
+            cycle_budget_seconds=float(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_CYCLE_BUDGET_SECONDS", "50")
             ),
             lease_seconds=float(
                 os.environ.get("TELEFIRE_MEMORY_DREAM_LEASE_SECONDS", "3600")
@@ -196,6 +233,12 @@ class DreamScheduleResult:
     scopes_busy: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DreamDocument:
+    episode: MemoryEpisode
+    window_message_ids: frozenset[int]
+
+
 class DreamCycleBusyError(RuntimeError):
     pass
 
@@ -204,12 +247,39 @@ class DreamBackfillLimitError(RuntimeError):
     pass
 
 
-class DreamWindowLimitError(RuntimeError):
-    pass
-
-
 class DreamThreadLimitError(RuntimeError):
     pass
+
+
+def _dream_segment_document_id(
+    chat_id: int,
+    root_message_id: int,
+    root_span: int,
+) -> str:
+    if root_span == 1:
+        return f"telegram:thread:{chat_id}:{root_message_id}"
+    start = (root_message_id // root_span) * root_span
+    end = start + root_span - 1
+    return f"telegram:dream-segment:{chat_id}:{start}-{end}"
+
+
+def _completed_message_prefix(
+    messages: tuple[ReplyTarget, ...],
+    documents: tuple[_DreamDocument, ...],
+    completed_document_ids: set[str],
+) -> tuple[ReplyTarget, ...]:
+    owner_by_message_id = {
+        message_id: document.episode.document_id
+        for document in documents
+        for message_id in document.window_message_ids
+    }
+    completed: list[ReplyTarget] = []
+    for message in messages:
+        document_id = owner_by_message_id.get(message.id)
+        if document_id is not None and document_id not in completed_document_ids:
+            break
+        completed.append(message)
+    return tuple(completed)
 
 
 class TelegramDreamScanner:
@@ -223,6 +293,7 @@ class TelegramDreamScanner:
         settings: DreamSettings = DreamSettings(),
         clock: Any = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
         logger: Any | None = None,
     ):
         self._source = source
@@ -232,6 +303,7 @@ class TelegramDreamScanner:
         self._settings = settings
         self._clock = clock
         self._sleep = sleep
+        self._monotonic = monotonic
         self._logger = logger
         self._locks: dict[int, asyncio.Lock] = {}
         self._lease_owner = uuid4().hex
@@ -329,10 +401,11 @@ class TelegramDreamScanner:
                 "Memory backfill exceeds the 5,000-message limit; use message mode "
                 "or request a shorter day range"
             )
-        result, _ = await self._retain_threads(chat_id, messages)
+        result, _, _ = await self._retain_threads(chat_id, messages)
         return result
 
     async def _run_scope(self, chat_id: int) -> MemoryDreamResult:
+        deadline = self._monotonic() + self._settings.cycle_budget_seconds
         scope_id = _telegram_scope_id(chat_id)
         if not await self._store.is_memory_enabled(scope_id):
             raise ValueError("Automatic memory is disabled for this chat")
@@ -347,27 +420,79 @@ class TelegramDreamScanner:
             if state.scanned_until_at is not None
             else until - self._settings.lookback
         )
-        try:
-            messages = await self._retry_telegram(
-                lambda: self._source.fetch_window(
-                    chat_id,
-                    since=since,
-                    until=until,
-                    limit=self._settings.max_messages + 1,
-                )
-            )
-            if len(messages) > self._settings.max_messages:
-                raise DreamWindowLimitError(
-                    "Dream window exceeds TELEFIRE_MEMORY_DREAM_MAX_MESSAGES; "
-                    "increase the bound or reduce the lookback"
-                )
-            result, cursor = await self._retain_threads(chat_id, messages)
+        checkpoint_scanned_at = state.scanned_until_at
+
+        async def checkpoint(
+            cursor_message_id: int | None,
+            scanned_until_at: float,
+        ) -> None:
+            nonlocal checkpoint_scanned_at
+            if (
+                checkpoint_scanned_at is not None
+                and scanned_until_at <= checkpoint_scanned_at
+            ):
+                return
+            succeeded_at = self._clock()
             await self._store.record_memory_dream_success(
                 scope_id,
-                cursor_message_id=cursor,
-                scanned_until_at=until.timestamp(),
-                succeeded_at=self._clock(),
+                cursor_message_id=cursor_message_id,
+                scanned_until_at=scanned_until_at,
+                succeeded_at=succeeded_at,
             )
+            checkpoint_scanned_at = scanned_until_at
+
+        try:
+            overlap_messages: tuple[ReplyTarget, ...] = ()
+            if (
+                state.scanned_until_at is not None
+                and state.cursor_message_id is not None
+            ):
+                overlap_messages = await self._retry_telegram(
+                    lambda: self._source.fetch_window(
+                        chat_id,
+                        since=since,
+                        until=until,
+                        limit=min(50, self._settings.max_messages),
+                    )
+                )
+            new_messages = await self._retry_telegram(
+                lambda: self._source.fetch_window(
+                    chat_id,
+                    since=(
+                        datetime.fromtimestamp(state.scanned_until_at, UTC)
+                        if state.scanned_until_at is not None
+                        else since
+                    ),
+                    until=until,
+                    limit=self._settings.max_messages + 1,
+                    after_message_id=state.cursor_message_id,
+                    oldest_first=True,
+                )
+            )
+            more_messages = len(new_messages) > self._settings.max_messages
+            selected_new_messages = new_messages[: self._settings.max_messages]
+            messages = tuple(
+                sorted(
+                    {
+                        message.id: message
+                        for message in (*overlap_messages, *selected_new_messages)
+                    }.values(),
+                    key=lambda message: (_message_datetime(message), message.id),
+                )
+            )
+            result, cursor, complete = await self._retain_threads(
+                chat_id,
+                messages,
+                deadline=deadline,
+                checkpoint=checkpoint,
+            )
+            if complete and not more_messages:
+                await self._store.record_memory_dream_success(
+                    scope_id,
+                    cursor_message_id=cursor,
+                    scanned_until_at=until.timestamp(),
+                    succeeded_at=self._clock(),
+                )
             return result
         except Exception as exc:
             await self._store.record_memory_dream_failure(
@@ -381,110 +506,356 @@ class TelegramDreamScanner:
         self,
         chat_id: int,
         messages: tuple[ReplyTarget, ...],
-    ) -> tuple[MemoryDreamResult, int | None]:
+        *,
+        deadline: float | None = None,
+        checkpoint: Callable[[int | None, float], Awaitable[None]] | None = None,
+    ) -> tuple[MemoryDreamResult, int | None, bool]:
+        started_at = self._monotonic()
+        documents = await self._prepare_documents(chat_id, messages)
+        prepared_at = self._monotonic()
+        documents_created = 0
+        documents_unchanged = 0
+        retained_window_ids: set[int] = set()
+        completed_document_ids: set[str] = set()
+        complete = True
+        cursor: int | None = None
+        for start in range(0, len(documents), self._settings.retain_concurrency):
+            batch = documents[start : start + self._settings.retain_concurrency]
+            results = await asyncio.gather(
+                *(
+                    self._retry_memory(
+                        lambda document=document: retain_episodes_once(
+                            self._memory,
+                            self._store,
+                            (document.episode,),
+                        )
+                    )
+                    for document in batch
+                ),
+                return_exceptions=True,
+            )
+            first_error: BaseException | None = None
+            for document, created in zip(batch, results, strict=True):
+                if isinstance(created, BaseException):
+                    if first_error is None:
+                        first_error = created
+                    continue
+                documents_created += int(created[0])
+                documents_unchanged += int(not created[0])
+                retained_window_ids.update(document.window_message_ids)
+                completed_document_ids.add(document.episode.document_id)
+            if checkpoint is not None:
+                prefix = _completed_message_prefix(
+                    messages,
+                    documents,
+                    completed_document_ids,
+                )
+                if prefix:
+                    cursor = prefix[-1].id
+                    await checkpoint(
+                        cursor,
+                        _message_datetime(prefix[-1]).timestamp(),
+                    )
+            if first_error is not None:
+                raise first_error
+            if (
+                deadline is not None
+                and start + len(batch) < len(documents)
+                and self._monotonic() >= deadline
+            ):
+                complete = False
+                break
+        if complete and messages:
+            cursor = messages[-1].id
+            if not documents and checkpoint is not None:
+                await checkpoint(
+                    cursor,
+                    _message_datetime(messages[-1]).timestamp(),
+                )
+        result = MemoryDreamResult(
+            messages_seen=len(messages),
+            messages_retained=len(retained_window_ids),
+            documents_created=documents_created,
+            documents_unchanged=documents_unchanged,
+        )
+        if self._logger is not None:
+            finished_at = self._monotonic()
+            self._logger.info(
+                "Dream retention complete "
+                "(chat_id=%s, messages=%s, documents=%s, created=%s, "
+                "unchanged=%s, complete=%s, prepare_seconds=%.3f, "
+                "retain_seconds=%.3f)",
+                chat_id,
+                result.messages_seen,
+                len(documents),
+                result.documents_created,
+                result.documents_unchanged,
+                complete,
+                prepared_at - started_at,
+                finished_at - prepared_at,
+            )
+        return result, cursor, complete
+
+    async def _prepare_documents(
+        self,
+        chat_id: int,
+        messages: tuple[ReplyTarget, ...],
+    ) -> tuple[_DreamDocument, ...]:
         window_ids = {message.id for message in messages}
+        window_positions = {message.id: index for index, message in enumerate(messages)}
         known = {message.id: message for message in messages}
-        groups: dict[int, dict[int, ReplyTarget]] = {}
+        root_groups: dict[int, dict[int, ReplyTarget]] = {}
         for message in messages:
             chain = await self._load_chain(chat_id, message, known)
             if not chain:
                 continue
             root_id = chain[0].id
-            group = groups.setdefault(root_id, {})
+            group = root_groups.setdefault(root_id, {})
             for item in chain:
                 group[item.id] = item
 
-        episodes: list[MemoryEpisode] = []
-        retained_window_ids: set[int] = set()
-        for root_id, grouped in sorted(groups.items()):
-            await self._hydrate_previous_events(chat_id, root_id, grouped, known)
+        scope_id = _telegram_scope_id(chat_id)
+        candidate_document_ids: list[str] = []
+        for root_id in root_groups:
+            candidate_document_ids.append(f"telegram:thread:{chat_id}:{root_id}")
+            candidate_document_ids.append(
+                _dream_segment_document_id(
+                    chat_id,
+                    root_id,
+                    self._settings.segment_root_span,
+                )
+            )
+        receipts = await self._store.get_memory_document_receipts(
+            scope_id,
+            tuple(candidate_document_ids),
+        )
+
+        document_groups: dict[str, dict[int, ReplyTarget]] = {}
+        for root_id, grouped in sorted(root_groups.items()):
+            if len(grouped) > self._settings.max_thread_messages:
+                raise DreamThreadLimitError(
+                    f"Thread {root_id} exceeds the configured Dream thread bound"
+                )
+            thread_id = f"telegram:thread:{chat_id}:{root_id}"
+            segment_id = _dream_segment_document_id(
+                chat_id,
+                root_id,
+                self._settings.segment_root_span,
+            )
+            segment_receipt = receipts.get(segment_id)
+            root_source_id = f"telegram:message:{chat_id}:{root_id}"
+            segment_contains_root = segment_receipt is not None and any(
+                source_id == root_source_id
+                for source_id, _ in segment_receipt.event_versions
+            )
+            if segment_id == thread_id or (
+                thread_id in receipts and not segment_contains_root
+            ):
+                document_id = thread_id
+            else:
+                document_id = segment_id
+            document_group = document_groups.setdefault(document_id, {})
+            document_group.update(grouped)
+
+        await self._hydrate_previous_events(
+            chat_id,
+            document_groups,
+            receipts,
+            known,
+        )
+        observation_by_id = await self._build_observations(
+            chat_id,
+            tuple(
+                sorted(
+                    {
+                        message.id: message
+                        for group in document_groups.values()
+                        for message in group.values()
+                    }.values(),
+                    key=lambda message: (_message_datetime(message), message.id),
+                )
+            ),
+        )
+
+        documents: list[_DreamDocument] = []
+        for document_id, grouped in document_groups.items():
             ordered = sorted(
                 grouped.values(),
                 key=lambda message: (_message_datetime(message), message.id),
             )
-            if len(ordered) > self._settings.max_thread_messages:
+            if (
+                document_id.startswith("telegram:thread:")
+                and len(ordered) > self._settings.max_thread_messages
+            ):
                 raise DreamThreadLimitError(
-                    f"Thread {root_id} exceeds the configured Dream thread bound"
+                    f"Document {document_id} exceeds the Dream thread bound"
                 )
-            observations = await self._observations(chat_id, ordered)
+            observations = tuple(
+                observation_by_id[message.id]
+                for message in ordered
+                if message.id in observation_by_id
+            )
             if not observations:
                 continue
             episode = _telegram_memory_episode(
                 chat_id,
                 observations,
-                root_message_id=root_id,
+                document_id=document_id,
             )
-            episodes.append(episode)
             await _record_episode_labels(self._store, episode)
-            retained_window_ids.update(
+            window_message_ids = frozenset(
                 observation.message_id
                 for observation in observations
                 if observation.message_id in window_ids
             )
-
-        documents_created = 0
-        documents_unchanged = 0
-        for start in range(0, len(episodes), self._settings.retain_batch_size):
-            batch = tuple(episodes[start : start + self._settings.retain_batch_size])
-            created = await self._retry_memory(
-                lambda: retain_episodes_once(
-                    self._memory,
-                    self._store,
-                    batch,
+            if not window_message_ids:
+                continue
+            documents.append(
+                _DreamDocument(
+                    episode=episode,
+                    window_message_ids=window_message_ids,
                 )
             )
-            documents_created += sum(created)
-            documents_unchanged += len(created) - sum(created)
-        return (
-            MemoryDreamResult(
-                messages_seen=len(messages),
-                messages_retained=len(retained_window_ids),
-                documents_created=documents_created,
-                documents_unchanged=documents_unchanged,
-            ),
-            max(retained_window_ids, default=None),
+        documents.sort(
+            key=lambda document: min(
+                (
+                    window_positions[message_id]
+                    for message_id in document.window_message_ids
+                ),
+                default=len(messages),
+            )
         )
+        return tuple(documents)
 
     async def _hydrate_previous_events(
         self,
         chat_id: int,
-        root_id: int,
-        grouped: dict[int, ReplyTarget],
+        document_groups: dict[str, dict[int, ReplyTarget]],
+        receipts: dict[str, MemoryDocumentReceipt],
         known: dict[int, ReplyTarget],
     ) -> None:
-        scope_id = _telegram_scope_id(chat_id)
-        document_id = f"telegram:thread:{chat_id}:{root_id}"
-        receipt = await self._store.get_memory_document_receipt(scope_id, document_id)
-        if receipt is None:
-            return
         prefix = f"telegram:message:{chat_id}:"
-        previous_ids: list[int] = []
-        for source_id, _ in receipt.event_versions:
-            if not source_id.startswith(prefix):
+        previous_by_document: dict[str, tuple[int, ...]] = {}
+        missing_ids: set[int] = set()
+        for document_id, grouped in document_groups.items():
+            receipt = receipts.get(document_id)
+            if receipt is None:
                 continue
-            try:
-                message_id = int(source_id.removeprefix(prefix))
-            except ValueError:
-                continue
-            if message_id > 0 and message_id not in grouped:
-                previous_ids.append(message_id)
-        if len(grouped) + len(previous_ids) > self._settings.max_thread_messages:
-            raise DreamThreadLimitError(
-                f"Thread {root_id} exceeds the configured Dream thread bound"
+            previous_ids: list[int] = []
+            for source_id, _ in receipt.event_versions:
+                if not source_id.startswith(prefix):
+                    continue
+                try:
+                    message_id = int(source_id.removeprefix(prefix))
+                except ValueError:
+                    continue
+                if message_id > 0 and message_id not in grouped:
+                    previous_ids.append(message_id)
+                    if message_id not in known:
+                        missing_ids.add(message_id)
+            limit = (
+                self._settings.max_thread_messages
+                if document_id.startswith("telegram:thread:")
+                else self._settings.max_thread_messages
+                + self._settings.segment_root_span
             )
-        for message_id in previous_ids:
-            message = known.get(message_id)
-            if message is None:
-                message = await self._retry_telegram(
-                    lambda message_id=message_id: self._source.fetch_message(
-                        chat_id,
-                        message_id,
-                    )
+            if len(grouped) + len(previous_ids) > limit:
+                raise DreamThreadLimitError(
+                    f"Document {document_id} exceeds its configured Dream bound"
                 )
+            previous_by_document[document_id] = tuple(previous_ids)
+
+        semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
+
+        async def fetch(message_id: int) -> ReplyTarget | None:
+            async with semaphore:
+                return await self._retry_telegram(
+                    lambda: self._source.fetch_message(chat_id, message_id)
+                )
+
+        if missing_ids:
+            fetched = await asyncio.gather(
+                *(fetch(message_id) for message_id in sorted(missing_ids))
+            )
+            for message in fetched:
                 if message is not None:
                     known[message.id] = message
-            if message is not None:
-                grouped[message.id] = message
+
+        for document_id, previous_ids in previous_by_document.items():
+            grouped = document_groups[document_id]
+            for message_id in previous_ids:
+                message = known.get(message_id)
+                if message is not None:
+                    grouped[message.id] = message
+
+    async def _build_observations(
+        self,
+        chat_id: int,
+        messages: tuple[ReplyTarget, ...],
+    ) -> dict[int, HumanObservation]:
+        message_ids = tuple(message.id for message in messages)
+        excluded_ids, answer_ids = await asyncio.gather(
+            self._store.get_memory_excluded_message_ids(chat_id, message_ids),
+            self._store.get_ai_answer_message_ids(chat_id, message_ids),
+        )
+        semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
+        identity_semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
+        identity_tasks: dict[int, asyncio.Task[Any]] = {}
+
+        async def resolve_identity(message: ReplyTarget) -> Any:
+            async with identity_semaphore:
+                return await self._prompt_builder.resolve_identity(message)
+
+        def identity_for(message: ReplyTarget) -> asyncio.Task[Any]:
+            assert message.sender_id is not None
+            task = identity_tasks.get(message.sender_id)
+            if task is None:
+                task = asyncio.create_task(resolve_identity(message))
+                identity_tasks[message.sender_id] = task
+            return task
+
+        async def build(message: ReplyTarget) -> HumanObservation | None:
+            if (
+                message.sender_id is None
+                or message.id in excluded_ids
+                or message.id in answer_ids
+            ):
+                return None
+            async with semaphore:
+                text = _memory_message_text(message.raw_text or "")
+                attachment = await self._prompt_builder.describe_attachment(message)
+                observation_text = self._prompt_builder.build_observation_text(
+                    text,
+                    attachment,
+                )
+                if not observation_text:
+                    return None
+                identity = await identity_for(message)
+                if not identity.is_human:
+                    return None
+                mentioned_users = (
+                    await self._prompt_builder.resolve_mentions(message)
+                    if getattr(message, "entities", None)
+                    else ()
+                )
+                return HumanObservation(
+                    message_id=message.id,
+                    sender_id=message.sender_id,
+                    text=observation_text,
+                    occurred_at=_message_datetime(message),
+                    mentioned_at=_message_datetime(message),
+                    identity=identity,
+                    reply_to_message_id=message.reply_to_msg_id,
+                    mentioned_users=mentioned_users,
+                    metadata=_telegram_memory_event_metadata(message),
+                )
+
+        observations = await asyncio.gather(*(build(message) for message in messages))
+        return {
+            observation.message_id: observation
+            for observation in observations
+            if observation is not None
+        }
 
     async def _load_chain(
         self,
@@ -516,47 +887,6 @@ class TelegramDreamScanner:
                     known[parent.id] = parent
             current = parent
         return tuple(reversed(newest_first))
-
-    async def _observations(
-        self,
-        chat_id: int,
-        messages: list[ReplyTarget],
-    ) -> tuple[HumanObservation, ...]:
-        observations: list[HumanObservation] = []
-        for message in messages:
-            if message.sender_id is None:
-                continue
-            if await self._store.is_memory_excluded_message(chat_id, message.id):
-                continue
-            if await self._store.get_answer(chat_id, message.id) is not None:
-                continue
-            text = _memory_message_text(message.raw_text or "")
-            attachment = await self._prompt_builder.describe_attachment(message)
-            observation_text = self._prompt_builder.build_observation_text(
-                text,
-                attachment,
-            )
-            if not observation_text:
-                continue
-            identity = await self._prompt_builder.resolve_identity(message)
-            if not identity.is_human:
-                continue
-            observations.append(
-                HumanObservation(
-                    message_id=message.id,
-                    sender_id=message.sender_id,
-                    text=observation_text,
-                    occurred_at=_message_datetime(message),
-                    mentioned_at=_message_datetime(message),
-                    identity=identity,
-                    reply_to_message_id=message.reply_to_msg_id,
-                    mentioned_users=await self._prompt_builder.resolve_mentions(
-                        message
-                    ),
-                    metadata=_telegram_memory_event_metadata(message),
-                )
-            )
-        return tuple(observations)
 
     async def _retry_telegram(self, operation: Callable[[], Awaitable[Any]]) -> Any:
         for attempt in range(1, self._settings.retry_attempts + 1):

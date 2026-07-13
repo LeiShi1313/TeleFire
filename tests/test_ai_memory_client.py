@@ -14,6 +14,7 @@ from telefire.ai_memory import (
     MemoryEvent,
     MemoryRetainResult,
     MemoryRevisionResult,
+    append_episode_once,
     retain_episode_once,
 )
 
@@ -204,6 +205,53 @@ async def test_retry_after_receipt_crash_replaces_one_complete_episode():
     assert await retain_episode_once(memory, receipts, item) is True
     assert memory.modes == ["replace", "replace"]
     assert memory.documents[(item.scope_id, item.document_id)] == item.content
+
+
+@pytest.mark.asyncio
+async def test_append_episode_merges_receipt_versions_and_is_idempotent():
+    class AppendMemory:
+        def __init__(self):
+            self.calls = []
+
+        async def retain_many(self, episodes, *, update_mode="replace"):
+            self.calls.append((episodes, update_mode))
+            return MemoryRetainResult(accepted=True, items_count=len(episodes))
+
+    class Receipts:
+        def __init__(self, saved):
+            self.saved = saved
+
+        async def get_memory_document_receipt(self, scope_id, document_id):
+            return self.saved
+
+        async def save_memory_document_receipt(
+            self,
+            scope_id,
+            document_id,
+            content_hash,
+            event_versions,
+        ):
+            self.saved = MemoryDocumentReceipt(content_hash, event_versions)
+
+    complete = replace(
+        episode(),
+        document_id="telegram:dream-segment:-1001:40-59",
+    )
+    first_only = replace(complete, events=complete.events[:1])
+    receipts = Receipts(
+        MemoryDocumentReceipt(
+            first_only.content_hash,
+            first_only.event_versions,
+        )
+    )
+    memory = AppendMemory()
+
+    assert await append_episode_once(memory, receipts, complete) is True
+    assert memory.calls[0][1] == "append"
+    assert receipts.saved.event_versions == complete.event_versions
+
+    assert await append_episode_once(memory, receipts, complete) is False
+    assert len(memory.calls) == 1
 
 
 @pytest.mark.asyncio

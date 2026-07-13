@@ -20,7 +20,6 @@ from telefire.ai_dream import (
     DreamSchedulerSettings,
     DreamSettings,
     DreamThreadLimitError,
-    DreamWindowLimitError,
     TelegramDreamScanner,
 )
 from telefire.ai_attachments import AttachmentDescription
@@ -63,7 +62,16 @@ class FakeSource:
         self.window_calls = []
         self.message_calls = []
 
-    async def fetch_window(self, chat_id, *, since, until, limit):
+    async def fetch_window(
+        self,
+        chat_id,
+        *,
+        since,
+        until,
+        limit,
+        after_message_id=None,
+        oldest_first=False,
+    ):
         self.window_calls.append(
             {
                 "chat_id": chat_id,
@@ -73,9 +81,12 @@ class FakeSource:
             }
         )
         eligible = tuple(
-            message for message in self.window if since <= message.date <= until
+            message
+            for message in self.window
+            if since <= message.date <= until
+            and (after_message_id is None or message.id > after_message_id)
         )
-        return eligible[-limit:]
+        return eligible[:limit] if oldest_first else eligible[-limit:]
 
     async def fetch_message(self, chat_id, message_id):
         self.message_calls.append((chat_id, message_id))
@@ -112,6 +123,15 @@ class FakeIdentityResolver:
         )
 
 
+class CountingIdentityResolver(FakeIdentityResolver):
+    def __init__(self):
+        self.calls = 0
+
+    async def resolve(self, message):
+        self.calls += 1
+        return await super().resolve(message)
+
+
 class FakeAttachmentDescriber:
     async def describe(self, message):
         if message.file is None:
@@ -129,7 +149,7 @@ async def make_scanner(
     *,
     max_thread_messages=20,
     attachment_describer=None,
-    retain_batch_size=10,
+    retain_concurrency=1,
     max_messages=100,
     lease_seconds=3_600,
     clock=lambda: NOW.timestamp(),
@@ -150,7 +170,8 @@ async def make_scanner(
             settlement_delay=timedelta(0),
             max_messages=max_messages,
             max_thread_messages=max_thread_messages,
-            retain_batch_size=retain_batch_size,
+            segment_root_span=1,
+            retain_concurrency=retain_concurrency,
             lease_seconds=lease_seconds,
         ),
         clock=clock,
@@ -205,12 +226,275 @@ async def test_manual_dream_retains_standalone_and_complete_reply_tree(tmp_path)
             "Second branch",
         ]
         assert all(call["update_mode"] == "replace" for call in memory.retain_calls)
-        assert [len(batch) for batch in memory.retain_batches] == [2]
+        assert [len(batch) for batch in memory.retain_batches] == [1, 1]
         state = await store.get_memory_dream_state("telegram:chat:-1001")
-        assert state.cursor_message_id == 4
+        assert state.cursor_message_id == 6
         assert state.scanned_until_at == NOW.timestamp()
         assert state.last_success_at == NOW.timestamp()
         assert state.last_error is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_packs_100_messages_and_retains_four_segments_concurrently(
+    tmp_path,
+):
+    class ConcurrentMemory(FakeMemory):
+        def __init__(self):
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def retain_many(self, episodes, *, update_mode="replace"):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                return await super().retain_many(
+                    episodes,
+                    update_mode=update_mode,
+                )
+            finally:
+                self.active -= 1
+
+    messages = tuple(
+        FakeMessage(
+            1_000 + index,
+            f"Message {index} records preference {index}",
+            date=NOW - timedelta(minutes=20) + timedelta(seconds=index),
+        )
+        for index in range(100)
+    )
+    source = FakeSource(messages)
+    memory = ConcurrentMemory()
+    identity_resolver = CountingIdentityResolver()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=identity_resolver),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            overlap=timedelta(minutes=10),
+            settlement_delay=timedelta(0),
+            max_messages=100,
+            segment_root_span=20,
+            retain_concurrency=4,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.messages_seen == 100
+        assert result.messages_retained == 100
+        assert result.documents_created == 5
+        assert result.documents_unchanged == 0
+        assert memory.max_active == 4
+        assert identity_resolver.calls == 1
+        episodes = [call["episode"] for call in memory.retain_calls]
+        assert [episode.document_id for episode in episodes] == [
+            "telegram:dream-segment:-1001:1000-1019",
+            "telegram:dream-segment:-1001:1020-1039",
+            "telegram:dream-segment:-1001:1040-1059",
+            "telegram:dream-segment:-1001:1060-1079",
+            "telegram:dream-segment:-1001:1080-1099",
+        ]
+        assert [len(episode.events) for episode in episodes] == [20] * 5
+        assert all(len(batch) == 1 for batch in memory.retain_batches)
+        assert (
+            await store.find_memory_document_id_for_source(
+                "telegram:chat:-1001",
+                "telegram:message:-1001:1007",
+            )
+            == "telegram:dream-segment:-1001:1000-1019"
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_packed_segment_keeps_sibling_context_for_a_late_reply(tmp_path):
+    root = FakeMessage(100, "Root decision", date=NOW - timedelta(minutes=30))
+    sibling_root = FakeMessage(
+        105,
+        "Nearby standalone context",
+        sender_id=30,
+        date=NOW - timedelta(minutes=20),
+    )
+    first_reply = FakeMessage(
+        106,
+        "Earlier reply",
+        sender_id=40,
+        reply_to=root,
+        date=NOW - timedelta(minutes=10),
+    )
+    source = FakeSource([root, sibling_root, first_reply])
+    memory = FakeMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            overlap=timedelta(minutes=10),
+            settlement_delay=timedelta(0),
+            segment_root_span=20,
+            retain_concurrency=1,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    try:
+        await scanner.run_scope(-1001)
+
+        late_reply = FakeMessage(
+            150,
+            "Late reply",
+            sender_id=50,
+            reply_to=root,
+            date=NOW - timedelta(minutes=5),
+        )
+        source.window = (late_reply,)
+        source.by_id[late_reply.id] = late_reply
+        await scanner.run_scope(-1001)
+
+        updated = memory.retain_calls[-1]["episode"]
+        assert updated.document_id == "telegram:dream-segment:-1001:100-119"
+        assert [event.source_id for event in updated.events] == [
+            "telegram:message:-1001:100",
+            "telegram:message:-1001:105",
+            "telegram:message:-1001:106",
+            "telegram:message:-1001:150",
+        ]
+        assert (-1001, sibling_root.id) in source.message_calls
+        assert (-1001, first_reply.id) in source.message_calls
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_packing_preserves_existing_thread_document_receipts(tmp_path):
+    messages = (
+        FakeMessage(200, "Existing first document"),
+        FakeMessage(201, "Existing second document"),
+    )
+    source = FakeSource(messages)
+    memory = FakeMemory()
+    store, legacy_scanner = await make_scanner(tmp_path, source, memory)
+    try:
+        await legacy_scanner.run_scope(-1001)
+
+        packed_scanner = TelegramDreamScanner(
+            source=source,
+            store=store,
+            memory=memory,
+            prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+            settings=DreamSettings(
+                lookback=timedelta(hours=1),
+                overlap=timedelta(minutes=10),
+                settlement_delay=timedelta(0),
+                segment_root_span=20,
+                retain_concurrency=4,
+            ),
+            clock=lambda: NOW.timestamp(),
+        )
+        result = await packed_scanner.run_scope(-1001)
+
+        assert result.documents_created == 0
+        assert result.documents_unchanged == 2
+        assert [call["episode"].document_id for call in memory.retain_calls] == [
+            "telegram:thread:-1001:200",
+            "telegram:thread:-1001:201",
+        ]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_budgeted_dream_checkpoints_completed_prefix_and_resumes(tmp_path):
+    class MutableMonotonic:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    monotonic = MutableMonotonic()
+
+    class TimedMemory(FakeMemory):
+        async def retain_many(self, episodes, *, update_mode="replace"):
+            result = await super().retain_many(episodes, update_mode=update_mode)
+            monotonic.value += 30
+            return result
+
+    messages = tuple(
+        FakeMessage(
+            2_000 + index,
+            f"Checkpoint message {index}",
+            date=NOW - timedelta(minutes=3 - index),
+        )
+        for index in range(3)
+    )
+    source = FakeSource(messages)
+    memory = TimedMemory()
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=memory,
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            lookback=timedelta(hours=1),
+            overlap=timedelta(minutes=10),
+            settlement_delay=timedelta(0),
+            max_messages=100,
+            segment_root_span=1,
+            retain_concurrency=1,
+            cycle_budget_seconds=25,
+        ),
+        clock=lambda: NOW.timestamp(),
+        monotonic=monotonic,
+    )
+    try:
+        first = await scanner.run_scope(-1001)
+
+        assert first.messages_retained == 1
+        assert first.documents_created == 1
+        state = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert state.cursor_message_id == 2_000
+        assert state.scanned_until_at == messages[0].date.timestamp()
+
+        resumed = TelegramDreamScanner(
+            source=source,
+            store=store,
+            memory=memory,
+            prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+            settings=DreamSettings(
+                lookback=timedelta(hours=1),
+                overlap=timedelta(minutes=10),
+                settlement_delay=timedelta(0),
+                max_messages=100,
+                segment_root_span=1,
+                retain_concurrency=1,
+                cycle_budget_seconds=3_600,
+            ),
+            clock=lambda: NOW.timestamp(),
+            monotonic=monotonic,
+        )
+        second = await resumed.run_scope(-1001)
+
+        assert second.messages_retained == 3
+        assert second.documents_created == 2
+        assert second.documents_unchanged == 1
+        completed = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert completed.cursor_message_id == 2_002
+        assert completed.scanned_until_at == NOW.timestamp()
     finally:
         await store.close()
 
@@ -489,7 +773,7 @@ async def test_thread_limit_refuses_to_advance_without_a_stable_complete_root(tm
 
 
 @pytest.mark.asyncio
-async def test_window_over_limit_fails_without_advancing_watermark(tmp_path):
+async def test_window_over_limit_advances_in_bounded_oldest_first_scans(tmp_path):
     messages = [
         FakeMessage(
             80 + index,
@@ -507,14 +791,31 @@ async def test_window_over_limit_fails_without_advancing_watermark(tmp_path):
         max_messages=2,
     )
     try:
-        with pytest.raises(DreamWindowLimitError, match="MAX_MESSAGES"):
-            await scanner.run_scope(-1001)
-        state = await store.get_memory_dream_state("telegram:chat:-1001")
-        assert state.cursor_message_id is None
-        assert state.scanned_until_at is None
-        assert state.last_success_at is None
-        assert "DreamWindowLimitError" in state.last_error
-        assert memory.retain_calls == []
+        first = await scanner.run_scope(-1001)
+        first_state = await store.get_memory_dream_state("telegram:chat:-1001")
+
+        assert first.messages_seen == 2
+        assert first.messages_retained == 2
+        assert first_state.cursor_message_id == 81
+        assert first_state.scanned_until_at == messages[1].date.timestamp()
+        assert first_state.last_error is None
+        assert [
+            call["episode"].events[0].source_id for call in memory.retain_calls
+        ] == [
+            "telegram:message:-1001:80",
+            "telegram:message:-1001:81",
+        ]
+
+        second = await scanner.run_scope(-1001)
+        completed = await store.get_memory_dream_state("telegram:chat:-1001")
+
+        assert second.documents_created == 1
+        assert second.documents_unchanged == 1
+        assert completed.cursor_message_id == 82
+        assert completed.scanned_until_at == NOW.timestamp()
+        assert [call["episode"].events[0].source_id for call in memory.retain_calls][
+            -1
+        ] == "telegram:message:-1001:82"
     finally:
         await store.close()
 
@@ -605,16 +906,11 @@ async def test_dream_uses_settlement_delay_and_bounds_flood_wait_retry(tmp_path)
             super().__init__(window)
             self.attempts = 0
 
-        async def fetch_window(self, chat_id, *, since, until, limit):
+        async def fetch_window(self, chat_id, **kwargs):
             self.attempts += 1
             if self.attempts == 1:
                 raise FloodWaitError(request=None, capture=20)
-            return await super().fetch_window(
-                chat_id,
-                since=since,
-                until=until,
-                limit=limit,
-            )
+            return await super().fetch_window(chat_id, **kwargs)
 
     source = FloodSource([FakeMessage(70, "Delayed evidence")])
     memory = FakeMemory()
@@ -727,15 +1023,10 @@ async def test_running_dream_renews_lease_until_work_finishes(tmp_path):
     release = asyncio.Event()
 
     class BlockingSource(FakeSource):
-        async def fetch_window(self, chat_id, *, since, until, limit):
+        async def fetch_window(self, chat_id, **kwargs):
             started.set()
             await release.wait()
-            return await super().fetch_window(
-                chat_id,
-                since=since,
-                until=until,
-                limit=limit,
-            )
+            return await super().fetch_window(chat_id, **kwargs)
 
     source = BlockingSource([])
     memory = FakeMemory()
@@ -831,14 +1122,15 @@ async def test_partial_failure_keeps_cursor_and_retries_only_missing_document(tm
         tmp_path,
         source,
         failing,
-        retain_batch_size=1,
+        retain_concurrency=1,
     )
     try:
         with pytest.raises(ConnectionError, match="synthetic"):
             await scanner.run_scope(-1001)
         failed_state = await store.get_memory_dream_state("telegram:chat:-1001")
-        assert failed_state.cursor_message_id is None
-        assert failed_state.last_success_at is None
+        assert failed_state.cursor_message_id == 30
+        assert failed_state.scanned_until_at == first.date.timestamp()
+        assert failed_state.last_success_at == NOW.timestamp()
         assert "ConnectionError" in failed_state.last_error
 
         healthy = FakeMemory()

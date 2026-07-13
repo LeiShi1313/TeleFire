@@ -27,6 +27,7 @@ from telefire.ai_memory import (
     MemoryEpisode,
     MemoryEvent,
     MemoryRecall,
+    append_episode_once,
     retain_episode_once,
 )
 from telefire.ai_attachments import (
@@ -421,6 +422,12 @@ class ConversationStore(Protocol):
         content_hash: str,
         event_versions: tuple[tuple[str, str], ...],
     ) -> None: ...
+
+    async def find_memory_document_id_for_source(
+        self,
+        scope_id: str,
+        source_id: str,
+    ) -> str | None: ...
 
     async def record_memory_labels(
         self,
@@ -1429,23 +1436,30 @@ class AIStateRepository:
             (scope_id, document_id),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        try:
-            raw_versions = json.loads(row["event_versions"])
-            event_versions = tuple(
-                (str(item[0]), str(item[1]))
-                for item in raw_versions
-                if isinstance(item, list)
-                and len(item) == 2
-                and all(isinstance(value, str) for value in item)
+        return _memory_document_receipt_from_row(row) if row else None
+
+    async def get_memory_document_receipts(
+        self,
+        scope_id: str,
+        document_ids: tuple[str, ...],
+    ) -> dict[str, MemoryDocumentReceipt]:
+        connection = self._require_connection()
+        unique_ids = tuple(dict.fromkeys(document_ids))
+        receipts: dict[str, MemoryDocumentReceipt] = {}
+        for start in range(0, len(unique_ids), 500):
+            batch = unique_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            cursor = await connection.execute(
+                "SELECT document_id, content_hash, event_versions "
+                "FROM ai_memory_documents WHERE scope_id = ? "
+                f"AND document_id IN ({placeholders})",
+                (scope_id, *batch),
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            event_versions = ()
-        return MemoryDocumentReceipt(
-            content_hash=str(row["content_hash"]),
-            event_versions=event_versions,
-        )
+            async for row in cursor:
+                receipts[str(row["document_id"])] = _memory_document_receipt_from_row(
+                    row
+                )
+        return receipts
 
     async def save_memory_document_receipt(
         self,
@@ -1474,6 +1488,27 @@ class AIStateRepository:
             ),
         )
         await connection.commit()
+
+    async def find_memory_document_id_for_source(
+        self,
+        scope_id: str,
+        source_id: str,
+    ) -> str | None:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            """
+            SELECT document.document_id
+            FROM ai_memory_documents AS document,
+                 json_each(document.event_versions) AS event
+            WHERE document.scope_id = ?
+              AND json_extract(event.value, '$[0]') = ?
+            ORDER BY document.retained_at DESC
+            LIMIT 1
+            """,
+            (scope_id, source_id),
+        )
+        row = await cursor.fetchone()
+        return str(row["document_id"]) if row else None
 
     async def is_memory_enabled(self, scope_id: str) -> bool:
         connection = self._require_connection()
@@ -1750,6 +1785,46 @@ class AIStateRepository:
             (chat_id, message_id),
         )
         return await cursor.fetchone() is not None
+
+    async def get_memory_excluded_message_ids(
+        self,
+        chat_id: int,
+        message_ids: tuple[int, ...],
+    ) -> frozenset[int]:
+        connection = self._require_connection()
+        unique_ids = tuple(dict.fromkeys(message_ids))
+        excluded: set[int] = set()
+        for start in range(0, len(unique_ids), 500):
+            batch = unique_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            cursor = await connection.execute(
+                "SELECT message_id FROM ai_memory_excluded_messages "
+                f"WHERE chat_id = ? AND message_id IN ({placeholders})",
+                (chat_id, *batch),
+            )
+            async for row in cursor:
+                excluded.add(int(row["message_id"]))
+        return frozenset(excluded)
+
+    async def get_ai_answer_message_ids(
+        self,
+        chat_id: int,
+        message_ids: tuple[int, ...],
+    ) -> frozenset[int]:
+        connection = self._require_connection()
+        unique_ids = tuple(dict.fromkeys(message_ids))
+        answers: set[int] = set()
+        for start in range(0, len(unique_ids), 500):
+            batch = unique_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            cursor = await connection.execute(
+                "SELECT answer_message_id FROM ai_answers "
+                f"WHERE chat_id = ? AND answer_message_id IN ({placeholders})",
+                (chat_id, *batch),
+            )
+            async for row in cursor:
+                answers.add(int(row["answer_message_id"]))
+        return frozenset(answers)
 
     def _require_connection(self) -> aiosqlite.Connection:
         if self._connection is None:
@@ -2485,13 +2560,38 @@ class AIConversationHandler:
     ) -> MemoryChainRetain | None:
         if self._memory is None or not observations:
             return None
-        episode = _telegram_memory_episode(chat_id, observations)
         try:
+            scope_id = _telegram_scope_id(chat_id)
+            root_source_id = _telegram_memory_source_id(
+                chat_id,
+                observations[0].message_id,
+            )
+            existing_document_id = await self._store.find_memory_document_id_for_source(
+                scope_id,
+                root_source_id,
+            )
+            append_to_segment = bool(
+                existing_document_id
+                and existing_document_id.startswith("telegram:dream-segment:")
+            )
+            episode = _telegram_memory_episode(
+                chat_id,
+                observations,
+                document_id=(existing_document_id if append_to_segment else None),
+            )
             await _record_episode_labels(self._store, episode)
-            created = await retain_episode_once(
-                self._memory,
-                self._store,
-                episode,
+            created = (
+                await append_episode_once(
+                    self._memory,
+                    self._store,
+                    episode,
+                )
+                if append_to_segment
+                else await retain_episode_once(
+                    self._memory,
+                    self._store,
+                    episode,
+                )
             )
         except Exception as exc:
             self._log_memory_failure("retain", exc)
@@ -2564,6 +2664,26 @@ def _marker_from_row(row: aiosqlite.Row) -> AIAnswerMarker:
         reference_context=row["reference_context"],
         agent_session_id=row["agent_session_id"],
         agent_entry_id=row["agent_entry_id"],
+    )
+
+
+def _memory_document_receipt_from_row(
+    row: aiosqlite.Row,
+) -> MemoryDocumentReceipt:
+    try:
+        raw_versions = json.loads(row["event_versions"])
+        event_versions = tuple(
+            (str(item[0]), str(item[1]))
+            for item in raw_versions
+            if isinstance(item, list)
+            and len(item) == 2
+            and all(isinstance(value, str) for value in item)
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        event_versions = ()
+    return MemoryDocumentReceipt(
+        content_hash=str(row["content_hash"]),
+        event_versions=event_versions,
     )
 
 
@@ -2653,6 +2773,7 @@ def _telegram_memory_episode(
     observations: tuple[HumanObservation, ...],
     *,
     root_message_id: int | None = None,
+    document_id: str | None = None,
 ) -> MemoryEpisode:
     if not observations:
         raise ValueError("Cannot build a memory Episode without observations")
@@ -2668,7 +2789,7 @@ def _telegram_memory_episode(
     return MemoryEpisode(
         scope_id=_telegram_scope_id(chat_id),
         scope_display_name=scope_display_name,
-        document_id=f"telegram:thread:{chat_id}:{root_message_id}",
+        document_id=(document_id or f"telegram:thread:{chat_id}:{root_message_id}"),
         source="telegram",
         events=tuple(
             MemoryEvent(

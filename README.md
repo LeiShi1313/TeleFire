@@ -197,6 +197,8 @@ explicit re-ingestion and re-embedding operation.
 `TELEFIRE_AI_EDIT_CADENCE` is the account-wide minimum interval between Telegram
 message edits and defaults to 4 seconds. Intermediate stream updates are skipped
 when the edit slot is busy; final answers wait for the next slot.
+`TELEFIRE_MEMORY_COMMAND_DELETE_DELAY` controls how many seconds accepted owner
+memory commands remain visible and defaults to 3 seconds.
 
 For a host-only development run, start Hindsight through Compose, then the Pi
 Agent Engine:
@@ -306,9 +308,9 @@ Commands and reply behavior:
   deleted while its acknowledgement remains visible; usage and execution failures
   stay visible for inspection and retry.
 - Reply in a thread with `/ai_memory` to ingest the bounded human reply chain,
-  attributing each message to its author. A successful owner's bare command is
-  deleted while the result acknowledgement remains visible; failed commands remain
-  available for retry. Add
+  attributing each message to its author. An accepted owner's command is deleted
+  after the configured delay while its result or error acknowledgement remains
+  visible. Invalid usage remains visible for correction. Add
   an instruction, such as `/ai_memory Correct their employer to Acme`, to ingest
   the chain, retain a separate owner-attributed correction Episode, and apply a
   reversible Hindsight-native Revision to the directly replied user. AI-generated
@@ -331,7 +333,9 @@ Commands and reply behavior:
   successful AI requests. `/ai_memory_disable` stops future automatic capture,
   `/ai_memory_dream` runs one bounded scan immediately, and `/ai_memory_status`
   reports enablement plus the latest Dream attempt, success, and failure. Recall and one-shot
-  `/ai_memory` remain available while automatic capture is disabled.
+  `/ai_memory` remain available while automatic capture is disabled. Accepted
+  owner memory-management commands delete on the same configured timer, without
+  waiting for Dream or backfill work to finish.
 - Enabled chats are scanned on `TELEFIRE_MEMORY_DREAM_CRON` (hourly by default).
   Lookback, overlap, settlement delay, concurrency, transport batch size, and
   bounded retry settings use the `TELEFIRE_MEMORY_DREAM_*` variables documented

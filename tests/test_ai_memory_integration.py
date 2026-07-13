@@ -352,6 +352,7 @@ def make_handler(
     mention_resolver=None,
     store=None,
     dream_runner=None,
+    memory_command_delete_delay=0,
 ):
     store = store or FakeStore(allowed=allowed)
     return AIConversationHandler(
@@ -366,6 +367,7 @@ def make_handler(
         rate_limiter=AIRateLimiter(store, cooldown_seconds=0),
         memory=memory,
         dream_runner=dream_runner,
+        memory_command_delete_delay=memory_command_delete_delay,
         logger=logger,
     )
 
@@ -710,7 +712,7 @@ async def test_memory_retain_failure_does_not_store_delivery_receipt():
 
     assert await handler.handle(command) is True
     assert command.replies[0].text == "Memory update failed. Retry the command."
-    assert command.deleted is False
+    assert command.deleted is True
     assert store.memory_documents == {}
     assert logger.warnings
 
@@ -742,7 +744,7 @@ async def test_owner_revision_retains_chain_then_revises_direct_human():
             "instruction": "Correct the preference to coffee",
         }
     ]
-    assert command.deleted is False
+    assert command.deleted is True
 
 
 @pytest.mark.asyncio
@@ -764,6 +766,7 @@ async def test_revision_does_not_curate_when_correction_evidence_fails():
 
     assert await handler.handle(command) is True
     assert command.replies[0].text == "Memory revision failed. Retry the command."
+    assert command.deleted is True
     assert memory.revise_calls == []
 
 
@@ -796,6 +799,8 @@ async def test_revision_requires_direct_human_target_and_owner():
     assert invalid_target.replies[0].text == (
         "Reply directly to a human message when revising memory."
     )
+    assert unauthorized.deleted is False
+    assert invalid_target.deleted is False
     assert memory.retain_calls == []
     assert memory.revise_calls == []
 
@@ -819,8 +824,21 @@ async def test_revision_rejects_a_telegram_bot_target():
     assert command.replies[0].text == (
         "Reply directly to a human message when revising memory."
     )
+    assert command.deleted is False
     assert memory.retain_calls == []
     assert memory.revise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_bare_memory_command_without_reply_remains_visible_with_usage():
+    handler = make_handler(FakeGateway(["unused"]), FakeMemory())
+    command = FakeMessage("/ai_memory", sender_id=10)
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == (
+        "Usage: reply to a user with /ai_memory [instruction]"
+    )
+    assert command.deleted is False
 
 
 @pytest.mark.asyncio
@@ -945,7 +963,7 @@ async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabl
 
     status = FakeMessage("/ai_memory_status", sender_id=10)
     assert await handler.handle(status) is True
-    assert status.deleted is False
+    assert status.deleted is True
     assert status.replies[0].text == (
         "Automatic memory is enabled for this chat.\n"
         "Last Dream attempt: never\n"
@@ -1038,6 +1056,7 @@ async def test_non_owner_cannot_change_scope_memory_state():
 
     assert await handler.handle(command) is False
     assert command.replies == []
+    assert command.deleted is False
     assert store.memory_enabled == set()
 
 
@@ -1128,7 +1147,7 @@ async def test_owner_runs_manual_dream_only_for_enabled_scope():
     disabled = FakeMessage("/ai_memory_dream", sender_id=10)
     assert await handler.handle(disabled) is True
     assert disabled.replies[0].text == "Automatic memory is disabled for this chat."
-    assert disabled.deleted is False
+    assert disabled.deleted is True
     assert runner.calls == []
 
     store.memory_enabled.add("telegram:chat:-1001")
@@ -1142,7 +1161,7 @@ async def test_owner_runs_manual_dream_only_for_enabled_scope():
 
 
 @pytest.mark.asyncio
-async def test_failed_manual_dream_remains_visible_for_retry():
+async def test_failed_manual_dream_deletes_command_but_keeps_error_visible():
     store = FakeStore()
     store.memory_enabled.add("telegram:chat:-1001")
     runner = FakeDreamRunner(error=ConnectionError("memory unavailable"))
@@ -1158,7 +1177,7 @@ async def test_failed_manual_dream_remains_visible_for_retry():
     assert command.replies[0].text == (
         "Dream Cycle failed. It will retry from the previous cursor."
     )
-    assert command.deleted is False
+    assert command.deleted is True
 
 
 @pytest.mark.parametrize(
@@ -1226,7 +1245,7 @@ async def test_invalid_and_non_owner_backfill_commands_do_not_start_work():
 
 
 @pytest.mark.asyncio
-async def test_failed_backfill_edits_progress_and_keeps_command_for_retry():
+async def test_failed_backfill_deletes_command_and_edits_progress_with_error():
     runner = FakeDreamRunner(error=ConnectionError("memory unavailable"))
     handler = make_handler(
         FakeGateway(["unused"]),
@@ -1240,4 +1259,65 @@ async def test_failed_backfill_edits_progress_and_keeps_command_for_retry():
     assert command.replies[0].edits == [
         "Memory backfill failed. Accepted documents are safe; retry the same command."
     ]
+    assert command.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_memory_status_command_is_deleted_after_configured_delay():
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=FakeStore(),
+        memory_command_delete_delay=0.01,
+    )
+    command = FakeMessage("/ai_memory_status", sender_id=10)
+
+    assert await handler.handle(command) is True
     assert command.deleted is False
+    assert command.replies[0].text.startswith("Automatic memory is disabled")
+
+    await asyncio.sleep(0.02)
+
+    assert command.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_memory_dream_command_deletes_while_scan_is_still_running():
+    class BlockingDreamRunner(FakeDreamRunner):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def run_scope(self, chat_id):
+            self.calls.append(chat_id)
+            self.started.set()
+            await self.release.wait()
+            return MemoryDreamResult(
+                messages_seen=1,
+                messages_retained=1,
+                documents_created=1,
+                documents_unchanged=0,
+            )
+
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    runner = BlockingDreamRunner()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=store,
+        dream_runner=runner,
+        memory_command_delete_delay=0.01,
+    )
+    command = FakeMessage("/ai_memory_dream", sender_id=10)
+
+    run = asyncio.create_task(handler.handle(command))
+    await runner.started.wait()
+    await asyncio.sleep(0.02)
+
+    assert command.deleted is True
+    assert run.done() is False
+
+    runner.release.set()
+    assert await run is True

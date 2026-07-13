@@ -515,6 +515,7 @@ class AISettings:
     max_context_messages: int = 20
     max_context_chars: int = 12_000
     delegated_cooldown: float = 30.0
+    memory_command_delete_delay: float = 3.0
     hindsight_url: str | None = "http://127.0.0.1:18888"
     hindsight_timeout: float = 90.0
 
@@ -551,6 +552,9 @@ class AISettings:
             ),
             delegated_cooldown=float(
                 os.environ.get("TELEFIRE_AI_DELEGATED_COOLDOWN", "30")
+            ),
+            memory_command_delete_delay=float(
+                os.environ.get("TELEFIRE_MEMORY_COMMAND_DELETE_DELAY", "3")
             ),
             hindsight_url=(
                 os.environ.get(
@@ -1804,8 +1808,11 @@ class AIConversationHandler:
         rate_limiter: AIRateLimiter | None = None,
         memory: MemoryClient | None = None,
         dream_runner: MemoryDreamRunner | None = None,
+        memory_command_delete_delay: float = 3.0,
         logger: Any | None = None,
     ):
+        if memory_command_delete_delay < 0:
+            raise ValueError("memory_command_delete_delay cannot be negative")
         self._owner_id = owner_id
         self._responder = responder
         self._store = store
@@ -1813,6 +1820,8 @@ class AIConversationHandler:
         self._rate_limiter = rate_limiter or AIRateLimiter(store)
         self._memory = memory
         self._dream_runner = dream_runner
+        self._memory_command_delete_delay = memory_command_delete_delay
+        self._memory_command_delete_tasks: set[asyncio.Task[None]] = set()
         self._logger = logger
         self._active_runs: dict[int, str] = {}
 
@@ -2149,9 +2158,8 @@ class AIConversationHandler:
                 if enabled
                 else "Automatic memory disabled for this chat."
             )
+        await self._schedule_memory_command_delete(message, command)
         await self._reply_memory_excluded(message, response, kind="memory-control")
-        if command != "/ai_memory_status":
-            await self._delete_command_message(message, command)
         return True
 
     async def _automatic_memory_enabled(self, chat_id: int) -> bool:
@@ -2163,6 +2171,7 @@ class AIConversationHandler:
 
     async def _handle_memory_dream(self, message: ReplyTarget) -> bool:
         assert message.chat_id is not None
+        await self._schedule_memory_command_delete(message, "/ai_memory_dream")
         if not await self._automatic_memory_enabled(message.chat_id):
             await self._reply_memory_excluded(
                 message,
@@ -2195,7 +2204,6 @@ class AIConversationHandler:
             f"{result.documents_unchanged} unchanged.",
             kind="memory-control",
         )
-        await self._delete_command_message(message, "/ai_memory_dream")
         return True
 
     async def _handle_memory_backfill(
@@ -2204,6 +2212,7 @@ class AIConversationHandler:
         request: MemoryBackfillRequest,
     ) -> bool:
         assert message.chat_id is not None
+        await self._schedule_memory_command_delete(message, "/ai_memory_backfill")
         if self._dream_runner is None:
             await self._reply_memory_excluded(
                 message,
@@ -2238,7 +2247,6 @@ class AIConversationHandler:
             f"{result.documents_unchanged} unchanged.",
             parse_mode=None,
         )
-        await self._delete_command_message(message, "/ai_memory_backfill")
         return True
 
     async def _reply_memory_excluded(
@@ -2367,6 +2375,7 @@ class AIConversationHandler:
             )
             return True
 
+        await self._schedule_memory_command_delete(message, "/ai_memory")
         retained = await self._retain_memory_chain(target)
         if retained is None:
             await self._reply_memory_excluded(
@@ -2451,8 +2460,6 @@ class AIConversationHandler:
             response,
             kind="memory-control",
         )
-        if not instruction:
-            await self._delete_command_message(message, "/ai_memory")
         return True
 
     async def _retain_memory_chain(
@@ -2511,6 +2518,28 @@ class AIConversationHandler:
                     type(exc).__name__,
                     exc,
                 )
+
+    async def _schedule_memory_command_delete(
+        self,
+        message: ReplyTarget,
+        command: str,
+    ) -> None:
+        if self._memory_command_delete_delay == 0:
+            await self._delete_command_message(message, command)
+            return
+        task = asyncio.create_task(
+            self._delete_command_message_after_delay(message, command)
+        )
+        self._memory_command_delete_tasks.add(task)
+        task.add_done_callback(self._memory_command_delete_tasks.discard)
+
+    async def _delete_command_message_after_delay(
+        self,
+        message: ReplyTarget,
+        command: str,
+    ) -> None:
+        await asyncio.sleep(self._memory_command_delete_delay)
+        await self._delete_command_message(message, command)
 
     def _log_memory_failure(self, operation: str, exc: Exception) -> None:
         if self._logger is not None:

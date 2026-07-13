@@ -255,6 +255,9 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             ),
             memory=self._memory,
             dream_runner=dream_runner,
+            memory_command_delete_delay=(
+                self._settings.memory_command_delete_delay
+            ),
             logger=self.logger,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())

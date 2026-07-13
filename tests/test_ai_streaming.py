@@ -187,6 +187,7 @@ def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatc
         "TELEFIRE_PI_TOKEN": "test-agent-token",
         "TELEFIRE_AI_MAX_OUTPUT_CHARS": "1234",
         "TELEFIRE_AI_EDIT_CADENCE": "0.25",
+        "TELEFIRE_MEMORY_COMMAND_DELETE_DELAY": "2.5",
         "TELEFIRE_PI_RUN_TIMEOUT": "12",
     }
     for name, value in values.items():
@@ -198,6 +199,7 @@ def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatc
     assert settings.agent_token == "test-agent-token"
     assert settings.max_output_chars == 1234
     assert settings.edit_cadence == 0.25
+    assert settings.memory_command_delete_delay == 2.5
     assert settings.request_timeout == 12
     assert settings.hindsight_timeout == 90
 

@@ -45,6 +45,19 @@ class RecordingHandler:
         return False
 
 
+class BlockingRecordingHandler(RecordingHandler):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def remember_reply_chain(self, message):
+        self.memory_targets.append(message)
+        self.started.set()
+        await self.release.wait()
+        return True
+
+
 class FakeStateRepository:
     def __init__(self):
         self.processed = set()
@@ -133,24 +146,56 @@ class FakeSavedMessage:
             else None
         )
         self.replies = []
+        self.reply_messages = []
 
     async def get_input_chat(self):
         return telegram_types.InputPeerSelf()
 
     async def reply(self, text, **kwargs):
         self.replies.append((text, kwargs))
-        return SimpleNamespace()
+        reply_message = FakeReplyMessage(text)
+        self.reply_messages.append(reply_message)
+        return reply_message
 
 
-def make_plugin(*, handler, store, client, owner_id=10):
+class FakeReplyMessage:
+    def __init__(self, text):
+        self.text = text
+        self.edits = []
+
+    async def edit(self, text, **kwargs):
+        self.text = text
+        self.edits.append((text, kwargs))
+        return self
+
+
+class RecordingEditLimiter:
+    def __init__(self):
+        self.waits = []
+
+    async def run(self, operation, *, wait):
+        self.waits.append(wait)
+        await operation()
+        return True
+
+
+def make_plugin(*, handler, store, client, owner_id=10, edit_limiter=None):
     plugin = TelegramAI.__new__(TelegramAI)
     plugin._handler = handler
     plugin._store = store
     plugin._owner_id = owner_id
     plugin._saved_memory_lock = asyncio.Lock()
+    plugin._edit_limiter = edit_limiter or RecordingEditLimiter()
     plugin.service = SimpleNamespace(client=client)
     plugin.logger = RecordingLogger()
     return plugin
+
+
+def assert_saved_memory_status(message, final_text):
+    assert message.replies == [("Remembering...", {"parse_mode": None})]
+    assert len(message.reply_messages) == 1
+    assert message.reply_messages[0].text == final_text
+    assert message.reply_messages[0].edits == [(final_text, {"parse_mode": None})]
 
 
 @pytest.mark.parametrize(
@@ -391,13 +436,11 @@ async def test_inaccessible_saved_messages_link_is_not_recorded():
     assert handler.messages == []
     assert store.records == []
     assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["👎"]
-    assert saved_message.replies == [
-        (
-            "Memory update unavailable: the linked message could not be fetched. "
-            "Make sure this account can open it and the message still exists.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update unavailable: the linked message could not be fetched. "
+        "Make sure this account can open it and the message still exists.",
+    )
 
 
 @pytest.mark.asyncio
@@ -418,13 +461,11 @@ async def test_saved_messages_link_rejects_message_from_another_chat():
 
     assert handler.memory_targets == []
     assert store.records == []
-    assert saved_message.replies == [
-        (
-            "Memory update unavailable: the linked message could not be fetched. "
-            "Make sure this account can open it and the message still exists.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update unavailable: the linked message could not be fetched. "
+        "Make sure this account can open it and the message still exists.",
+    )
 
 
 @pytest.mark.asyncio
@@ -445,13 +486,11 @@ async def test_saved_messages_link_rejects_different_message_id():
 
     assert handler.memory_targets == []
     assert store.records == []
-    assert saved_message.replies == [
-        (
-            "Memory update unavailable: the linked message could not be fetched. "
-            "Make sure this account can open it and the message still exists.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update unavailable: the linked message could not be fetched. "
+        "Make sure this account can open it and the message still exists.",
+    )
 
 
 @pytest.mark.asyncio
@@ -472,12 +511,10 @@ async def test_failed_saved_messages_link_ingest_uses_link_retry_instruction():
 
     assert handler.memory_targets == [source_message]
     assert store.records == []
-    assert saved_message.replies == [
-        (
-            "Memory update failed. Send the message link again to retry.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update failed. Send the message link again to retry.",
+    )
 
 
 @pytest.mark.asyncio
@@ -514,12 +551,10 @@ async def test_failed_saved_messages_ingest_is_marked_but_not_recorded():
     assert handler.memory_targets == [source_message]
     assert store.records == []
     assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["👎"]
-    assert saved_message.replies == [
-        (
-            "Memory update failed. Forward the message again to retry.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update failed. Forward the message again to retry.",
+    )
 
 
 @pytest.mark.asyncio
@@ -538,16 +573,14 @@ async def test_failed_ingest_replies_privately_when_reactions_are_unavailable():
     await plugin._on_message(SimpleNamespace(message=saved_message))
 
     assert store.records == []
-    assert saved_message.replies == [
-        (
-            "Memory update failed. Forward the message again to retry.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Memory update failed. Forward the message again to retry.",
+    )
 
 
 @pytest.mark.asyncio
-async def test_success_remains_silent_when_reactions_are_unavailable():
+async def test_success_reports_status_when_reactions_are_unavailable():
     source_peer = telegram_types.PeerChannel(1001)
     source_message = SimpleNamespace(chat_id=-1001001, id=42)
     saved_message = FakeSavedMessage(source_peer=source_peer)
@@ -562,7 +595,56 @@ async def test_success_remains_silent_when_reactions_are_unavailable():
     await plugin._on_message(SimpleNamespace(message=saved_message))
 
     assert store.records == [(10, 77, -1001001, 42)]
-    assert saved_message.replies == []
+    assert_saved_memory_status(saved_message, "Remembered.")
+
+
+@pytest.mark.asyncio
+async def test_saved_memory_shows_processing_then_success_without_reactions():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_message = SimpleNamespace(chat_id=-1001001, id=42)
+    saved_message = FakeSavedMessage(source_peer=source_peer)
+    handler = BlockingRecordingHandler()
+    store = FakeStateRepository()
+    client = FakeTelegramClient(
+        source_message,
+        request_error=RuntimeError("premium required"),
+    )
+    plugin = make_plugin(handler=handler, store=store, client=client)
+
+    ingest = asyncio.create_task(
+        plugin._on_message(SimpleNamespace(message=saved_message))
+    )
+    await handler.started.wait()
+
+    assert saved_message.replies == [("Remembering...", {"parse_mode": None})]
+    assert saved_message.reply_messages[0].text == "Remembering..."
+
+    handler.release.set()
+    await ingest
+
+    assert saved_message.reply_messages[0].text == "Remembered."
+    assert saved_message.reply_messages[0].edits == [
+        ("Remembered.", {"parse_mode": None})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_saved_memory_completion_uses_the_account_edit_limiter():
+    source_peer = telegram_types.PeerChannel(1001)
+    source_message = SimpleNamespace(chat_id=-1001001, id=42)
+    saved_message = FakeSavedMessage(source_peer=source_peer)
+    edit_limiter = RecordingEditLimiter()
+    plugin = make_plugin(
+        handler=RecordingHandler(),
+        store=FakeStateRepository(),
+        client=FakeTelegramClient(source_message),
+        edit_limiter=edit_limiter,
+    )
+
+    await plugin._on_message(SimpleNamespace(message=saved_message))
+
+    assert edit_limiter.waits == [True]
+    assert saved_message.reply_messages[0].text == "Remembered."
 
 
 @pytest.mark.asyncio
@@ -579,13 +661,11 @@ async def test_unresolvable_saved_forward_is_not_treated_as_an_ai_command():
     assert handler.messages == []
     assert store.records == []
     assert [reaction.emoticon for reaction in client.requests[0].reaction] == ["👎"]
-    assert saved_message.replies == [
-        (
-            "Telegram hid the original source. Paste the original message link "
-            "in Saved Messages to remember its reply chain.",
-            {"parse_mode": None},
-        )
-    ]
+    assert_saved_memory_status(
+        saved_message,
+        "Telegram hid the original source. Paste the original message link "
+        "in Saved Messages to remember its reply chain.",
+    )
 
 
 @pytest.mark.asyncio

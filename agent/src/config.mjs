@@ -51,6 +51,8 @@ export function loadConfig() {
       }),
       requestTimeoutMs:
         integer("TELEFIRE_AI_REQUEST_TIMEOUT", 90, { max: 3_600 }) * 1_000,
+      memoryUrl:
+        process.env.TELEFIRE_HINDSIGHT_URL?.trim().replace(/\/$/, "") || null,
       workspaceDir: join(dataDir, "workspace"),
       sessionDir: join(dataDir, "sessions"),
       agentDir: join(dataDir, "agent"),

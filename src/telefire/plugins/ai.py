@@ -16,11 +16,20 @@ from telefire.ai import (
     AIStateRepository,
     PiAgentGateway,
     PromptBuilder,
+    TelegramEditLimiter,
     TelegramMessageIdentityResolver,
+    TelegramMessageMentionResolver,
     select_telegram_response_format,
 )
 from telefire.ai_attachments import TelegramAttachmentDescriber
-from telefire.ai_memory import HTTPMemoryClient
+from telefire.ai_dream import (
+    DreamScheduler,
+    DreamSchedulerSettings,
+    DreamSettings,
+    TelegramDreamScanner,
+    TelegramHistorySource,
+)
+from telefire.ai_memory import HindsightMemoryClient
 from telefire.plugins.base import PluginMount
 from telefire.telegram import TelegramCommand
 
@@ -114,6 +123,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
     command_name = "ai"
     MEMORY_STORED_REACTION = "✍"
     MEMORY_FAILED_REACTION = "👎"
+    MEMORY_PROCESSING_REPLY = "Remembering..."
+    MEMORY_STORED_REPLY = "Remembered."
     MEMORY_FAILED_REPLY = "Memory update failed. Forward the message again to retry."
     MEMORY_LINK_FAILED_REPLY = (
         "Memory update failed. Send the message link again to retry."
@@ -136,6 +147,10 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         super().__init__(account=account, session=session, log_level=log_level)
         settings = AISettings.from_env()
         self._settings = settings
+        self._edit_limiter = TelegramEditLimiter(
+            settings.edit_cadence,
+            logger=self.logger,
+        )
         self._gateway = PiAgentGateway(
             settings.agent_url,
             token=settings.agent_token,
@@ -144,11 +159,15 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         self._responder: AIResponder | None = None
         self._store = AIStateRepository(settings.state_path)
         self._memory = (
-            HTTPMemoryClient(settings.memory_url, timeout=settings.memory_timeout)
-            if settings.memory_url
+            HindsightMemoryClient(
+                settings.hindsight_url,
+                timeout=settings.hindsight_timeout,
+            )
+            if settings.hindsight_url
             else None
         )
         self._handler: AIConversationHandler | None = None
+        self._dream_scheduler: DreamScheduler | None = None
         self._owner_id: int | None = None
         self._saved_memory_lock = asyncio.Lock()
 
@@ -165,6 +184,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             await self._setup()
             await self.service.wait_until_disconnected()
         finally:
+            if self._dream_scheduler is not None:
+                await self._dream_scheduler.close()
             if self._memory is not None:
                 await self._memory.close()
             await self._gateway.close()
@@ -180,39 +201,65 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         )
         responder = AIResponder(
             self._gateway,
-            edit_cadence=self._settings.edit_cadence,
             max_output_chars=self._settings.max_output_chars,
             response_format=response_format,
+            edit_limiter=self._edit_limiter,
             logger=self.logger,
         )
         self._responder = responder
         await self._store.connect()
+        prompt_builder = PromptBuilder(
+            system_prompt=self._settings.system_prompt,
+            max_context_messages=self._settings.max_context_messages,
+            max_context_chars=self._settings.max_context_chars,
+            response_format=response_format,
+            attachment_describer=TelegramAttachmentDescriber(
+                self._gateway,
+                logger=self.logger,
+            ),
+            identity_resolver=TelegramMessageIdentityResolver(
+                logger=self.logger,
+            ),
+            mention_resolver=TelegramMessageMentionResolver(
+                self.client,
+                logger=self.logger,
+            ),
+        )
+        dream_runner = (
+            TelegramDreamScanner(
+                source=TelegramHistorySource(self.client),
+                store=self._store,
+                memory=self._memory,
+                prompt_builder=prompt_builder,
+                settings=DreamSettings.from_env(),
+                logger=self.logger,
+            )
+            if self._memory is not None
+            else None
+        )
+        if dream_runner is not None:
+            self._dream_scheduler = DreamScheduler(
+                scanner=dream_runner,
+                store=self._store,
+                settings=DreamSchedulerSettings.from_env(),
+                logger=self.logger,
+            )
         self._handler = AIConversationHandler(
             owner_id=owner.id,
             responder=responder,
             store=self._store,
-            prompt_builder=PromptBuilder(
-                system_prompt=self._settings.system_prompt,
-                max_context_messages=self._settings.max_context_messages,
-                max_context_chars=self._settings.max_context_chars,
-                response_format=response_format,
-                attachment_describer=TelegramAttachmentDescriber(
-                    self._gateway,
-                    logger=self.logger,
-                ),
-                identity_resolver=TelegramMessageIdentityResolver(
-                    logger=self.logger,
-                ),
-            ),
+            prompt_builder=prompt_builder,
             rate_limiter=AIRateLimiter(
                 self._store,
                 cooldown_seconds=self._settings.delegated_cooldown,
             ),
             memory=self._memory,
+            dream_runner=dream_runner,
             logger=self.logger,
-            allowed_chat_ids=self._settings.allowed_chat_ids,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())
+        if self._dream_scheduler is not None:
+            self._dream_scheduler.start()
         self.logger.info("Telegram AI userbot started")
 
     async def _on_message(self, event) -> None:
@@ -242,6 +289,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
 
         assert self._owner_id is not None
         async with self._saved_memory_lock:
+            status_message = None
             try:
                 if await self._store.is_memory_forward_processed(
                     owner_id=self._owner_id,
@@ -253,6 +301,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     )
                     return True
 
+                status_message = await self._start_saved_memory_status(message)
                 if link is not None:
                     source, source_chat_id = await self._resolve_memory_link(link)
                     source_message_id = link.message_id
@@ -302,7 +351,11 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     reply = self.MEMORY_LINK_FAILED_REPLY
                 else:
                     reply = self.MEMORY_FAILED_REPLY
-                await self._reply_saved_memory_failure(message, reply)
+                await self._finish_saved_memory_status(
+                    message,
+                    status_message,
+                    reply,
+                )
                 return True
 
             self.logger.info(
@@ -315,6 +368,11 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             await self._set_saved_memory_reaction(
                 message,
                 self.MEMORY_STORED_REACTION,
+            )
+            await self._finish_saved_memory_status(
+                message,
+                status_message,
+                self.MEMORY_STORED_REPLY,
             )
             return True
 
@@ -401,12 +459,45 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             )
         return False
 
-    async def _reply_saved_memory_failure(self, message, reply: str) -> None:
+    async def _start_saved_memory_status(self, message):
+        try:
+            return await message.reply(self.MEMORY_PROCESSING_REPLY, parse_mode=None)
+        except Exception as exc:
+            self.logger.warning(
+                "Saved Messages memory processing reply failed "
+                "(saved_message_id=%s, error=%s): %s",
+                message.id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+
+    async def _finish_saved_memory_status(
+        self,
+        message,
+        status_message,
+        reply: str,
+    ) -> None:
+        if status_message is not None:
+            try:
+                if await self._edit_limiter.run(
+                    lambda: status_message.edit(reply, parse_mode=None),
+                    wait=True,
+                ):
+                    return
+            except Exception as exc:
+                self.logger.warning(
+                    "Saved Messages memory status edit failed "
+                    "(saved_message_id=%s, error=%s): %s",
+                    message.id,
+                    type(exc).__name__,
+                    exc,
+                )
         try:
             await message.reply(reply, parse_mode=None)
         except Exception as exc:
             self.logger.warning(
-                "Saved Messages memory failure reply failed "
+                "Saved Messages memory final reply failed "
                 "(saved_message_id=%s, error=%s): %s",
                 message.id,
                 type(exc).__name__,

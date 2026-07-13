@@ -290,6 +290,18 @@ wheels = [
 ]
 
 [[package]]
+name = "croniter"
+version = "6.2.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/37/57/2e2a65aee2a70483cb28e2b7e15a072d00a523207593b44400d4717bb100/croniter-6.2.4.tar.gz", hash = "sha256:fc124f751b1b04805c2a04b061898b436b45ab2320b045e1e052ea895de65189", size = 166267, upload-time = "2026-07-10T09:52:59.955Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/ba/d678e5bd329646ca51d3c92addbc77804e86d21f4b6b6a027218e6abb010/croniter-6.2.4-py3-none-any.whl", hash = "sha256:8ef3d544107a5c05a150a2d78f8bf5a8eb9c5c4d93405a736b824109574e3f4d", size = 46677, upload-time = "2026-07-10T09:52:58.425Z" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -911,6 +923,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "aiosqlite" },
+    { name = "croniter" },
     { name = "fire" },
     { name = "idna" },
     { name = "loguru" },
@@ -921,7 +934,6 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "telethon" },
     { name = "urllib3" },
-    { name = "zvec" },
 ]
 
 [package.optional-dependencies]
@@ -934,6 +946,9 @@ e2ee = [
     { name = "pycryptodome" },
     { name = "python-olm" },
     { name = "unpaddedbase64" },
+]
+legacy-migration = [
+    { name = "zvec" },
 ]
 
 [package.dev-dependencies]
@@ -948,6 +963,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "asyncpg", marker = "extra == 'e2ee'", specifier = ">=0.30.0" },
     { name = "base58", marker = "extra == 'e2ee'", specifier = ">=2.1.1" },
+    { name = "croniter", specifier = ">=6.0.0,<7" },
     { name = "fire", specifier = ">=0.5.0" },
     { name = "g4f", marker = "extra == 'ai'", specifier = ">=0.3.8" },
     { name = "idna", specifier = ">=3.15" },
@@ -962,9 +978,9 @@ requires-dist = [
     { name = "telethon", specifier = ">=1.44.0" },
     { name = "unpaddedbase64", marker = "extra == 'e2ee'", specifier = ">=2.1.0" },
     { name = "urllib3", specifier = ">=2.7.0" },
-    { name = "zvec", specifier = ">=0.5.1,<0.6" },
+    { name = "zvec", marker = "extra == 'legacy-migration'", specifier = ">=0.5.1,<0.6" },
 ]
-provides-extras = ["ai", "e2ee"]
+provides-extras = ["ai", "e2ee", "legacy-migration"]
 
 [package.metadata.requires-dev]
 dev = [

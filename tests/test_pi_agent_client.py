@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 from aiohttp import web
 
-from telefire.ai import AgentContext, AgentRunRequest, PiAgentGateway
+from telefire.ai import (
+    AgentContext,
+    AgentMemoryAccess,
+    AgentMemoryReference,
+    AgentRunRequest,
+    PiAgentGateway,
+)
 from telefire.ai_attachments import AttachmentAnalysisRequest
 
 
@@ -26,6 +32,16 @@ def run_request() -> AgentRunRequest:
         context=(AgentContext(kind="memory", text="Prefers concise answers"),),
         system_prompt="Answer directly.",
         tool_policy="delegated",
+        memory_access=AgentMemoryAccess(
+            scope_id="telegram:chat:-1001",
+            references=(
+                AgentMemoryReference(
+                    memory_id="memory-1",
+                    document_id="telegram:thread:-1001:41",
+                    chunk_id="chunk-1",
+                ),
+            ),
+        ),
     )
 
 
@@ -73,6 +89,16 @@ async def test_pi_gateway_streams_validated_ndjson_events() -> None:
         "context": [{"kind": "memory", "text": "Prefers concise answers"}],
         "systemPrompt": "Answer directly.",
         "toolPolicy": "delegated",
+        "memoryAccess": {
+            "bankId": "telegram:chat:-1001",
+            "references": [
+                {
+                    "memoryId": "memory-1",
+                    "documentId": "telegram:thread:-1001:41",
+                    "chunkId": "chunk-1",
+                }
+            ],
+        },
     }
     assert [event.type for event in events] == [
         "run_started",

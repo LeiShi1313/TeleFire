@@ -189,14 +189,20 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 
 Copy the settings from `.env.example` into a private `.env` and configure an
 OpenAI-compatible chat provider. Pi uses that provider for Agent Runs; the
-memory service uses it for extraction. The embedding model and dimension define
-one fixed vector space; changing either requires rebuilding the memory store.
+Hindsight service uses it for memory extraction and reflection. The embedding
+model and dimension define one fixed vector space; changing either requires an
+explicit re-ingestion and re-embedding operation.
 `TELEFIRE_AI_REASONING_EFFORT` is optional and accepts `none`, `minimal`, `low`,
 `medium`, `high`, `xhigh`, or `max` when supported by the selected chat model.
+`TELEFIRE_AI_EDIT_CADENCE` is the account-wide minimum interval between Telegram
+message edits and defaults to 4 seconds. Intermediate stream updates are skipped
+when the edit slot is busy; final answers wait for the next slot.
 
-For a host-only development run, start the Pi Agent Engine first:
+For a host-only development run, start Hindsight through Compose, then the Pi
+Agent Engine:
 
 ```bash
+docker compose up -d hindsight
 cd agent
 npm ci
 set -a
@@ -205,18 +211,19 @@ set +a
 npm start
 ```
 
-It binds to `127.0.0.1:8790` when `TELEFIRE_PI_HOST=127.0.0.1` is set. Then
-start the standalone memory service from the repository root:
+It binds to `127.0.0.1:8790` when `TELEFIRE_PI_HOST=127.0.0.1` is set. The
+read-only operational dashboard can be started separately from the repository
+root:
 
 ```bash
 set -a
 source .env
 set +a
-uv run telefire-memory
+uv run telefire-memory-dashboard
 ```
 
-It binds to `127.0.0.1:8765` by default. In another terminal, start the
-Telegram userbot:
+It binds to `127.0.0.1:8765` by default. In another terminal, start the Telegram
+userbot:
 
 ```bash
 uv run telefire telegram ai
@@ -224,16 +231,18 @@ uv run telefire telegram ai
 
 ### Docker compose
 
-Build and run all three services (Pi Agent Engine, memory service, and Telegram
-AI userbot):
+Build and run Hindsight, Pi, the read-only dashboard, and the Telegram AI
+userbot:
 
 ```bash
 docker compose up -d
 ```
 
-The stack uses `pi` as the isolated Agent Engine, `memory` as the vector-memory
-service, and `ai` as the long-running userbot. The userbot container has no model
-API key, while the Pi container has no Telegram, Matrix, or memory credentials.
+The stack uses `hindsight` as the sole memory engine, `pi` as the Agent Engine,
+`memory-dashboard` as a read-only inspection surface, and `ai` as the long-running
+userbot. The userbot container has no model API key. Pi receives only a host-pinned
+bank and bounded references for each run; memory tools cannot select another bank
+or write memory.
 
 Pi health is published on loopback at
 `http://127.0.0.1:${TELEFIRE_PI_EXPOSE_PORT:-18790}/health`. Its run API is an
@@ -241,13 +250,14 @@ authenticated internal Telefire interface rather than a public
 OpenAI-compatible endpoint. Set one private `TELEFIRE_PI_TOKEN` value in
 `.env`; Compose supplies it only to the Pi and AI containers.
 
-The memory service also exposes a read-only dashboard at
-`http://127.0.0.1:${TELEFIRE_MEMORY_EXPOSE_PORT:-8765}/admin`. The published
-port is bound to loopback because the dashboard contains private chat-derived
-profiles, observations, facts, and episodes.
+The Telefire dashboard is available at
+`http://127.0.0.1:${TELEFIRE_MEMORY_DASHBOARD_EXPOSE_PORT:-18866}/admin` and the
+native Hindsight UI at
+`http://127.0.0.1:${TELEFIRE_HINDSIGHT_UI_EXPOSE_PORT:-19999}`. Both published
+ports bind to loopback because they contain private chat-derived evidence.
 
 `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` must be set in `.env` (or provided via
-host config). Pi and memory provider variables come from the same file.
+host config). Pi and Hindsight provider variables come from the same file.
 
 A Telegram API login/session still needs to be initialized once:
 
@@ -261,19 +271,22 @@ Then restart the AI service:
 docker compose restart ai
 ```
 
-If you run Ollama locally or via a separate container, set embedding settings in `.env`:
+The standalone Ollama Compose stack joins the external `ollama-embedding` network.
+Point Hindsight at that service in `.env`:
 
 ```bash
-TELEFIRE_AI_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1
+TELEFIRE_AI_EMBEDDING_BASE_URL=http://ollama-embedding-ollama-1:11434/v1
 TELEFIRE_AI_EMBEDDING_API_KEY=ollama
 ```
 
-In Docker, `http://127.0.0.1:11434` is the memory container itself, so it must be
-remapped to a host-reachable address.
+For a host Ollama process instead, use
+`TELEFIRE_AI_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1`.
+Compose maps that hostname to the Linux host gateway. In Docker,
+`http://127.0.0.1:11434` is the Hindsight container itself and must not be used.
 
 Configuration is loaded from `.env` in the repository root. `telefire-runtime`
-contains `ai.db`, the memory index, and Telegram sessions. Pi transcripts and its
-owner workspace are kept separately in `telefire-pi-runtime`.
+contains `ai.db` and Telegram sessions, `telefire-hindsight` contains memory, and
+Pi's private Agent Sessions live in `telefire-pi-runtime`.
 
 Commands and reply behavior:
 
@@ -289,15 +302,17 @@ Commands and reply behavior:
   the `/ai` message itself is also supported; attachment-only requests use
   `Describe the attached content.` as their instruction.
 - Reply to a user's message with `/ai_allow` or `/ai_deny` to manage delegated
-  access. The owner is always allowed. The owner's command message is deleted
-  after handling, while the acknowledgement remains visible.
+  access. The owner is always allowed. A successfully executed owner command is
+  deleted while its acknowledgement remains visible; usage and execution failures
+  stay visible for inspection and retry.
 - Reply in a thread with `/ai_memory` to ingest the bounded human reply chain,
-  attributing each message to its author. The owner's bare command message is
-  deleted after handling, while the result acknowledgement remains visible. Add
+  attributing each message to its author. A successful owner's bare command is
+  deleted while the result acknowledgement remains visible; failed commands remain
+  available for retry. Add
   an instruction, such as `/ai_memory Correct their employer to Acme`, to ingest
-  the chain and revise only the directly replied user's profile using that chain
-  as evidence. AI-generated answers and AI control commands are not ingested as
-  human memory.
+  the chain, retain a separate owner-attributed correction Episode, and apply a
+  reversible Hindsight-native Revision to the directly replied user. AI-generated
+  answers and AI control commands are not retained as human evidence.
 - Forward a message to the userbot account's Saved Messages to ingest the original
   message and its bounded ancestor reply chain without posting a command in the
   source chat. When Telegram hides the forward source, paste the original public
@@ -305,22 +320,41 @@ Commands and reply behavior:
   Telefire resolves the linked message with the authenticated account and ingests
   the same bounded chain. Forum message links are supported, while channel-comment
   links with `?comment=` are ignored in v1. Forwarded copies and pasted links remain
-  in Saved Messages. Premium accounts get a best-effort `✍` success or `👎` failure
-  tag, while non-Premium success stays silent. Failures always receive a private
-  reply with a source-access or retry instruction. Telegram-delivery duplicates
-  are suppressed, while forwarding or pasting the source again intentionally
-  retries ingestion. Other directly typed Saved Messages are not memory requests.
+  in Saved Messages. Telefire replies with `Remembering...` while ingestion runs,
+  then edits that reply to `Remembered.` or an actionable error. Premium accounts
+  also get a best-effort `✍` success or `👎` failure tag. Telegram-delivery
+  duplicates are suppressed, while forwarding or pasting the source again
+  intentionally retries ingestion. Other directly typed Saved Messages are not
+  memory requests.
 - `/ai_cancel` cancels the requester's active Agent Run.
+- `/ai_memory_enable` opts the current chat into automatic memory capture after
+  successful AI requests. `/ai_memory_disable` stops future automatic capture,
+  `/ai_memory_dream` runs one bounded scan immediately, and `/ai_memory_status`
+  reports enablement plus the latest Dream attempt, success, and failure. Recall and one-shot
+  `/ai_memory` remain available while automatic capture is disabled.
+- Enabled chats are scanned on `TELEFIRE_MEMORY_DREAM_CRON` (hourly by default).
+  Lookback, overlap, settlement delay, concurrency, transport batch size, and
+  bounded retry settings use the `TELEFIRE_MEMORY_DREAM_*` variables documented
+  in `.env.example`. Set the cron value to `off` to disable scheduled scans while
+  retaining manual Dream and post-`/ai` capture.
+- `/ai_memory_dream` manually scans the configured settled time window for an
+  enabled chat. Standalone messages become one-message Episodes; replies are
+  grouped by their bounded root. The fixed scan watermark advances only after all
+  document updates are accepted. A window or thread over its configured bound fails
+  without advancing, so the owner can narrow the lookback or raise the bound safely.
 
 Unauthorized users are ignored. Delegated users get one request in flight and
-a 30-second cooldown by default. `TELEFIRE_AI_ALLOWED_CHAT_IDS` can contain a
-comma-separated numeric chat allowlist for restricted deployments.
+a 30-second cooldown by default. AI invocation is controlled by the owner and
+per-user whitelist; there is no chat-level AI gate.
 
-Every authorized request can use constrained `web_search`, `fetch_content`, and
-QuickJS `code_exec`. Delegated code has no host filesystem, environment, shell,
-process, or network APIs. Owner requests may additionally use Pi's persistent
-workspace and full read, write, edit, search, and shell tools. Tool calls execute
-automatically; transient tool snapshots are replaced when the final answer begins.
+Every authorized request uses the same constrained `web_search`, `fetch_content`,
+and QuickJS `code_exec` policy. Code has no host filesystem, environment, shell,
+process, or network APIs, and fetched URLs cannot resolve to loopback, private, or
+container-internal addresses. Tool calls execute automatically; transient tool
+snapshots are replaced when the final answer begins.
+When initial recall is insufficient, both owner and delegated runs may use one
+bank-pinned `memory_reflect` call and bounded `memory_get_sources` calls for IDs
+already returned in that run. These tools are read-only and use fixed host budgets.
 
 Attachment analysis is bounded to the current attachment plus three attachments
 from the reply chain. Files over 5 MiB are not downloaded. Images are normalized
@@ -331,17 +365,79 @@ download URLs, and temporary paths are never written to Pi sessions, AI state, o
 memory. Only bounded generated descriptions, OCR text, captions, and safe metadata
 can enter conversation context and per-user memory.
 
-AI conversation-to-Pi mappings, access state, cooldown timestamps, and processed
-Saved Messages memory-request receipts are stored in `~/.telefire/ai.db`. Zvec
-observations, facts, episodes, and profiles are stored under
-`~/.telefire/memory/`. Optional canonical-key-to-display-name labels resolved from
-Telegram are stored separately beside the memory index and shown in the read-only
-dashboard; subject and scope keys remain unchanged. Pi's append-only Agent Sessions
-are stored in its own data volume. All three locations contain private chat-derived
-data.
+AI conversation-to-Pi mappings, access state, cooldown timestamps, capture labels,
+Dream state, and ingestion receipts are stored in `~/.telefire/ai.db`. Facts,
+observations, entities, source Episodes, and relationships live only in Hindsight.
+Pi's append-only Agent Sessions are stored in its own data volume. All locations
+contain private chat-derived data.
+
+Back up the three active volumes while their writers are stopped, or through a
+storage-aware snapshot mechanism:
+
+```bash
+docker compose stop ai pi hindsight memory-dashboard
+docker run --rm -v telefire_telefire-runtime:/source:ro \
+  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-runtime.tgz .
+docker run --rm -v telefire_telefire-pi-runtime:/source:ro \
+  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-pi-runtime.tgz .
+docker run --rm -v telefire_telefire-hindsight:/source:ro \
+  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-hindsight.tgz .
+docker compose up -d
+```
+
+Restore into empty volumes while the stack is stopped, then recreate the stack and
+check all four health endpoints before enabling Dream again. Accepted Episodes,
+receipts, cursors, and expired leases are restart-safe; an interrupted retain or
+Dream batch is retried from its stable document identity rather than rolled back.
+Do not restore `ai.db` or Hindsight independently from backups taken at unrelated
+times unless duplicate delivery is acceptable.
+
+The retired Zvec source is preserved in the offline Docker volume
+`telefire-legacy-zvec` for 30 days after cutover and is not mounted by the running
+stack. The archive is intentionally managed outside Compose so recreation cannot
+attach it to a runtime service. Create and verify that archive once, replacing
+`<legacy-zvec-volume>` with the pre-cutover source volume:
+
+```bash
+docker volume create telefire-legacy-zvec
+docker run --rm \
+  -v <legacy-zvec-volume>:/source:ro \
+  -v telefire-legacy-zvec:/archive \
+  alpine sh -c 'cp -a /source/. /archive/'
+docker run --rm -v telefire-legacy-zvec:/archive:ro \
+  alpine sh -c 'test -n "$(find /archive -mindepth 1 -print -quit)"'
+docker inspect telefire-ai telefire-pi telefire-hindsight \
+  telefire-memory-dashboard --format '{{range .Mounts}}{{.Name}} {{end}}'
+```
+
+The final inspection must not print `telefire-legacy-zvec`. A dry run or explicit
+migration from an archived source uses:
+
+```bash
+uv run --extra legacy-migration telefire-memory-migrate \
+  --source /path/to/legacy-memory
+```
+
+Add `--execute --hindsight-url http://127.0.0.1:18888` only after reviewing the
+report. The migration imports source Observations and labels, not derived facts,
+profiles, scores, or vectors. Recoverable legacy suppressions become marked
+correction Episodes and are applied through reversible Hindsight invalidation.
+Every rerun verifies destination document content, so restoring or replacing the
+Hindsight volume cannot be masked by surviving local receipts. Stores above 100,000
+legacy records fail explicitly instead of producing a partial migration.
+
+First-version limits: banks never search one another automatically; identity is not
+merged across chats or platforms; Dream scans only Telegram and only a bounded
+window; deleted Telegram messages do not retract retained evidence; raw media is not
+stored; revisions preserve source history; and no hard-delete, dashboard editing,
+high-availability database, or disaster-recovery automation is provided.
+
+The loopback Hindsight API and inspection UIs trust other processes on the local
+host. They are not authenticated public services and must remain bound to loopback
+or be accessed through a trusted local tunnel.
 
 If the userbot replies with `AI request failed`, inspect bounded service logs with
-`docker compose logs ai pi memory`. Responses and health checks do not expose API
+`docker compose logs ai pi hindsight memory-dashboard`. Responses and health checks do not expose API
 keys or raw provider payloads.
 
 Matrix examples:

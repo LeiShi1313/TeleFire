@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 import pytest
+from telethon.errors import FloodWaitError
 from telethon.tl import functions as telegram_functions
 from telethon.tl import types as telegram_types
 
@@ -173,6 +174,7 @@ def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatc
     assert settings.max_output_chars == 1234
     assert settings.edit_cadence == 0.25
     assert settings.request_timeout == 12
+    assert settings.hindsight_timeout == 90
 
 
 def test_ai_command_is_registered_under_telegram():
@@ -198,6 +200,67 @@ async def test_owner_gets_one_progressively_edited_answer():
     assert gateway.requests[0].prompt == "greet me"
     assert gateway.requests[0].system_prompt == PromptBuilder().system_prompt
     assert gateway.requests[0].tool_policy == "owner"
+
+
+@pytest.mark.asyncio
+async def test_edit_cadence_is_shared_across_answers(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
+    gateway = FakeGateway(["answer"])
+    responder = AIResponder(gateway, edit_cadence=4, clock=lambda: 0.0)
+    first = FakeMessage("/ai first")
+    second = FakeMessage("/ai second")
+
+    await responder.answer(first, make_request("first"))
+    await responder.answer(second, make_request("second"))
+
+    assert first.replies[0].text == "answer"
+    assert second.replies[0].text == "answer"
+    assert sleeps == [4]
+
+
+@pytest.mark.asyncio
+async def test_flood_wait_delays_final_edit_without_replacing_the_answer(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    class FloodOnceAnswer(FakeAnswer):
+        def __init__(self, text):
+            super().__init__(text)
+            self.attempts = 0
+
+        async def edit(self, text: str, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise FloodWaitError(request=None, capture=7)
+            return await super().edit(text, **kwargs)
+
+    class FloodOnceMessage(FakeMessage):
+        async def reply(self, text: str, **kwargs):
+            answer = FloodOnceAnswer(text)
+            self.replies.append(answer)
+            return answer
+
+    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
+    responder = AIResponder(
+        FakeGateway(["final answer"]),
+        edit_cadence=0,
+        clock=lambda: 0.0,
+    )
+    trigger = FloodOnceMessage("/ai answer")
+
+    result = await responder.answer(trigger, make_request("answer"))
+
+    assert result.succeeded is True
+    assert result.text == "final answer"
+    assert trigger.replies[0].text == "final answer"
+    assert sleeps == [7]
 
 
 def test_prompt_builder_appends_the_regular_telegram_format_guard():
@@ -350,21 +413,20 @@ async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
 
 
 @pytest.mark.asyncio
-async def test_runtime_chat_allowlist_blocks_events_outside_e2e_chat():
-    gateway = FakeGateway(["must not be used"])
+async def test_owner_ai_requests_are_not_blocked_by_chat_scope():
+    gateway = FakeGateway(["answer"])
     handler = AIConversationHandler(
         owner_id=10,
         responder=AIResponder(gateway, edit_cadence=0),
         store=FakeStore(),
         prompt_builder=PromptBuilder(),
-        allowed_chat_ids=frozenset({-1001}),
     )
     trigger = FakeMessage("/ai secret")
     trigger.chat_id = -1002
 
-    assert await handler.handle(trigger) is False
-    assert trigger.replies == []
-    assert gateway.requests == []
+    assert await handler.handle(trigger) is True
+    assert trigger.replies[0].text == "answer"
+    assert len(gateway.requests) == 1
 
 
 @pytest.mark.asyncio

@@ -5,8 +5,11 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_ATTACHMENT_BODY_BYTES = 3 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_TEXT_CHARS = 50_000;
+const MAX_MEMORY_REFERENCES = 50;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const BANK_ID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
+const DOCUMENT_ID_RE = /^[A-Za-z0-9:_.-]{1,512}$/;
 const MIME_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -71,6 +74,48 @@ export function validateRunRequest(value) {
     }
     context.push({ kind: item.kind, text: item.text });
   }
+  let memoryAccess;
+  if (value.memoryAccess !== undefined) {
+    const supplied = value.memoryAccess;
+    if (
+      !supplied ||
+      typeof supplied !== "object" ||
+      Array.isArray(supplied) ||
+      !BANK_ID_RE.test(supplied.bankId ?? "") ||
+      !Array.isArray(supplied.references) ||
+      supplied.references.length > MAX_MEMORY_REFERENCES
+    ) {
+      return null;
+    }
+    const references = [];
+    const seen = new Set();
+    for (const reference of supplied.references) {
+      if (
+        !reference ||
+        typeof reference !== "object" ||
+        Array.isArray(reference) ||
+        !IDENTIFIER_RE.test(reference.memoryId ?? "") ||
+        !(
+          reference.documentId === null ||
+          DOCUMENT_ID_RE.test(reference.documentId ?? "")
+        ) ||
+        !(
+          reference.chunkId === null ||
+          DOCUMENT_ID_RE.test(reference.chunkId ?? "")
+        ) ||
+        seen.has(reference.memoryId)
+      ) {
+        return null;
+      }
+      seen.add(reference.memoryId);
+      references.push({
+        memoryId: reference.memoryId,
+        documentId: reference.documentId,
+        chunkId: reference.chunkId,
+      });
+    }
+    memoryAccess = { bankId: supplied.bankId, references };
+  }
   return {
     runId: value.runId,
     sessionId,
@@ -79,6 +124,7 @@ export function validateRunRequest(value) {
     context,
     systemPrompt: value.systemPrompt,
     toolPolicy: value.toolPolicy,
+    ...(memoryAccess ? { memoryAccess } : {}),
   };
 }
 

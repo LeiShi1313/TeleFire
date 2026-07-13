@@ -45,8 +45,20 @@ A message from the owner or a whitelisted user that replies directly to an AI an
 _Avoid_: Follow-up command, implicit trigger
 
 **Context Participant**:
-A Telegram user represented by a message in the reply context or AI conversation. Their authored messages may be ingested into their own user memory, but their stored memory is not automatically supplied when another participant makes a request.
+A human author represented by a message in the reply context of an initial AI request. Their stored memory may be supplied as labeled background for that request, and their authored contribution may be ingested into their own user memory after a successful answer. AI answers are not context participants, and a continuation message does not necessarily reselect participants from earlier agent-session history.
 _Avoid_: Thread member, chat member
+
+**Explicit Subject Reference**:
+An unambiguous, platform-resolved reference to a memory subject, such as a Telegram mention linked to a user account. The referenced subject may be selected for memory retrieval even when they did not author a message in the reply context. Plain display-name text is not an explicit subject reference.
+_Avoid_: Name match, inferred mention
+
+**Memory Subject Discovery**:
+The process of resolving a person reference to a canonical memory subject before retrieving that subject's memory context. Discovery may use an explicit subject reference directly or search memory evidence within the current scope for a previously established natural-language reference. Dynamic discovery does not fall back automatically to other scopes. Discovery identifies a subject; it does not by itself return that subject's full memory context.
+_Avoid_: Memory retrieval, alias lookup
+
+**Fact Attribution**:
+The association between a derived fact and the canonical memory subject that the fact describes. It is distinct from observation authorship: a person may assert a fact about another deterministically referenced subject while remaining the author of the source observation.
+_Avoid_: Message author, source attribution
 
 **Initial Prompt**:
 The text following `/ai` in a trigger message. It is the primary instruction for the first AI request in an AI conversation.
@@ -73,55 +85,75 @@ A message beginning with `/ai` that opens an AI conversation. It may stand alone
 _Avoid_: Command message
 
 **User Memory**:
-Persisted background associated with one memory subject, composed of a subject profile and scoped memories. In v1 it may be supplied when that subject makes an AI request, not merely because the subject appears in another person's reply context.
-_Avoid_: Memory file, chat history
-
-**Subject Profile**:
-Explicitly revised facts about a memory subject that are safe to reuse across scopes where that subject participates. It is stored as one Markdown-text record in Zvec, not as a separately synchronized file. Observations do not promote scoped memory into the subject profile automatically.
-_Avoid_: Global memory, contact profile
+The scoped view of facts, experiences, and observations associated with a person entity. It is a retrieval view over contextual memory, not a separately owned record collection and not an automatic cross-scope profile.
+_Avoid_: User database, global profile
 
 **Chat Memory**:
-Facts and episodes learned about one memory subject within a chat scope. It is reusable only within that same chat.
-_Avoid_: Local profile, conversation history
+The complete Hindsight bank for one chat scope, including source episodes and chunks, facts, experiences, entities, relationships, observations, and revisions. It belongs to the chat scope rather than to any one participant.
+_Avoid_: User profile, transcript
 
 **Fact**:
-A relatively stable statement about a memory subject extracted from observations and retained within a memory scope. A fact is not a timestamped occurrence and is not promoted automatically into the subject profile.
-_Avoid_: Profile fact, episode
+An extracted memory unit connected to its source evidence, time, and relevant entities. A fact may represent a self-report, decision, verified state, or attributed third-party claim; the term does not guarantee objective truth.
+_Avoid_: Ground truth, profile field
 
 **Episode**:
-A timestamped memory of something a memory subject said, asked, or did within a scope. It records an occurrence rather than a stable profile fact; platform-specific provenance may be retained when available but is not required.
-_Avoid_: Fact, history item, event
+An immutable, ordered evidence bundle submitted to one memory scope. It may contain multiple messages, actors, replies, quotations, explicit references, attachment descriptions, event times, and optional source references; it is the provenance for extracted memory rather than an author-owned fact.
+_Avoid_: Single-user observation, profile update
+
+**Memory Entity**:
+A person, project, organization, place, object, event, concept, or scoped shared term connected to memory. Integrations provide canonical IDs for deterministically known entities; inferred names and aliases remain scoped and unresolved until evidence supports a connection.
+_Avoid_: Telegram user, subject row
 
 **Memory Subject**:
-A person or other entity that user memory describes. Callers identify a subject with a namespaced key rather than a platform-specific user type.
-_Avoid_: Telegram user, account
+A memory entity used as the focus of a particular recall or correction operation. Being the subject of a fact is distinct from authoring its source episode and does not make that entity the owner of the memory.
+_Avoid_: Message author, memory owner
 
 **Memory Scope**:
-A context within which scoped memory may be reused, such as a chat, workspace, project, or conversation. Facts and episodes from a scope are never retrieved outside it unless a memory client requests that scope explicitly.
-_Avoid_: Chat ID, namespace
+A chat, workspace, project, or equivalent trust boundary mapped to exactly one Hindsight bank. Trusted application code selects it before agent execution; the model cannot broaden it, and another scope is never searched implicitly.
+_Avoid_: Relevance filter, model-selected namespace
+
+**Memory-Enabled Scope**:
+A memory scope explicitly configured for automatic capture. In Telefire this permits successful AI reply threads and scheduled dream scans to ingest chat evidence; it is independent from who may invoke `/ai`, and an explicit `/ai_memory` does not enable the scope automatically.
+_Avoid_: AI allowed chat, whitelisted chat
 
 **Observation**:
-Timestamped content authored by one memory subject and offered within one memory scope as potential material for facts or episodes. Each ingestion supplies one subject, one scope, and one text payload. The memory module retains the text under its own generated identifier for auditing, exact-retry detection, and re-extraction; opaque origin metadata is optional and no platform-specific message identifier is required. Observations are not returned in normal memory context.
-_Avoid_: Source message, memory input
+A consolidated, revisable synthesis derived from one or more facts and their evidence. It can summarize a stable pattern or current understanding, may lag the newest facts, and must not hide newer contradictory evidence.
+_Avoid_: Source episode, unsupported profile
+
+**Memory Evidence**:
+The source episode, chunk, quotation, timestamp, and authorship metadata that support an extracted fact or observation. Evidence proves what was observed or said, not that every claim in it is true.
+_Avoid_: Citation label, ground truth
+
+**Dream Cycle**:
+A scheduled integration job that fetches a configured time window of messages from memory-enabled scopes, assigns replies to thread documents, treats non-replies as one-message roots, submits the document updates to Hindsight, and advances a durable scan cursor after successful acceptance. It is not an answer-agent reflection call; reply grouping is context enrichment rather than an ingestion requirement.
+_Avoid_: Cron recall, model dream
+
+**Ingestion Receipt**:
+Durable delivery state recording that a normalized source event or version was assigned to a Hindsight document. Receipts and scan cursors provide retry and overlap idempotency but are not a second memory store.
+_Avoid_: Memory fact, source message contract
+
+**Runtime Inference**:
+A new connection or recommendation formed while answering from recalled memory, such as matching a person's stated preference to a venue. It must be communicated with appropriate certainty and is not automatically persisted as a fact.
+_Avoid_: Remembered fact, automatic profile update
 
 **Memory Context**:
-A structured, bounded, and labeled selection of profiles, scoped facts, and episodes relevant to a request. It augments the request but is not itself the main prompt, and each memory client decides how to render it.
-_Avoid_: Memory prompt, retrieved history
+A structured, bounded, and labeled selection of scoped facts, experiences, observations, entities, and evidence relevant to a request. It augments the request but is not itself the main prompt, and each memory client decides how to render it.
+_Avoid_: Memory prompt, full graph dump
 
 **Memory Client**:
 An application that submits observations, requests memory context, or revises memory through the standalone memory module. Telefire is a memory client, not a memory subject.
 _Avoid_: User, consumer, plugin
 
 **Memory Update Command**:
-An owner-only command sent in reply to a person's message that revises that person's subject profile using the replied-to message as source context.
-_Avoid_: Profile command, remember message
+An owner-only command that ingests or revises scoped memory using a replied-to chain, forwarded source, pasted source link, or explicit instruction as evidence. It may affect any entities described by the evidence rather than only its author.
+_Avoid_: User-profile command, raw database edit
 
 **Revision**:
-An explicit natural-language request to add, correct, or stop retrieving subject-profile or scoped-memory content, optionally accompanied by evidence text. The memory module finds and applies the relevant change, so callers do not need memory record identifiers. In v1, a request to forget removes derived memory from augmentation but does not purge retained observations. Automatic ingestion does not replace an existing memory merely because new content may conflict with it.
-_Avoid_: Memory edit, update
+An explicit or evidence-backed change that supersedes, retracts, suppresses, or corrects scoped memory while preserving its history and provenance. A newer statement may change current state without erasing what was previously observed.
+_Avoid_: Hard delete, silent overwrite
 
 **Whitelisted User**:
-A non-owner Telegram user who is explicitly allowed to make AI requests under the delegated tool policy. Whitelisting does not grant the owner's shell or filesystem authority; the owner is always allowed and does not need to be whitelisted.
+A non-owner Telegram user who is explicitly allowed to make AI requests under the restricted tool policy. Owner and whitelisted runs receive the same constrained web, code, and bank-pinned memory boundaries; the owner is always allowed and does not need to be whitelisted.
 _Avoid_: Allowed user, approved user
 
 **Whitelist Command**:

@@ -277,3 +277,19 @@ async def test_nonowner_access_command_is_not_executed_or_deleted(tmp_path):
         assert await store.is_allowed(30) is False
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_access_usage_error_remains_visible(tmp_path):
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway(["must not be called"]),
+    )
+    try:
+        command = FakeMessage("/ai_allow", sender_id=10)
+
+        assert await handler.handle(command) is True
+        assert command.replies[0].text == "Usage: reply to a user with /ai_allow"
+        assert command.deleted is False
+    finally:
+        await store.close()

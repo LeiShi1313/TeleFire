@@ -188,24 +188,22 @@ test("labels background separately from the current request", () => {
   assert.match(prompt, /<current_request>\nWhat should I do\?\n<\/current_request>$/);
 });
 
-test("tool policies never give delegated runs owner tools", () => {
-  assert.deepEqual(toolNamesForPolicy("delegated"), [
+test("owner and delegated runs receive the same restricted tools", () => {
+  const genericTools = [
     "web_search",
     "fetch_content",
     "code_exec",
-  ]);
-  assert.deepEqual(toolNamesForPolicy("owner"), [
-    "read",
-    "bash",
-    "edit",
-    "write",
-    "grep",
-    "find",
-    "ls",
-    "web_search",
-    "fetch_content",
-    "code_exec",
-  ]);
+  ];
+  const toolsWithMemory = [
+    ...genericTools,
+    "memory_reflect",
+    "memory_get_sources",
+  ];
+
+  assert.deepEqual(toolNamesForPolicy("owner"), genericTools);
+  assert.deepEqual(toolNamesForPolicy("delegated"), genericTools);
+  assert.deepEqual(toolNamesForPolicy("owner", true), toolsWithMemory);
+  assert.deepEqual(toolNamesForPolicy("delegated", true), toolsWithMemory);
 });
 
 test("persists a session tree and branches from mapped entries", async () => {

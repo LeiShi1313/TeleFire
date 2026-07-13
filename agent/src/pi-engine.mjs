@@ -13,24 +13,16 @@ import { complete } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 
 import { executeJavaScript } from "./code-exec.mjs";
+import { createMemoryTools, MEMORY_TOOL_NAMES } from "./memory-tools.mjs";
 import { constrainWebTools } from "./web-tools.mjs";
 
 const PROVIDER = "telefire-openai";
-const DELEGATED_TOOLS = Object.freeze([
+const RESTRICTED_TOOLS = Object.freeze([
   "web_search",
   "fetch_content",
   "code_exec",
 ]);
-const OWNER_TOOLS = Object.freeze([
-  "read",
-  "bash",
-  "edit",
-  "write",
-  "grep",
-  "find",
-  "ls",
-  ...DELEGATED_TOOLS,
-]);
+const TOOL_POLICIES = new Set(["owner", "delegated"]);
 
 class AsyncQueue {
   #items = [];
@@ -108,10 +100,10 @@ export function buildRunPrompt({ prompt, context }) {
   return sections.join("\n\n");
 }
 
-export function toolNamesForPolicy(policy) {
-  if (policy === "owner") return [...OWNER_TOOLS];
-  if (policy === "delegated") return [...DELEGATED_TOOLS];
-  throw new Error("Unknown tool policy");
+export function toolNamesForPolicy(policy, memoryEnabled = false) {
+  if (!TOOL_POLICIES.has(policy)) throw new Error("Unknown tool policy");
+  const memoryTools = memoryEnabled ? MEMORY_TOOL_NAMES : [];
+  return [...RESTRICTED_TOOLS, ...memoryTools];
 }
 
 function createCodeTool() {
@@ -221,7 +213,8 @@ function toolStartSummary(name, args) {
     return `Fetching: ${boundedText(hosts.join(", "), 300) || "web page"}`;
   }
   if (name === "code_exec") return "Running calculation";
-  if (name === "bash") return "Running shell command";
+  if (name === "memory_reflect") return "Reasoning over chat memory";
+  if (name === "memory_get_sources") return "Checking memory sources";
   return `Using tool: ${boundedText(name, 80)}`;
 }
 
@@ -236,6 +229,8 @@ function toolEndSummary(name, result, isError) {
   }
   if (name === "web_search") return "Web search completed";
   if (name === "fetch_content") return "Web page retrieved";
+  if (name === "memory_reflect") return "Memory reflection completed";
+  if (name === "memory_get_sources") return "Memory sources retrieved";
   return `${boundedText(name, 80)} completed`;
 }
 
@@ -399,6 +394,11 @@ export class PiEngine {
       },
       { projectTrusted: false },
     );
+    const memoryTools = createMemoryTools({
+      baseUrl: this.config.memoryUrl,
+      access: request.memoryAccess,
+      timeoutMs: this.config.requestTimeoutMs,
+    });
     const { session } = await createAgentSession({
       cwd: this.config.workspaceDir,
       agentDir: this.config.agentDir,
@@ -406,8 +406,8 @@ export class PiEngine {
       modelRegistry: this.modelRegistry,
       model: this.model,
       thinkingLevel: this.thinkingLevel,
-      tools: toolNamesForPolicy(request.toolPolicy),
-      customTools: [this.codeTool],
+      tools: toolNamesForPolicy(request.toolPolicy, memoryTools.length > 0),
+      customTools: [this.codeTool, ...memoryTools],
       resourceLoader,
       sessionManager,
       settingsManager,

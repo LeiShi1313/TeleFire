@@ -1,23 +1,37 @@
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 from telethon.tl import types as telegram_types
 
 from telefire.ai import (
     AIAnswerMarker,
     AIConversationHandler,
+    AIStateRepository,
     AIRateLimiter,
     AIResponder,
     AgentEvent,
     AgentRunRequest,
     MessageIdentity,
+    MentionedUser,
+    MemoryDreamResult,
+    MemoryDreamState,
     PromptBuilder,
     TelegramMessageIdentityResolver,
+    TelegramMessageMentionResolver,
 )
 from telefire.ai_attachments import AttachmentDescription
-from telefire.ai_memory import MemoryIngestResult
+from telefire.ai_memory import (
+    HindsightMemoryClient,
+    MemoryRecall,
+    MemoryDocumentReceipt,
+    MemoryRetainResult,
+    MemoryRevisionResult,
+    RecalledMemory,
+)
 
 
 class FakeAnswer:
@@ -45,6 +59,7 @@ class FakeMessage:
         chat_id=-1001,
         date=None,
         file=None,
+        is_human=True,
     ):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
@@ -54,6 +69,7 @@ class FakeMessage:
         self.reply_to_msg_id = reply_to.id if reply_to else None
         self.date = date or datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
         self.file = file
+        self.is_human = is_human
         self._reply_to = reply_to
         self.replies = []
         self.deleted = False
@@ -92,11 +108,23 @@ class FakeGateway:
         return True
 
 
+class FailingGateway(FakeGateway):
+    async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
+        self.requests.append(request)
+        yield AgentEvent(type="run_started", session_id="session-failed")
+        yield AgentEvent(type="run_failed", code="PROVIDER_ERROR", message="failed")
+
+
 class FakeStore:
     def __init__(self, allowed=()):
         self.allowed = set(allowed)
         self.markers = {}
         self.last_request = {}
+        self.memory_documents = {}
+        self.memory_enabled = set()
+        self.memory_excluded = set()
+        self.memory_dream_state = {}
+        self.memory_labels = {}
 
     async def get_answer(self, chat_id, answer_message_id):
         return self.markers.get((chat_id, answer_message_id))
@@ -119,68 +147,129 @@ class FakeStore:
     async def set_last_request_at(self, user_id, timestamp):
         self.last_request[user_id] = timestamp
 
+    async def get_memory_document_receipt(self, scope_id, document_id):
+        return self.memory_documents.get((scope_id, document_id))
+
+    async def save_memory_document_receipt(
+        self,
+        scope_id,
+        document_id,
+        content_hash,
+        event_versions,
+    ):
+        self.memory_documents[(scope_id, document_id)] = MemoryDocumentReceipt(
+            content_hash,
+            event_versions,
+        )
+
+    async def record_memory_labels(
+        self,
+        scope_id,
+        scope_display_name,
+        actor_labels,
+    ):
+        self.memory_labels[scope_id] = {
+            "scope": scope_display_name,
+            "actors": dict(actor_labels),
+        }
+
+    async def is_memory_enabled(self, scope_id):
+        return scope_id in self.memory_enabled
+
+    async def set_memory_enabled(self, scope_id, enabled, display_name=None):
+        if enabled:
+            self.memory_enabled.add(scope_id)
+        else:
+            self.memory_enabled.discard(scope_id)
+
+    async def mark_memory_excluded_message(self, chat_id, message_id, kind):
+        self.memory_excluded.add((chat_id, message_id, kind))
+
+    async def is_memory_excluded_message(self, chat_id, message_id):
+        return any(item[:2] == (chat_id, message_id) for item in self.memory_excluded)
+
+    async def get_memory_dream_state(self, scope_id):
+        return self.memory_dream_state.get(scope_id, MemoryDreamState(scope_id))
+
+
+def recalled(text="The group selected PostgreSQL."):
+    return MemoryRecall(
+        scope_id="telegram:chat:-1001",
+        memories=(
+            RecalledMemory(
+                memory_id="memory-1",
+                text=text,
+                memory_type="world",
+                entities=("telegram:user:20",),
+                occurred_start="2026-07-10T08:00:00Z",
+                occurred_end="2026-07-10T08:00:00Z",
+                mentioned_at="2026-07-10T08:00:00Z",
+                document_id="telegram:thread:-1001:1",
+                chunk_id="chunk-1",
+            ),
+        ),
+    )
+
 
 class FakeMemory:
     def __init__(
         self,
         *,
-        augment_error=None,
-        augment_value=None,
-        ingest_error=None,
-        ingest_result=None,
+        recall_error=None,
+        recall_result=None,
+        retain_error=None,
         revise_error=None,
     ):
-        self.augment_error = augment_error
-        self.augment_value = augment_value
-        self.ingest_error = ingest_error
-        self.ingest_result = ingest_result or MemoryIngestResult(
-            created=True,
-            facts_added=1,
-            episodes_added=1,
-        )
+        self.recall_error = recall_error
+        self.recall_result = recall_result if recall_result is not None else recalled()
+        self.retain_error = retain_error
         self.revise_error = revise_error
-        self.augment_calls = []
-        self.ingest_calls = []
+        self.recall_calls = []
+        self.retain_calls = []
         self.revise_calls = []
-        self.identity_calls = []
 
-    async def augment(self, *, subject_id, query, scope_id):
-        self.augment_calls.append(
-            {"subject_id": subject_id, "query": query, "scope_id": scope_id}
-        )
-        if self.augment_error:
-            raise self.augment_error
-        if self.augment_value is not None:
-            return self.augment_value
-        return f"Profile for {subject_id}"
+    async def recall(self, *, scope_id, query):
+        self.recall_calls.append({"scope_id": scope_id, "query": query})
+        if self.recall_error:
+            raise self.recall_error
+        return self.recall_result
 
-    async def ingest(self, **payload):
-        self.ingest_calls.append(payload)
-        if self.ingest_error:
-            raise self.ingest_error
-        return self.ingest_result
+    async def retain(self, episode, *, update_mode="replace"):
+        self.retain_calls.append({"episode": episode, "update_mode": update_mode})
+        if self.retain_error:
+            raise self.retain_error
+        return MemoryRetainResult(accepted=True)
 
-    async def upsert_identities(self, identities):
-        self.identity_calls.append(identities)
-        return len(identities)
+    async def retain_many(self, episodes, *, update_mode="replace"):
+        for episode in episodes:
+            await self.retain(episode, update_mode=update_mode)
+        return MemoryRetainResult(accepted=True, items_count=len(episodes))
 
     async def revise(self, **payload):
         self.revise_calls.append(payload)
         if self.revise_error:
             raise self.revise_error
-        return {"profile_updated": True, "suppressed_count": 0}
+        return MemoryRevisionResult(invalidated_count=1)
 
 
-class PerSubjectMemory(FakeMemory):
-    def __init__(self, contexts):
-        super().__init__()
-        self.contexts = contexts
+class BlockingRetainMemory(FakeMemory):
+    def __init__(self):
+        super().__init__(recall_result=MemoryRecall("telegram:chat:-1001", ()))
+        self.retain_started = asyncio.Event()
+        self.release_retain = asyncio.Event()
 
-    async def augment(self, *, subject_id, query, scope_id):
-        self.augment_calls.append(
-            {"subject_id": subject_id, "query": query, "scope_id": scope_id}
-        )
-        return self.contexts.get(subject_id, "")
+    async def retain(self, episode, *, update_mode="replace"):
+        self.retain_calls.append({"episode": episode, "update_mode": update_mode})
+        self.retain_started.set()
+        await self.release_retain.wait()
+        return MemoryRetainResult(accepted=True)
+
+    async def retain_many(self, episodes, *, update_mode="replace"):
+        for episode in episodes:
+            self.retain_calls.append({"episode": episode, "update_mode": update_mode})
+        self.retain_started.set()
+        await self.release_retain.wait()
+        return MemoryRetainResult(accepted=True, items_count=len(episodes))
 
 
 class FakeLogger:
@@ -194,10 +283,8 @@ class FakeLogger:
 class FakeAttachmentDescriber:
     def __init__(self, descriptions=None):
         self.descriptions = descriptions or {}
-        self.calls = []
 
     async def describe(self, message):
-        self.calls.append(message.id)
         return self.descriptions.get(message.id)
 
 
@@ -206,6 +293,16 @@ class FakeIdentityResolver:
         return MessageIdentity(
             subject_display_name=f"User {message.sender_id}",
             scope_display_name="Engineering Group",
+            is_human=message.is_human,
+        )
+
+
+class FakeMentionResolver:
+    async def resolve(self, message):
+        return tuple(
+            MentionedUser(entity.user_id, f"User {entity.user_id}")
+            for entity in getattr(message, "entities", ())
+            if getattr(entity, "user_id", None)
         )
 
 
@@ -226,6 +323,20 @@ class FakeTelegramIdentityMessage:
         )
 
 
+class FakeMentionClient:
+    def __init__(self):
+        self.entities = {
+            "@alice": telegram_types.User(id=40, first_name="Same Name"),
+            "@other": telegram_types.User(id=41, first_name="Same Name"),
+            42: telegram_types.User(id=42, first_name="Renamed User"),
+        }
+
+    async def get_entity(self, candidate):
+        if candidate not in self.entities:
+            raise ValueError("unknown Telegram entity")
+        return self.entities[candidate]
+
+
 def make_handler(
     gateway,
     memory,
@@ -234,7 +345,9 @@ def make_handler(
     logger=None,
     attachment_describer=None,
     identity_resolver=None,
+    mention_resolver=None,
     store=None,
+    dream_runner=None,
 ):
     store = store or FakeStore(allowed=allowed)
     return AIConversationHandler(
@@ -244,9 +357,11 @@ def make_handler(
         prompt_builder=PromptBuilder(
             attachment_describer=attachment_describer,
             identity_resolver=identity_resolver,
+            mention_resolver=mention_resolver,
         ),
         rate_limiter=AIRateLimiter(store, cooldown_seconds=0),
         memory=memory,
+        dream_runner=dream_runner,
         logger=logger,
     )
 
@@ -262,27 +377,133 @@ async def test_telegram_identity_resolver_uses_entity_display_names():
     identity = await TelegramMessageIdentityResolver().resolve(
         FakeTelegramIdentityMessage()
     )
-
     assert identity == MessageIdentity(
         subject_display_name="Alice Example",
         scope_display_name="Engineering Group",
+        is_human=True,
     )
 
 
 @pytest.mark.asyncio
-async def test_requester_and_reply_participant_memory_precede_context_and_are_ingested():
-    ancestor = FakeMessage(
-        "I use Postgres at work",
-        sender_id=20,
-        date=datetime(2026, 7, 10, 8, 0, tzinfo=UTC),
+async def test_telegram_identity_resolver_rejects_bots_and_unresolved_senders():
+    class BotMessage(FakeTelegramIdentityMessage):
+        async def get_sender(self):
+            return telegram_types.User(id=21, first_name="Helper", bot=True)
+
+    class UnresolvedMessage(FakeTelegramIdentityMessage):
+        async def get_sender(self):
+            raise ValueError("sender unavailable")
+
+    assert not (await TelegramMessageIdentityResolver().resolve(BotMessage())).is_human
+    assert not (
+        await TelegramMessageIdentityResolver().resolve(UnresolvedMessage())
+    ).is_human
+
+
+@pytest.mark.asyncio
+async def test_telegram_mention_resolver_trusts_entities_and_keeps_stable_users():
+    client = FakeMentionClient()
+    resolver = TelegramMessageMentionResolver(client)
+    message = FakeMessage("@alice and @other plus @ghost", sender_id=10)
+    message.entities = (
+        telegram_types.MessageEntityMention(offset=0, length=6),
+        telegram_types.MessageEntityMention(offset=11, length=6),
+        telegram_types.MessageEntityMentionName(offset=23, length=6, user_id=42),
     )
+
+    mentions = await resolver.resolve(message)
+    assert mentions == (
+        MentionedUser(40, "Same Name"),
+        MentionedUser(41, "Same Name"),
+        MentionedUser(42, "Renamed User"),
+    )
+
+    client.entities[42] = telegram_types.User(id=42, first_name="Newest Name")
+    assert await resolver.resolve(message) == (
+        MentionedUser(40, "Same Name"),
+        MentionedUser(41, "Same Name"),
+        MentionedUser(42, "Newest Name"),
+    )
+
+    plain = FakeMessage("plain @alice text", sender_id=10)
+    plain.entities = ()
+    assert await resolver.resolve(plain) == ()
+
+
+@pytest.mark.asyncio
+async def test_bare_memory_command_retains_one_ordered_multi_actor_episode():
+    store = FakeStore()
+    memory = FakeMemory(recall_result=MemoryRecall("telegram:chat:-1001", ()))
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+        mention_resolver=FakeMentionResolver(),
+    )
+    ancestor = FakeMessage(
+        "I use Python at work",
+        sender_id=30,
+        date=datetime(2026, 7, 12, 8, 0, tzinfo=UTC),
+    )
+    target = FakeMessage(
+        "I started using Rust today",
+        sender_id=20,
+        reply_to=ancestor,
+        date=datetime(2026, 7, 12, 8, 30, tzinfo=UTC),
+    )
+    target.entities = (SimpleNamespace(user_id=40),)
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == "Memory stored from reply chain: 2 messages."
+    assert command.deleted is True
+    assert len(memory.retain_calls) == 1
+    call = memory.retain_calls[0]
+    assert call["update_mode"] == "replace"
+    item = call["episode"]
+    assert item.scope_id == "telegram:chat:-1001"
+    assert item.scope_display_name == "Engineering Group"
+    assert item.document_id == f"telegram:thread:-1001:{ancestor.id}"
+    assert [(event.actor_id, event.text) for event in item.events] == [
+        ("telegram:user:30", "I use Python at work"),
+        ("telegram:user:20", "I started using Rust today"),
+    ]
+    assert item.events[1].reply_to_source_id.endswith(f":{ancestor.id}")
+    assert item.events[1].mentioned_actors == (("telegram:user:40", "User 40"),)
+    assert "telegram:user:40" in item.actor_ids
+    receipt = store.memory_documents[(item.scope_id, item.document_id)]
+    assert receipt.content_hash == item.content_hash
+    assert receipt.event_versions == item.event_versions
+
+
+@pytest.mark.asyncio
+async def test_exact_memory_retry_uses_delivery_receipt_without_second_retain():
+    store = FakeStore()
+    memory = FakeMemory()
+    handler = make_handler(FakeGateway(["unused"]), memory, store=store)
+    target = FakeMessage("I prefer tea", sender_id=20)
+
+    first = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+    second = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+    assert await handler.handle(first) is True
+    assert await handler.handle(second) is True
+
+    assert first.replies[0].text == "Memory stored from reply chain: 1 message."
+    assert second.replies[0].text == "Already remembered."
+    assert len(memory.retain_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ai_request_uses_one_bank_recall_before_reply_context():
+    ancestor = FakeMessage("I use PostgreSQL at work", sender_id=20)
     trigger = FakeMessage(
         "/ai which database should we use?",
         sender_id=10,
         reply_to=ancestor,
     )
     memory = FakeMemory()
-    gateway = FakeGateway(["Use Postgres"])
+    gateway = FakeGateway(["Use PostgreSQL"])
     handler = make_handler(
         gateway,
         memory,
@@ -291,58 +512,81 @@ async def test_requester_and_reply_participant_memory_precede_context_and_are_in
 
     assert await handler.handle(trigger) is True
 
-    assert memory.augment_calls == [
-        {
-            "subject_id": "telegram:user:10",
-            "query": "which database should we use?",
-            "scope_id": "telegram:chat:-1001",
-        },
-        {
-            "subject_id": "telegram:user:20",
-            "query": "which database should we use?",
-            "scope_id": "telegram:chat:-1001",
-        },
-    ]
+    assert len(memory.recall_calls) == 1
+    recall_call = memory.recall_calls[0]
+    assert recall_call["scope_id"] == "telegram:chat:-1001"
+    assert "which database should we use?" in recall_call["query"]
+    assert "telegram:user:10" in recall_call["query"]
+    assert "telegram:user:20" in recall_call["query"]
     request = gateway.requests[0]
     assert [item.kind for item in request.context] == ["memory", "reply"]
-    assert "telegram:user:10" in request.context[0].text
-    assert "telegram:user:20" in request.context[0].text
+    assert "Relevant evidence recalled from this chat bank" in request.context[0].text
     assert "Untrusted reply context" in request.context[1].text
-    assert request.prompt == "which database should we use?"
-
-    assert {(item["subject_id"], item["text"]) for item in memory.ingest_calls} == {
-        ("telegram:user:20", "I use Postgres at work"),
-        ("telegram:user:10", "which database should we use?"),
-    }
-    assert all(
-        item["scope_id"] == "telegram:chat:-1001" for item in memory.ingest_calls
-    )
-    assert all(item["text"] != "Use Postgres" for item in memory.ingest_calls)
-    assert all(
-        "message_id" not in item.get("metadata", {}) for item in memory.ingest_calls
-    )
-    assert memory.identity_calls == [
-        {
-            "telegram:user:10": "User 10",
-            "telegram:user:20": "User 20",
-            "telegram:chat:-1001": "Engineering Group",
-        }
-    ]
+    assert request.memory_access is not None
+    assert request.memory_access.scope_id == "telegram:chat:-1001"
+    assert request.memory_access.references[0].memory_id == "memory-1"
+    assert memory.retain_calls == []
 
 
 @pytest.mark.asyncio
-async def test_ai_generated_chain_messages_are_context_but_not_memory_subjects():
+async def test_ai_request_bounds_host_pinned_memory_references():
+    memories = tuple(
+        RecalledMemory(
+            memory_id=f"memory-{index}",
+            text=f"Evidence {index}",
+            memory_type="world",
+            entities=(),
+            occurred_start=None,
+            occurred_end=None,
+            mentioned_at=None,
+            document_id=f"telegram:thread:-1001:{index}",
+            chunk_id=f"telegram:chat:-1001_telegram:thread:-1001:{index}_0",
+        )
+        for index in range(60)
+    )
+    memory = FakeMemory(
+        recall_result=MemoryRecall(
+            scope_id="telegram:chat:-1001",
+            memories=memories,
+        )
+    )
+    gateway = FakeGateway(["bounded"])
+    handler = make_handler(gateway, memory)
+
+    assert await handler.handle(FakeMessage("/ai summarize", sender_id=10)) is True
+
+    access = gateway.requests[0].memory_access
+    assert access is not None
+    assert len(access.references) == 50
+    assert access.references[-1].memory_id == "memory-49"
+
+
+@pytest.mark.asyncio
+async def test_out_of_chain_exact_mention_enters_recall_and_episode_entities():
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = FakeMemory()
+    trigger = FakeMessage("/ai what does @alice prefer?", sender_id=10)
+    trigger.entities = (SimpleNamespace(user_id=40),)
+    handler = make_handler(
+        FakeGateway(["answer"]),
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+        mention_resolver=FakeMentionResolver(),
+    )
+
+    assert await handler.handle(trigger) is True
+    assert "User 40 (telegram:user:40)" in memory.recall_calls[0]["query"]
+    event = memory.retain_calls[0]["episode"].events[0]
+    assert event.mentioned_actors == (("telegram:user:40", "User 40"),)
+    assert "telegram:user:40" in memory.retain_calls[0]["episode"].actor_ids
+
+
+@pytest.mark.asyncio
+async def test_ai_generated_chain_message_is_context_but_not_retained_evidence():
     human = FakeMessage("I prefer Rust", sender_id=20)
-    ai_output = FakeMessage(
-        "Generated claim that must not become owner memory",
-        sender_id=10,
-        reply_to=human,
-    )
-    trigger = FakeMessage(
-        "/ai what does the participant prefer?",
-        sender_id=10,
-        reply_to=ai_output,
-    )
+    ai_output = FakeMessage("Generated claim", sender_id=10, reply_to=human)
     store = FakeStore()
     store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
         chat_id=ai_output.chat_id,
@@ -357,483 +601,545 @@ async def test_ai_generated_chain_messages_are_context_but_not_memory_subjects()
         agent_entry_id="entry-old",
     )
     memory = FakeMemory()
-    gateway = FakeGateway(["Rust"])
-    handler = make_handler(gateway, memory, store=store)
+    handler = make_handler(FakeGateway(["unused"]), memory, store=store)
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=ai_output)
 
-    assert await handler.handle(trigger) is True
-
-    reply_context = next(
-        item.text for item in gateway.requests[0].context if item.kind == "reply"
-    )
-    assert "Generated claim" in reply_context
-    ingested = {(item["subject_id"], item["text"]) for item in memory.ingest_calls}
-    assert ("telegram:user:20", "I prefer Rust") in ingested
-    assert all("Generated claim" not in text for _, text in ingested)
+    assert await handler.handle(command) is True
+    episode = memory.retain_calls[0]["episode"]
+    assert [(event.actor_id, event.text) for event in episode.events] == [
+        ("telegram:user:20", "I prefer Rust")
+    ]
 
 
 @pytest.mark.asyncio
-async def test_participant_memory_cannot_be_crowded_out_by_requester_memory():
-    ancestor = FakeMessage("I use Postgres", sender_id=20)
-    trigger = FakeMessage("/ai choose a database", sender_id=10, reply_to=ancestor)
-    memory = PerSubjectMemory(
-        {
-            "telegram:user:10": "R" * 4_000,
-            "telegram:user:20": "Participant prefers Postgres",
-        }
+async def test_attachment_description_is_retained_without_raw_attachment():
+    target = FakeMessage("", sender_id=20, file=object())
+    description = AttachmentDescription(
+        context_text="Generated attachment context: architecture diagram",
+        memory_text=(
+            "The subject shared an attachment. Generated content description: "
+            "architecture diagram"
+        ),
     )
-    gateway = FakeGateway(["Postgres"])
-    handler = make_handler(gateway, memory)
-
-    assert await handler.handle(trigger) is True
-
-    rendered = next(
-        item.text for item in gateway.requests[0].context if item.kind == "memory"
-    )
-    assert "Participant prefers Postgres" in rendered
-    assert len(rendered) <= 4_100
-
-
-@pytest.mark.asyncio
-async def test_attachment_descriptions_augment_context_and_memory_by_author():
-    ancestor = FakeMessage("", sender_id=20, file=object())
-    trigger = FakeMessage(
-        "/ai compare the attachments",
-        sender_id=10,
-        reply_to=ancestor,
-        file=object(),
-    )
-    describer = FakeAttachmentDescriber(
-        {
-            ancestor.id: AttachmentDescription(
-                context_text="Generated attachment context: architecture diagram",
-                memory_text=(
-                    "The subject shared an attachment. Generated content description: "
-                    "architecture diagram"
-                ),
-            ),
-            trigger.id: AttachmentDescription(
-                context_text="Generated attachment context: deployment checklist",
-                memory_text=(
-                    "The subject shared an attachment. Generated content description: "
-                    "deployment checklist"
-                ),
-            ),
-        }
-    )
-    memory = FakeMemory(augment_value="")
-    gateway = FakeGateway(["comparison"])
-    handler = make_handler(
-        gateway,
-        memory,
-        attachment_describer=describer,
-    )
-
-    assert await handler.handle(trigger) is True
-
-    rendered_context = "\n".join(item.text for item in gateway.requests[0].context)
-    assert "architecture diagram" in rendered_context
-    assert "deployment checklist" in rendered_context
-    by_subject = {item["subject_id"]: item["text"] for item in memory.ingest_calls}
-    assert "architecture diagram" in by_subject["telegram:user:20"]
-    assert "deployment checklist" in by_subject["telegram:user:10"]
-    assert "compare the attachments" in by_subject["telegram:user:10"]
-
-
-@pytest.mark.asyncio
-async def test_followup_uses_only_current_requester_memory_and_ingests_current_human():
     memory = FakeMemory()
-    gateway = FakeGateway(["root answer", "peer answer"])
-    handler = make_handler(gateway, memory, allowed={20})
-    root = FakeMessage("/ai root", sender_id=10)
-    await handler.handle(root)
-    memory.augment_calls.clear()
-    memory.ingest_calls.clear()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        attachment_describer=FakeAttachmentDescriber({target.id: description}),
+    )
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
 
-    follow_up = FakeMessage("peer follow-up", sender_id=20, reply_to=root.replies[0])
-    assert await handler.handle(follow_up) is True
+    assert await handler.handle(command) is True
+    event = memory.retain_calls[0]["episode"].events[0]
+    assert "architecture diagram" in event.text
+    assert "telegram" not in event.text.lower()
 
-    assert memory.augment_calls == [
-        {
-            "subject_id": "telegram:user:20",
-            "query": "peer follow-up",
-            "scope_id": "telegram:chat:-1001",
-        }
-    ]
-    memory_messages = [
-        item.text for item in gateway.requests[1].context if item.kind == "memory"
-    ]
-    assert len(memory_messages) == 1
-    assert "Profile for telegram:user:20" in memory_messages[0]
-    assert [(item["subject_id"], item["text"]) for item in memory.ingest_calls] == [
-        ("telegram:user:20", "peer follow-up")
-    ]
+
+@pytest.mark.asyncio
+async def test_episode_preserves_quote_and_forward_provenance_without_raw_media():
+    target = FakeMessage(
+        "Carol said the migration moved.",
+        sender_id=20,
+        date=datetime(2026, 7, 12, 10, 0, tzinfo=UTC),
+    )
+    target.reply_to = SimpleNamespace(
+        quote_text="The migration starts Monday.",
+        quote_offset=6,
+    )
+    target.reply_to_msg_id = 77
+    target.fwd_from = SimpleNamespace(
+        from_name="Carol Example",
+        from_id=telegram_types.PeerUser(user_id=55),
+        saved_from_peer=telegram_types.PeerChannel(channel_id=1001),
+        saved_from_msg_id=99,
+        channel_post=None,
+        date=datetime(2026, 7, 10, 9, 0, tzinfo=UTC),
+    )
+    memory = FakeMemory()
+    handler = make_handler(FakeGateway(["unused"]), memory)
+
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+    assert await handler.handle(command) is True
+
+    event = memory.retain_calls[0]["episode"].events[0]
+    assert event.mentioned_at == datetime(2026, 7, 12, 10, 0, tzinfo=UTC)
+    assert event.metadata["quotation"] == {
+        "text": "The migration starts Monday.",
+        "source_id": "telegram:message:-1001:77",
+        "offset": 6,
+    }
+    assert event.metadata["forwarded_from"] == {
+        "actor_display_name": "Carol Example",
+        "actor_id": "telegram:user:55",
+        "source_id": "telegram:message:-1000000001001:99",
+        "source_time": "2026-07-10T09:00:00Z",
+    }
 
 
 @pytest.mark.parametrize(
-    "memory",
-    [
-        FakeMemory(augment_error=TimeoutError()),
-        FakeMemory(augment_error=ConnectionError()),
-        FakeMemory(augment_value={"malformed": True}),
-    ],
+    "failure",
+    [TimeoutError(), ConnectionError(), ValueError("malformed")],
 )
 @pytest.mark.asyncio
-async def test_memory_augmentation_failures_are_logged_and_answer_fails_open(memory):
+async def test_memory_recall_failure_is_logged_and_answer_fails_open(failure):
     logger = FakeLogger()
+    memory = FakeMemory(recall_error=failure)
     gateway = FakeGateway(["answer without memory"])
     handler = make_handler(gateway, memory, logger=logger)
     trigger = FakeMessage("/ai answer me", sender_id=10)
 
     assert await handler.handle(trigger) is True
     assert trigger.replies[0].text == "answer without memory"
-    assert gateway.requests[0].system_prompt == PromptBuilder().system_prompt
-    assert gateway.requests[0].prompt == "answer me"
     assert gateway.requests[0].context == ()
+    assert gateway.requests[0].memory_access is None
     assert logger.warnings
 
 
 @pytest.mark.asyncio
-async def test_memory_ingest_failure_and_unrelated_traffic_do_not_break_answers():
+async def test_memory_retain_failure_does_not_store_delivery_receipt():
     logger = FakeLogger()
-    memory = FakeMemory(ingest_error=ConnectionError())
-    gateway = FakeGateway(["answer"])
-    handler = make_handler(gateway, memory, logger=logger)
-    trigger = FakeMessage("/ai answer", sender_id=10)
+    store = FakeStore()
+    memory = FakeMemory(retain_error=ConnectionError())
+    handler = make_handler(FakeGateway(["unused"]), memory, store=store, logger=logger)
+    target = FakeMessage("I prefer tea", sender_id=20)
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
 
-    assert await handler.handle(trigger) is True
-    assert trigger.replies[0].text == "answer"
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == "Memory update failed. Retry the command."
+    assert command.deleted is False
+    assert store.memory_documents == {}
     assert logger.warnings
 
-    unrelated = FakeMessage("ordinary chat", sender_id=10)
-    assert await handler.handle(unrelated) is False
-    assert len(memory.ingest_calls) == 1
 
-
-@pytest.mark.parametrize(
-    "instruction",
-    [
-        "Remember that this user likes tea",
-        "Correct the preference to coffee",
-        "Forget tea",
-    ],
-)
 @pytest.mark.asyncio
-async def test_owner_revises_replied_user_and_ingests_human_reply_chain(
-    instruction,
-):
+async def test_owner_revision_retains_chain_then_revises_direct_human():
     memory = FakeMemory()
-    gateway = FakeGateway(["unused"])
-    handler = make_handler(gateway, memory)
-    ancestor = FakeMessage("I use Python at work", sender_id=30)
+    handler = make_handler(FakeGateway(["unused"]), memory)
+    ancestor = FakeMessage("I use Python", sender_id=30)
     target = FakeMessage("I prefer tea", sender_id=20, reply_to=ancestor)
     command = FakeMessage(
-        f"/ai_memory {instruction}",
+        "/ai_memory Correct the preference to coffee",
         sender_id=10,
         reply_to=target,
     )
 
     assert await handler.handle(command) is True
     assert command.replies[0].text == "Memory updated."
+    assert len(memory.retain_calls) == 2
+    revision = memory.retain_calls[1]["episode"]
+    assert revision.document_id == f"telegram:revision:-1001:{command.id}"
+    assert revision.source == "telegram-revision"
+    assert revision.events[0].mentioned_actors == (("telegram:user:20", None),)
+    assert "Correct the preference to coffee" in revision.events[0].text
     assert memory.revise_calls == [
         {
-            "subject_id": "telegram:user:20",
-            "instruction": instruction,
-            "evidence": ("user:30: I use Python at work\n\nuser:20: I prefer tea"),
             "scope_id": "telegram:chat:-1001",
+            "subject_id": "telegram:user:20",
+            "instruction": "Correct the preference to coffee",
         }
     ]
-    assert [(item["subject_id"], item["text"]) for item in memory.ingest_calls] == [
-        ("telegram:user:30", "I use Python at work"),
-        ("telegram:user:20", "I prefer tea"),
-    ]
-    assert memory.augment_calls == []
-    assert gateway.requests == []
     assert command.deleted is False
 
 
 @pytest.mark.asyncio
-async def test_bare_memory_command_ingests_human_reply_chain_with_identities():
-    memory = FakeMemory(
-        ingest_result=MemoryIngestResult(
-            created=True,
-            facts_added=1,
-            episodes_added=2,
-        )
-    )
-    gateway = FakeGateway(["unused"])
-    handler = make_handler(
-        gateway,
-        memory,
-        identity_resolver=FakeIdentityResolver(),
-    )
-    ancestor = FakeMessage(
-        "I use Python at work",
-        sender_id=30,
-        date=datetime(2026, 7, 12, 8, 0, tzinfo=UTC),
-    )
-    target = FakeMessage(
-        "I started using Rust today",
-        sender_id=20,
-        reply_to=ancestor,
-        date=datetime(2026, 7, 12, 8, 30, tzinfo=UTC),
-    )
-    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+async def test_revision_does_not_curate_when_correction_evidence_fails():
+    class RevisionEvidenceFailure(FakeMemory):
+        async def retain_many(self, episodes, *, update_mode="replace"):
+            if any(episode.source == "telegram-revision" for episode in episodes):
+                raise ConnectionError("revision evidence unavailable")
+            return await super().retain_many(episodes, update_mode=update_mode)
 
-    assert await handler.handle(command) is True
-
-    assert command.replies[0].text == (
-        "Memory stored from reply chain: 2 messages, 2 facts, 4 episodes."
-    )
-    assert memory.ingest_calls == [
-        {
-            "subject_id": "telegram:user:30",
-            "scope_id": "telegram:chat:-1001",
-            "text": "I use Python at work",
-            "occurred_at": datetime(2026, 7, 12, 8, 0, tzinfo=UTC),
-            "metadata": {"client": "telefire", "source": "chat_message"},
-        },
-        {
-            "subject_id": "telegram:user:20",
-            "scope_id": "telegram:chat:-1001",
-            "text": "I started using Rust today",
-            "occurred_at": datetime(2026, 7, 12, 8, 30, tzinfo=UTC),
-            "metadata": {"client": "telefire", "source": "chat_message"},
-        },
-    ]
-    assert memory.identity_calls == [
-        {
-            "telegram:user:30": "User 30",
-            "telegram:user:20": "User 20",
-            "telegram:chat:-1001": "Engineering Group",
-        }
-    ]
-    assert memory.revise_calls == []
-    assert memory.augment_calls == []
-    assert gateway.requests == []
-    assert command.deleted is True
-
-
-@pytest.mark.asyncio
-async def test_saved_forward_memory_entrypoint_includes_source_and_ancestors():
-    memory = FakeMemory()
-    gateway = FakeGateway(["unused"])
-    handler = make_handler(
-        gateway,
-        memory,
-        identity_resolver=FakeIdentityResolver(),
-    )
-    ancestor = FakeMessage("I use Python at work", sender_id=30)
-    source = FakeMessage(
-        "I started using Rust today",
-        sender_id=20,
-        reply_to=ancestor,
-    )
-
-    assert await handler.remember_reply_chain(source) is True
-
-    assert [(item["subject_id"], item["text"]) for item in memory.ingest_calls] == [
-        ("telegram:user:30", "I use Python at work"),
-        ("telegram:user:20", "I started using Rust today"),
-    ]
-    assert memory.identity_calls == [
-        {
-            "telegram:user:30": "User 30",
-            "telegram:user:20": "User 20",
-            "telegram:chat:-1001": "Engineering Group",
-        }
-    ]
-    assert gateway.requests == []
-
-
-@pytest.mark.asyncio
-async def test_bare_memory_command_reports_an_existing_observation():
-    memory = FakeMemory(
-        ingest_result=MemoryIngestResult(
-            created=False,
-            facts_added=0,
-            episodes_added=0,
-        )
-    )
-    gateway = FakeGateway(["unused"])
-    handler = make_handler(gateway, memory)
+    memory = RevisionEvidenceFailure()
+    handler = make_handler(FakeGateway(["unused"]), memory)
     target = FakeMessage("I prefer tea", sender_id=20)
-    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
-
-    assert await handler.handle(command) is True
-    assert command.replies[0].text == "Already remembered."
-    assert len(memory.ingest_calls) == 1
-    assert command.deleted is True
-
-
-@pytest.mark.asyncio
-async def test_bare_memory_command_skips_ai_answer_and_ingests_human_chain():
-    memory = FakeMemory()
-    gateway = FakeGateway(["unused"])
-    store = FakeStore()
-    human = FakeMessage("I prefer Rust", sender_id=20)
-    target = FakeMessage("Generated answer", sender_id=10, reply_to=human)
-    store.markers[(target.chat_id, target.id)] = AIAnswerMarker(
-        chat_id=target.chat_id,
-        answer_message_id=target.id,
-        trigger_message_id=999,
-        requester_id=20,
-        prompt="question",
-        answer_text="Generated answer",
-        parent_answer_message_id=None,
-        reference_context="",
-        agent_session_id="session-old",
-        agent_entry_id="entry-old",
-    )
-    handler = make_handler(gateway, memory, store=store)
-    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
-
-    assert await handler.handle(command) is True
-    assert command.replies[0].text == (
-        "Memory stored from reply chain: 1 message, 1 fact, 1 episode."
-    )
-    assert [(item["subject_id"], item["text"]) for item in memory.ingest_calls] == [
-        ("telegram:user:20", "I prefer Rust")
-    ]
-    assert memory.revise_calls == []
-    assert command.deleted is True
-
-
-@pytest.mark.asyncio
-async def test_memory_revision_requires_a_direct_human_target():
-    memory = FakeMemory()
-    gateway = FakeGateway(["unused"])
-    store = FakeStore()
-    human = FakeMessage("I prefer Rust", sender_id=20)
-    target = FakeMessage("Generated answer", sender_id=10, reply_to=human)
-    store.markers[(target.chat_id, target.id)] = AIAnswerMarker(
-        chat_id=target.chat_id,
-        answer_message_id=target.id,
-        trigger_message_id=999,
-        requester_id=20,
-        prompt="question",
-        answer_text="Generated answer",
-        parent_answer_message_id=None,
-        reference_context="",
-        agent_session_id="session-old",
-        agent_entry_id="entry-old",
-    )
-    handler = make_handler(gateway, memory, store=store)
     command = FakeMessage(
-        "/ai_memory Correct the preference to Go",
+        "/ai_memory Correct the preference to coffee",
         sender_id=10,
         reply_to=target,
+    )
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == "Memory revision failed. Retry the command."
+    assert memory.revise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_revision_requires_direct_human_target_and_owner():
+    memory = FakeMemory()
+    store = FakeStore(allowed={20})
+    human = FakeMessage("I prefer Rust", sender_id=20)
+    ai_output = FakeMessage("Generated answer", sender_id=10, reply_to=human)
+    store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
+        chat_id=ai_output.chat_id,
+        answer_message_id=ai_output.id,
+        trigger_message_id=999,
+        requester_id=20,
+        prompt="question",
+        answer_text=ai_output.raw_text,
+        parent_answer_message_id=None,
+        reference_context="",
+        agent_session_id="session-old",
+        agent_entry_id="entry-old",
+    )
+    handler = make_handler(FakeGateway(["unused"]), memory, store=store)
+
+    unauthorized = FakeMessage("/ai_memory change memory", sender_id=20, reply_to=human)
+    invalid_target = FakeMessage(
+        "/ai_memory change memory", sender_id=10, reply_to=ai_output
+    )
+    assert await handler.handle(unauthorized) is False
+    assert await handler.handle(invalid_target) is True
+    assert invalid_target.replies[0].text == (
+        "Reply directly to a human message when revising memory."
+    )
+    assert memory.retain_calls == []
+    assert memory.revise_calls == []
+
+
+@pytest.mark.asyncio
+async def test_revision_rejects_a_telegram_bot_target():
+    memory = FakeMemory()
+    target = FakeMessage("Automated claim", sender_id=50, is_human=False)
+    command = FakeMessage(
+        "/ai_memory change memory",
+        sender_id=10,
+        reply_to=target,
+    )
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        identity_resolver=FakeIdentityResolver(),
     )
 
     assert await handler.handle(command) is True
     assert command.replies[0].text == (
         "Reply directly to a human message when revising memory."
     )
-    assert memory.ingest_calls == []
+    assert memory.retain_calls == []
     assert memory.revise_calls == []
-    assert command.deleted is False
 
 
 @pytest.mark.asyncio
-async def test_memory_revision_is_owner_only_and_failure_is_bounded():
-    logger = FakeLogger()
-    memory = FakeMemory(revise_error=ValueError("internal model output"))
-    gateway = FakeGateway(["unused"])
-    handler = make_handler(gateway, memory, allowed={20}, logger=logger)
-    target = FakeMessage("evidence", sender_id=30)
-
-    unauthorized = FakeMessage(
-        "/ai_memory change profile",
-        sender_id=20,
-        reply_to=target,
+async def test_saved_memory_entrypoint_retains_source_and_ancestors():
+    memory = FakeMemory()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        identity_resolver=FakeIdentityResolver(),
     )
-    assert await handler.handle(unauthorized) is False
-    assert unauthorized.replies == []
-    assert memory.revise_calls == []
-    assert unauthorized.deleted is False
+    ancestor = FakeMessage("I use Python at work", sender_id=30)
+    source = FakeMessage("I started using Rust today", sender_id=20, reply_to=ancestor)
 
-    owner = FakeMessage(
-        "/ai_memory change profile",
-        sender_id=10,
-        reply_to=target,
-    )
-    assert await handler.handle(owner) is True
-    assert owner.replies[0].text == "Memory revision failed. Retry the command."
-    assert [(item["subject_id"], item["text"]) for item in memory.ingest_calls] == [
-        ("telegram:user:30", "evidence")
+    assert await handler.remember_reply_chain(source) is True
+    episode = memory.retain_calls[0]["episode"]
+    assert [event.text for event in episode.events] == [
+        "I use Python at work",
+        "I started using Rust today",
     ]
-    assert logger.warnings
-    assert owner.deleted is False
-
-
-class ProfileMemory(FakeMemory):
-    def __init__(self):
-        super().__init__()
-        self.profiles = {}
-
-    async def augment(self, *, subject_id, query, scope_id):
-        self.augment_calls.append(
-            {"subject_id": subject_id, "query": query, "scope_id": scope_id}
-        )
-        return self.profiles.get(subject_id, "")
-
-    async def revise(self, **payload):
-        self.revise_calls.append(payload)
-        self.profiles[payload["subject_id"]] = "# User Profile\n\n- Prefers coffee."
-        return {"profile_updated": True, "suppressed_count": 0}
-
-
-class BlockingIngestMemory(FakeMemory):
-    def __init__(self):
-        super().__init__(augment_value="")
-        self.ingest_started = asyncio.Event()
-        self.release_ingest = asyncio.Event()
-
-    async def ingest(self, **payload):
-        self.ingest_calls.append(payload)
-        self.ingest_started.set()
-        await self.release_ingest.wait()
 
 
 @pytest.mark.asyncio
-async def test_revised_profile_augments_only_the_target_users_later_request():
-    memory = ProfileMemory()
-    gateway = FakeGateway(["target answer", "other answer"])
-    handler = make_handler(gateway, memory, allowed={20, 30})
-    target = FakeMessage("I now prefer coffee", sender_id=20)
-    command = FakeMessage(
-        "/ai_memory Correct the preference",
-        sender_id=10,
-        reply_to=target,
+async def test_saved_memory_entrypoint_rejects_non_human_source():
+    memory = FakeMemory()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        identity_resolver=FakeIdentityResolver(),
     )
-    await handler.handle(command)
+    source = FakeMessage("Automated channel post", sender_id=50, is_human=False)
 
-    target_request = FakeMessage("/ai what do I prefer?", sender_id=20)
-    other_request = FakeMessage("/ai what do I prefer?", sender_id=30)
-    await handler.handle(target_request)
-    await handler.handle(other_request)
-
-    target_context = [item.text for item in gateway.requests[0].context]
-    other_context = [item.text for item in gateway.requests[1].context]
-    assert any("Prefers coffee" in item for item in target_context)
-    assert all("Prefers coffee" not in item for item in other_context)
+    assert await handler.remember_reply_chain(source) is False
+    assert memory.retain_calls == []
 
 
 @pytest.mark.asyncio
-async def test_post_answer_memory_ingest_does_not_hold_delegated_rate_lease():
-    memory = BlockingIngestMemory()
+async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boundary():
+    received = {"retain": [], "recall": []}
+
+    async def retain(request):
+        received["retain"].append(await request.json())
+        return web.json_response(
+            {
+                "success": True,
+                "bank_id": request.match_info["bank_id"],
+                "items_count": 1,
+                "async": False,
+            }
+        )
+
+    async def recall(request):
+        received["recall"].append(await request.json())
+        return web.json_response(
+            {
+                "results": [
+                    {
+                        "id": "memory-db",
+                        "text": "User 20 uses PostgreSQL at work.",
+                        "type": "world",
+                        "entities": ["telegram:user:20"],
+                        "document_id": "telegram:thread:-1001:1",
+                        "chunk_id": "chunk-db",
+                    }
+                ]
+            }
+        )
+
+    app = web.Application()
+    app.router.add_post("/v1/default/banks/{bank_id}/memories", retain)
+    app.router.add_post("/v1/default/banks/{bank_id}/memories/recall", recall)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    client = HindsightMemoryClient(f"http://127.0.0.1:{port}")
+    gateway = FakeGateway(["Use PostgreSQL"])
+    store = FakeStore()
+    handler = make_handler(
+        gateway,
+        client,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+    source = FakeMessage("I use PostgreSQL at work", sender_id=20)
+    remember = FakeMessage("/ai_memory", sender_id=10, reply_to=source)
+    ask = FakeMessage("/ai which database should we use?", sender_id=10)
+    try:
+        assert await handler.handle(remember) is True
+        assert await handler.handle(ask) is True
+
+        assert len(received["retain"]) == 1
+        retained = received["retain"][0]["items"][0]
+        assert retained["document_id"] == f"telegram:thread:-1001:{source.id}"
+        assert retained["entities"] == [{"text": "telegram:user:20", "type": "PERSON"}]
+        assert len(received["recall"]) == 1
+        assert "which database should we use?" in received["recall"][0]["query"]
+        memory_context = gateway.requests[0].context[0]
+        assert memory_context.kind == "memory"
+        assert "User 20 uses PostgreSQL" in memory_context.text
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabled():
+    store = FakeStore()
+    memory = FakeMemory(recall_result=MemoryRecall("telegram:chat:-1001", ()))
+    gateway = FakeGateway(["answer"])
+    handler = make_handler(
+        gateway,
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+
+    enable = FakeMessage("/ai_memory_enable", sender_id=10)
+    assert await handler.handle(enable) is True
+    assert enable.deleted is True
+    assert enable.replies[0].text == "Automatic memory enabled for this chat."
+
+    status = FakeMessage("/ai_memory_status", sender_id=10)
+    assert await handler.handle(status) is True
+    assert status.deleted is False
+    assert status.replies[0].text == (
+        "Automatic memory is enabled for this chat.\n"
+        "Last Dream attempt: never\n"
+        "Last Dream success: never\n"
+        "Last Dream error: none"
+    )
+
+    store.memory_dream_state["telegram:chat:-1001"] = MemoryDreamState(
+        scope_id="telegram:chat:-1001",
+        cursor_message_id=44,
+        last_attempt_at=1,
+        last_success_at=2,
+        last_error="temporary backpressure",
+    )
+    populated_status = FakeMessage("/ai_memory_status", sender_id=10)
+    assert await handler.handle(populated_status) is True
+    assert "Last Dream attempt: 1970-01-01T00:00:01Z" in (
+        populated_status.replies[0].text
+    )
+    assert "Last Dream success: 1970-01-01T00:00:02Z" in (
+        populated_status.replies[0].text
+    )
+    assert populated_status.replies[0].text.endswith(
+        "Last Dream error: temporary backpressure"
+    )
+
+    ancestor = FakeMessage("I use PostgreSQL", sender_id=20)
+    trigger = FakeMessage("/ai choose a database", sender_id=10, reply_to=ancestor)
+    assert await handler.handle(trigger) is True
+    assert len(memory.retain_calls) == 1
+    episode = memory.retain_calls[0]["episode"]
+    assert [(event.actor_id, event.text) for event in episode.events] == [
+        ("telegram:user:20", "I use PostgreSQL"),
+        ("telegram:user:10", "choose a database"),
+    ]
+
+    disable = FakeMessage("/ai_memory_disable", sender_id=10)
+    assert await handler.handle(disable) is True
+    assert disable.deleted is True
+    assert disable.replies[0].text == "Automatic memory disabled for this chat."
+
+
+@pytest.mark.asyncio
+async def test_disabled_scope_still_recalls_but_does_not_automatically_retain():
+    memory = FakeMemory()
+    gateway = FakeGateway(["answer"])
+    handler = make_handler(gateway, memory, store=FakeStore())
+    trigger = FakeMessage("/ai answer from memory", sender_id=10)
+
+    assert await handler.handle(trigger) is True
+    assert len(memory.recall_calls) == 1
+    assert memory.retain_calls == []
+
+
+@pytest.mark.asyncio
+async def test_enabled_scope_does_not_retain_non_human_ai_request():
+    store = FakeStore(allowed={20})
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = FakeMemory()
+    handler = make_handler(
+        FakeGateway(["answer"]),
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+    trigger = FakeMessage("/ai calculate", sender_id=20, is_human=False)
+
+    assert await handler.handle(trigger) is True
+    assert memory.retain_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failed_agent_run_does_not_retain_enabled_scope():
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = FakeMemory()
+    handler = make_handler(FailingGateway([]), memory, store=store)
+    trigger = FakeMessage("/ai fail", sender_id=10)
+
+    assert await handler.handle(trigger) is True
+    assert trigger.replies[0].text == "AI request failed. Try again later."
+    assert memory.retain_calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_change_scope_memory_state():
+    store = FakeStore(allowed={20})
+    handler = make_handler(FakeGateway(["unused"]), FakeMemory(), store=store)
+    command = FakeMessage("/ai_memory_enable", sender_id=20)
+
+    assert await handler.handle(command) is False
+    assert command.replies == []
+    assert store.memory_enabled == set()
+
+
+@pytest.mark.asyncio
+async def test_post_answer_retain_does_not_hold_delegated_rate_lease():
+    store = FakeStore(allowed={20})
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = BlockingRetainMemory()
     gateway = FakeGateway(["first answer", "second answer"])
-    handler = make_handler(gateway, memory, allowed={20})
+    handler = make_handler(gateway, memory, store=store, allowed={20})
 
     first = FakeMessage("/ai first", sender_id=20)
     first_task = asyncio.create_task(handler.handle(first))
-    await memory.ingest_started.wait()
+    await memory.retain_started.wait()
 
     second = FakeMessage("/ai second", sender_id=20)
     second_task = asyncio.create_task(handler.handle(second))
     while len(gateway.requests) < 2:
         await asyncio.sleep(0)
-    memory.release_ingest.set()
+    memory.release_retain.set()
 
     assert await asyncio.gather(first_task, second_task) == [True, True]
     assert first.replies[0].text == "first answer"
     assert second.replies[0].text == "second answer"
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_enablement_persists_across_repository_restart(tmp_path):
+    state_path = tmp_path / "ai.db"
+    first = await AIStateRepository(state_path).connect()
+    await first.set_memory_enabled(
+        "telegram:chat:-1001",
+        True,
+        "Engineering Group",
+    )
+    await first.close()
+
+    second = await AIStateRepository(state_path).connect()
+    try:
+        assert await second.is_memory_enabled("telegram:chat:-1001") is True
+        assert await second.is_memory_enabled("telegram:chat:-2002") is False
+        await second.set_memory_enabled("telegram:chat:-1001", False)
+        assert await second.is_memory_enabled("telegram:chat:-1001") is False
+    finally:
+        await second.close()
+
+
+class FakeDreamRunner:
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = []
+
+    async def run_scope(self, chat_id):
+        self.calls.append(chat_id)
+        if self.error:
+            raise self.error
+        return MemoryDreamResult(
+            messages_seen=4,
+            messages_retained=3,
+            documents_created=2,
+            documents_unchanged=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_owner_runs_manual_dream_only_for_enabled_scope():
+    store = FakeStore()
+    runner = FakeDreamRunner()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=store,
+        dream_runner=runner,
+    )
+
+    disabled = FakeMessage("/ai_memory_dream", sender_id=10)
+    assert await handler.handle(disabled) is True
+    assert disabled.replies[0].text == "Automatic memory is disabled for this chat."
+    assert disabled.deleted is False
+    assert runner.calls == []
+
+    store.memory_enabled.add("telegram:chat:-1001")
+    enabled = FakeMessage("/ai_memory_dream", sender_id=10)
+    assert await handler.handle(enabled) is True
+    assert enabled.replies[0].text == (
+        "Dream Cycle complete: 3 messages in 2 updated threads; 1 unchanged."
+    )
+    assert enabled.deleted is True
+    assert runner.calls == [-1001]
+
+
+@pytest.mark.asyncio
+async def test_failed_manual_dream_remains_visible_for_retry():
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    runner = FakeDreamRunner(error=ConnectionError("memory unavailable"))
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=store,
+        dream_runner=runner,
+    )
+    command = FakeMessage("/ai_memory_dream", sender_id=10)
+
+    assert await handler.handle(command) is True
+    assert command.replies[0].text == (
+        "Dream Cycle failed. It will retry from the previous cursor."
+    )
+    assert command.deleted is False

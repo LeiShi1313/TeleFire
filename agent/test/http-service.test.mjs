@@ -97,6 +97,73 @@ test("rejects invalid run input before invoking the engine", async () => {
   }
 });
 
+test("accepts bounded host-pinned memory access and rejects bank injection", async () => {
+  let received;
+  const app = await listen({
+    async *run(request) {
+      received = request;
+      yield { type: "run_completed", sessionId: "s", entryId: "e", answer: "ok" };
+    },
+    async cancel() {
+      return false;
+    },
+  });
+  const memoryAccess = {
+    bankId: "telegram:chat:-1001",
+    references: [
+      {
+        memoryId: "memory-1",
+        documentId: "telegram:thread:-1001:41",
+        chunkId: "telegram:chat:-1001_telegram:thread:-1001:41_0",
+      },
+    ],
+  };
+  try {
+    const accepted = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({ ...validRun, memoryAccess }),
+    });
+    assert.equal(accepted.status, 200);
+    await accepted.text();
+    assert.deepEqual(received.memoryAccess, memoryAccess);
+
+    const rejected = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        memoryAccess: { ...memoryAccess, bankId: "../../other-bank" },
+      }),
+    });
+    assert.equal(rejected.status, 400);
+
+    const rejectedChunk = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        memoryAccess: {
+          ...memoryAccess,
+          references: [{ ...memoryAccess.references[0], chunkId: "../other" }],
+        },
+      }),
+    });
+    assert.equal(rejectedChunk.status, 400);
+  } finally {
+    await app.close();
+  }
+});
+
 test("cancels an active run by its caller-provided id", async () => {
   let cancelled;
   const app = await listen({

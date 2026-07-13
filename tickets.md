@@ -1,190 +1,245 @@
-# Tickets: AI conversations and scoped memory
+# Tickets: Hindsight contextual chat memory
 
-These tickets build reply-branch AI conversations for Telefire and a standalone Zvec-backed memory service, following the project glossary and ADR-0002/ADR-0003.
+These tickets replace the subject-scoped Zvec memory runtime with Hindsight and add scoped conversational capture, bounded memory reasoning, Dream Cycles, inspection, and migration. The source specification is [Hindsight Contextual Chat Memory](docs/specs/hindsight-contextual-chat-memory.md), governed by ADR-0005.
 
-Work the **frontier**: any ticket whose blockers are all done. The initial frontier is **Stream an owner-only AI Answer** and **Remember and retrieve scoped Facts and Episodes**.
+Work the **frontier**: any ticket whose blockers are all done. The initial frontier is **Validate and Pin the Hindsight Contract**.
 
-## Full-autonomy preflight
+## Validate and Pin the Hindsight Contract
 
-Keep all credential values outside this file and outside git. Complete this checklist before live implementation testing begins.
+**What to build:** Prove the exact Hindsight behavior Telefire depends on using a real locally deployed service, then pin that tested contract before changing Telegram memory behavior.
 
-- [x] Python 3.14, `uv`, the locked Telefire runtime, and source compilation work locally.
-- [x] Zvec 0.5.1, OpenAI 2.45.0, pytest 9.1.1, and pytest-asyncio 1.4.0 install and run on the current Python 3.14 environment.
-- [x] A real temporary Zvec collection can store and retrieve string fields and vectors; caller-facing namespaced IDs will be stored as fields behind generated Zvec-safe document IDs.
-- [x] Telegram is reachable and at least one non-bot user identity has an authorized local session.
-- [x] The configured chat endpoint accepts authenticated non-streaming and streaming Chat Completions requests with the configured model.
-- [x] Restrict the existing Telefire configuration and Telegram session files to owner-only filesystem permissions before adding more credentials.
-- [x] Add an authorized session for a second, distinct, non-bot Telegram user; `ai_e2e_peer2` is the distinct peer, while `ai_e2e_peer` resolves to the owner identity.
-- [x] Provide one disposable private test group containing only the owner and test user, with the owner able to administer and clean up test messages, plus its explicit numeric chat ID.
-- [x] Provide an OpenAI-compatible Embeddings endpoint and model: the loopback-only standalone Ollama stack serves `qwen3-embedding:0.6b` at `http://127.0.0.1:11434/v1` with 1024-dimensional vectors.
-- [x] Run non-mutating provider probes for non-streaming chat, streaming deltas, JSON extraction, batched embeddings, and embedding dimension.
-- [x] Run a Telegram preflight that proves both sessions are distinct users, both can access the explicit test group, and no test can send outside that chat.
-- [x] Establish tests-only pytest collection so the ignored legacy `__pypackages__` tree and command plugin named `auto_reply_test.py` are never collected.
+**Blocked by:** None - can start immediately.
 
-## Stream an owner-only AI Answer
+- [x] The local Docker Compose stack starts a pinned Hindsight release with persistent storage, a health endpoint, and its inspection UI.
+- [x] Hindsight uses the configured OpenAI-compatible chat endpoint and the existing local `qwen3-embedding:0.6b` embedding endpoint without introducing another paid model dependency.
+- [x] One fixture retains an ordered multi-speaker conversation with stable actor hints, display names, timestamps, replies, quotations, explicit mentions, and caller metadata.
+- [x] Two different Memory Scopes map to isolated banks, and recall, reflect, source retrieval, and UI inspection never expose evidence from the other bank.
+- [x] Exact retain retries are no-ops, while new replies and edited earlier events idempotently replace and re-extract the complete bounded document.
+- [x] Canonical actor hints survive extraction well enough to distinguish aliases, renamed display labels, and two same-name actors in one bank.
+- [x] Recall returns recent facts and consolidated observations with usable temporal, entity, document, chunk, and source provenance.
+- [x] One low- or mid-budget reflect operation can answer the representative two-step and three-step relationship fixtures with evidence references.
+- [x] A Hindsight-native mechanism is selected and documented for evidence-backed correction, supersession, and suppression without a parallel Subject Profile or hard deletion.
+- [x] The supported retain, recall, reflect, source, bank, health, and correction response shapes are covered by automated real-service contract tests.
+- [x] Any failed contract requirement blocks the dependent tickets and is reported directly; no fallback memory engine or Telefire-owned graph is introduced.
 
-**What to build:** Let the Telefire owner start the AI command, send `/ai <prompt>`, and receive an OpenAI-compatible answer that appears progressively in one Telegram reply.
+## Remember and Recall One Telegram Conversation
 
-**Blocked by:** None — can start immediately.
+**What to build:** Let the owner retain one bounded human reply chain with bare `/ai_memory`, then use that evidence in a later `/ai` answer from the same chat bank.
 
-- [x] The owner can start the AI userbot through the normal Telefire command surface and send `/ai <prompt>` without replying to another message.
-- [x] Exactly one AI Answer is sent as a reply to the Trigger Message and edited at a bounded cadence as streamed text arrives.
-- [x] The provider base URL, API key, chat model, output limit, and edit cadence are configurable without logging secrets.
-- [x] Empty prompts and provider failures finish predictably without leaving a permanent loading message or crashing the userbot.
-- [x] Automated tests cover command parsing, streamed edits, finalization, and provider-error behavior without requiring Telegram or provider credentials, and the test runner collects only the project's dedicated test suite.
+**Blocked by:** Validate and Pin the Hindsight Contract.
 
-## Remember and retrieve scoped Facts and Episodes
+- [x] Trusted Telefire code maps the active Telegram chat to exactly one Hindsight bank before memory or agent work begins.
+- [x] Bare owner `/ai_memory` serializes the bounded human reply chain as one ordered Episode rather than one subject-owned request per message.
+- [x] Episode events preserve stable actors, current display labels, event time, mention time when available, reply and quotation structure, explicit mentions, attachment descriptions, and bounded provenance metadata.
+- [x] Optional Telegram message IDs remain opaque source provenance; stable document identity is derived separately from the scope and reply root.
+- [x] Stored AI Answers, AI control commands, and unsupported non-human messages are excluded from retained evidence.
+- [x] A successful bare command receives a concise stored or already-remembered acknowledgement and follows the existing owner command-deletion behavior.
+- [x] Repeating the same command or retrying after a response failure does not duplicate the Hindsight document or derived memory.
+- [x] A later `/ai` request performs one bounded recall from the pinned bank using its main prompt, reply context, deterministic participants, and explicit references.
+- [x] Recalled content is labeled as untrusted Memory Context and cannot override system policy, the current prompt, or tool policy.
+- [x] Memory timeout, malformed response, or unavailability is logged and degrades to an ordinary AI answer.
+- [x] The Telegram-facing handler tests exercise the real episode serializer, delivery state, and HTTP client against a controlled Hindsight boundary.
+- [x] This flow no longer calls the subject-scoped Zvec ingest, augment, or Subject Profile behavior; no compatibility adapter renames those obsolete operations.
 
-**What to build:** Let any memory client submit one subject-authored observation and retrieve relevant, strictly scoped Facts and Episodes through a standalone Python core or its HTTP service.
+## Capture Saved Messages Sources as Episodes
 
-**Blocked by:** None — can start immediately.
+**What to build:** Let the owner retain an accessible Telegram source by forwarding it or pasting its message link in Saved Messages, using the same Hindsight Episode pipeline as `/ai_memory`.
 
-- [x] `ingest` accepts one namespaced subject, one scope, one text payload, a timestamp, and optional opaque origin metadata.
-- [x] The original Observation is retained under a generated identifier, while an exact retry is recognized and does not create duplicate derived memory.
-- [x] A configured OpenAI-compatible model extracts validated Facts and Episodes, and a configured embedding model supplies vectors stored in Zvec.
-- [x] Embedding base URL and API key may override the chat provider settings but default to them when one provider supports both APIs.
-- [x] The store records its embedding model identity and vector dimension, rejects incompatible query configuration, and requires an explicit full re-embedding rebuild when either changes.
-- [x] `augment` returns a bounded structured Memory Context using strict subject and scope filters, hybrid semantic and keyword relevance, and a secondary recency signal for Episodes.
-- [x] Calling `augment` without a scope returns no scoped Facts or Episodes, and requesting one scope never falls back to another.
-- [x] The HTTP service is the sole Zvec writer, binds to loopback by default, and has the same observable semantics as direct use of the Python core.
-- [x] Integration tests use a temporary real Zvec store and a deterministic fake OpenAI-compatible server; they require no external credentials.
+**Blocked by:** Remember and Recall One Telegram Conversation.
 
-## Continue and fork AI Conversations
+- [x] A newly forwarded Saved Messages item with an accessible source pointer resolves the original message and its bounded human ancestors.
+- [x] A supported private or public Telegram message link pasted in Saved Messages resolves the same source and bounded chain.
+- [x] The resolved chain is serialized once through the common Episode pipeline and retained in the original source scope's Hindsight bank.
+- [x] Saved Messages capture remains a one-shot write and does not enable automatic capture for the source scope.
+- [x] A hidden, deleted, inaccessible, or privacy-protected source fails without guessing content, attribution, identity, or scope.
+- [x] The forwarded or pasted source body remains in Saved Messages and is not destructively rewritten.
+- [x] Processing, success, duplicate, retryable failure, and inaccessible-source states are visible without frequent Telegram message edits.
+- [x] A durable receipt prevents duplicate processing of one Saved Messages item while allowing an intentional re-forward or re-paste as a new attempt.
+- [x] Attachment descriptions and extracted text are retained when available, while raw bytes, Telegram URLs, and temporary paths remain transient.
+- [x] Automated tests cover forwards, private links, public links, duplicate delivery, hidden sources, failures, status rate limiting, and restart persistence.
 
-**What to build:** Let an owner start `/ai` inside an existing reply chain and continue naturally by replying to AI Answers, with each reply branch representing its own AI Conversation.
+## Enable Scope Memory and Learn After `/ai`
 
-**Blocked by:** Stream an owner-only AI Answer.
+**What to build:** Let the owner opt a chat into automatic memory and have successful AI Requests retain their bounded human episode without changing who may invoke `/ai`.
 
-- [x] A Trigger Message may stand alone or reply anywhere in a Telegram reply branch.
-- [x] Only text after `/ai` is the Initial Prompt; ancestor messages are labeled untrusted Reply Context rather than instructions.
-- [x] A direct owner reply to an AI Answer becomes a Follow-up Prompt without requiring `/ai`, while ordinary replies to human messages are ignored.
-- [x] Replying to an earlier AI Answer forks from that point and excludes messages from sibling branches.
-- [x] AI Answer markers persist locally so valid continuations still work after restarting Telefire.
-- [x] Prompt assembly preserves the trusted system policy, optional labeled memory position, untrusted reference context, prior AI Conversation roles, and current instruction in the agreed order.
-- [x] Context depth and size are bounded, and automated tests cover standalone, contextual, continued, forked, and restarted conversations.
+**Blocked by:** Remember and Recall One Telegram Conversation.
 
-## Revise and augment with Subject Profiles
+- [x] Owner-only `/ai_memory_enable`, `/ai_memory_disable`, and `/ai_memory_status` operations manage the current scope's persisted Memory-Enabled state.
+- [x] Successful enable and disable command messages follow the existing low-noise deletion behavior, while acknowledgements and status remain readable.
+- [x] Non-owner attempts do not change scope state or expose memory administration details.
+- [x] A successful `/ai` request in a Memory-Enabled Scope retains the bounded human reply thread and the current human prompt through the common Episode pipeline.
+- [x] A failed or cancelled Agent Run does not trigger automatic episode retention.
+- [x] An AI Request in a disabled scope can still recall existing one-shot memory but does not automatically write new evidence.
+- [x] Automatic retention happens after the AI Answer path and does not hold a delegated user's request-rate lease.
+- [x] AI Answers, tool snapshots, control commands, and sibling reply branches are excluded from the retained Episode.
+- [x] Reprocessing the same AI Conversation converges through document identity and content versioning instead of creating duplicate memory.
+- [x] Per-user owner and whitelist authorization remains the only AI invocation policy.
+- [x] The deprecated AI allowed-chat setting and gate are removed from runtime configuration, Compose, tests, live-test setup, and operational documentation.
+- [x] Tests cover persistent enablement, disablement, owner checks, successful and failed runs, disabled-scope recall, post-answer retention, and removal of the chat gate.
 
-**What to build:** Let a memory client deliberately update what the system knows about a subject and receive that subject's cross-scope profile alongside relevant scoped memory.
+## Capture Ordinary Chat with a Manual Dream Cycle
 
-**Blocked by:** Remember and retrieve scoped Facts and Episodes.
+**What to build:** Let the owner manually scan one enabled Telegram scope so standalone messages and reply threads become memory without requiring `/ai` or `/ai_memory` on each message.
 
-- [x] `revise` accepts a subject, natural-language instruction, optional evidence text, and an optional scope without exposing internal memory record identifiers.
-- [x] A Subject Profile is maintained as one Markdown-text Zvec record and is changed only through explicit Revision.
-- [x] A validated model result can add, correct, or suppress derived memory without automatic semantic conflict replacement during normal ingestion.
-- [x] Forgetting through Revision removes matching derived content from future augmentation but leaves retained Observations intact; no hard-delete API is added in v1.
-- [x] `augment` includes the Subject Profile and returns scoped Facts and Episodes only when that scope was requested.
-- [x] Tests cover profile creation, correction, suppression, malformed model output, and isolation between subjects and scopes.
+**Blocked by:** Enable Scope Memory and Learn After `/ai`.
 
-## Delegate AI access safely
+- [x] Owner-only `/ai_memory_dream` scans a configured bounded time window for the current Memory-Enabled Scope.
+- [x] Every eligible standalone human message becomes a one-message document with itself as the stable reply root.
+- [x] Replies in the scan window are grouped under their bounded root and retained as ordered document updates with conversational context.
+- [x] A standalone root retained in an earlier cycle accepts later replies through complete-document replacement rather than creating a second unrelated document.
+- [x] An edited previously retained event changes the content version and uses the validated bounded replace behavior.
+- [x] Ancestors just outside the scan window may be fetched for context but are not counted or delivered as newly observed events.
+- [x] Stored AI Answers, tool snapshots, bots, control commands, and unsupported content are excluded from eligible human evidence.
+- [x] Existing attachment description and text-extraction behavior is reused, and no raw media persists in memory or delivery state.
+- [x] Stable document mappings, content versions, and ingestion receipts make manual retries and overlap idempotent.
+- [x] The successful cursor advances only through document updates accepted for retention; failed documents remain retryable.
+- [x] The command produces one bounded completion summary instead of editing progress messages for each document.
+- [x] Tests cover standalone messages, reply grouping, late replies, edits, outside-window ancestors, exclusions, attachments, partial failure, cursor behavior, and restart-safe receipts.
 
-**What to build:** Let the owner grant selected Telegram users access to complete AI Conversations while keeping unauthorized and excessive use controlled.
+## Run Scheduled and Recoverable Dream Cycles
 
-**Blocked by:** Continue and fork AI Conversations.
+**What to build:** Run Dream Cycles automatically for every enabled Telegram scope with bounded scheduling, retries, rate limiting, and restart recovery.
 
-- [x] The owner can reply to a person's message with `/ai_allow` or `/ai_deny`, and the whitelist persists across restarts.
-- [x] Executed owner `/ai_allow` and `/ai_deny` command messages are deleted after handling while their acknowledgements remain visible.
-- [x] The owner is always authorized and is not represented as a whitelist entry.
-- [x] A whitelisted user can start `/ai`, continue an AI Conversation, and fork from an older AI Answer under the same prompt rules as the owner.
-- [x] Requests from non-whitelisted users are ignored silently and never call the provider.
-- [x] Each whitelisted non-owner user is limited to one in-flight request and a configurable cooldown, defaulting to 30 seconds; the owner is exempt.
-- [x] Authorization and rate-limit tests cover initial prompts, continuations, denial, revocation, concurrency, cooldown expiry, and restart persistence.
-- [x] Live Telegram tests require two explicitly named test sessions and a hard-allowlisted test chat ID, use synthetic content, and clean up messages they create.
+**Blocked by:** Capture Ordinary Chat with a Manual Dream Cycle.
 
-## Augment AI Conversations and learn from them
+- [x] A configurable cron schedule triggers Dream work in the Telegram integration rather than in Hindsight or the answer agent.
+- [x] Each cycle scans all currently enabled Telegram scopes using configured lookback, overlap, settlement delay, concurrency, and batch limits.
+- [x] A settlement delay prevents actively changing recent messages from being processed immediately.
+- [x] Bounded overlap catches late replies, edits, delayed delivery, and work whose previous acknowledgement was lost.
+- [x] A per-scope lease prevents manual and scheduled cycles from processing the same scope concurrently.
+- [x] Multiple document updates may share one retain transport batch without merging unrelated Episodes.
+- [x] Telegram flood waits and Hindsight backpressure use bounded client-side delay and retry rather than tight loops or repeated message edits.
+- [x] A failed document does not disappear behind an advanced successful cursor, and healthy documents remain idempotent when retried.
+- [x] Scheduler, cursor, receipts, and leases survive AI container restart without duplicating accepted evidence.
+- [x] Automatic scanning stops after a scope is disabled, while already accepted Hindsight memory remains recallable.
+- [x] Scope status exposes the last attempted and successful Dream times plus a bounded failure summary.
+- [x] Tests use a fake Telegram history source and controlled Hindsight endpoint to cover multi-scope scheduling, overlap, settlement, leases, batching, flood waits, partial failure, disablement, and restart recovery.
 
-**What to build:** Use the standalone memory service to give the requester and human reply-chain participants relevant background, then learn from the human messages that actually participate in an AI Conversation.
+## Resolve Exact Mentions to Stable Actors
 
-**Blocked by:** Continue and fork AI Conversations; Revise and augment with Subject Profiles.
+**What to build:** Resolve deterministic Telegram participants and exact `@` mentions to stable actors so relevant memory is considered even when the mentioned person is not in the reply chain.
 
-- [x] Telefire identifies requesters and scopes with opaque namespaced keys and communicates with memory only through its client interface.
-- [x] Before requesting an AI Answer, Telefire requests scoped Memory Context for the requester and unique human reply-chain participants, then renders the results within one shared bounded background block that cannot override system policy or the current instruction.
-- [x] Memory timeout, malformed response, and unavailability are logged without preventing the AI Answer.
-- [x] After the answer path, each human message used by the AI Conversation is submitted as a separate Observation attributed to its author and current chat scope.
-- [x] Stored AI Answers, AI control commands, and unrelated ordinary chat traffic are never ingested; AI Answers may remain untrusted reply context but never become memory participants.
-- [x] Repeated conversation processing remains idempotent through Observation retry detection.
-- [x] Integration tests prove requester and participant augmentation, fair shared context budgeting, participant ingestion, strict scope handling, AI-output filtering, and fail-open behavior using isolated state that cannot modify production whitelist, conversation, or memory data.
+**Blocked by:** Remember and Recall One Telegram Conversation.
 
-## Revise a replied user's profile from Telegram
+- [x] Episode serialization supplies every deterministic speaker and exact mentioned Telegram user as an explicit Hindsight entity hint with a stable canonical key; Episode actor metadata carries the current display label.
+- [x] Trusted Telegram resolution, not model inference, determines the canonical actor behind an exact `@` mention.
+- [x] The recall query includes exact mentioned actors even when they are absent from the bounded reply chain.
+- [x] Changing a Telegram display name preserves the canonical actor and updates the readable label without rewriting historical evidence.
+- [x] An alias learned from evidence can resolve to the canonical actor later inside the same bank.
+- [x] Two actors with the same display name in one bank remain distinct and cause clarification when the current evidence is ambiguous.
+- [x] The same nickname or alias in two banks never creates a cross-bank merge or recall.
+- [x] Plain text that resembles an `@` mention but does not resolve through Telegram is treated as untrusted content rather than a fabricated identity.
+- [x] The dashboard and source evidence show readable labels alongside canonical actor keys.
+- [x] Tests cover an out-of-chain exact mention, renamed user, scoped alias, two same-name actors, invalid mention, and identical aliases in isolated banks.
 
-**What to build:** Let the owner use `/ai_memory` in a reply chain to ingest each human observation under its author, or add an instruction to revise the directly replied person's profile using that chain as evidence.
+## Reason Over Implicit Identities and Relationships
 
-**Blocked by:** Delegate AI access safely; Augment AI Conversations and learn from them.
+**What to build:** Let the AI agent use bounded, bank-pinned memory reasoning to resolve implicit people and follow a small number of relevant relationships with source evidence.
 
-- [x] Only the owner can invoke `/ai_memory`, and the target subject is the sender of the replied-to message.
-- [x] Bare `/ai_memory` traces the same bounded reply chain as `/ai`, skips stored AI answers and control commands, ingests each supported human message under its author, and reports whether observations were stored or already remembered.
-- [x] The owner's bare `/ai_memory` command message is deleted after handling; instructed and non-owner commands are not auto-deleted.
-- [x] The command text is the Revision instruction; the bounded human reply chain is ingested by author and supplied as evidence, while the Revision applies only to the directly replied human subject.
-- [x] A successful Revision produces a concise acknowledgement without exposing internal record identifiers or model output.
-- [x] A failed or malformed Revision produces a bounded owner-visible error; reply-chain observations remain retry-safe through ingestion deduplication.
-- [x] The revised Subject Profile is available when that target later makes an authorized AI request, while other subjects remain unaffected.
-- [x] End-to-end tests cover adding, correcting, and suppressing profile content from Telegram command flows.
+**Blocked by:** Resolve Exact Mentions to Stable Actors.
 
-## Show optional identity names in the memory dashboard
+- [x] Every AI Request retains its single host-controlled initial recall from the pinned bank.
+- [x] Pi can access the bounded recall result, at most one low- or mid-budget reflect operation, and source retrieval for memories selected for use.
+- [x] Memory tool schemas contain no bank identity, write action, delete action, arbitrary result limit, token budget, or call-count override.
+- [x] Owner and delegated Agent Runs receive the same bank isolation and read-only memory boundaries.
+- [x] Reflect is used only for unresolved identity, temporal reconciliation, ambiguity, or a relevant multi-step relationship that ordinary recall did not settle.
+- [x] Source retrieval accepts only memory references already returned within the active bank and enforces fixed item and character limits.
+- [x] Retained text remains untrusted evidence and cannot invoke tools, expand the bank, alter host budgets, or become system instructions.
+- [x] Runtime Inference can shape an answer but is never automatically retained as a Fact, Episode, Observation, or Revision.
+- [x] Weak, conflicting, or ambiguous evidence produces calibrated language or a clarification request instead of an invented identity or relationship.
+- [x] A reflect or source failure falls back to bounded recall context and does not prevent an otherwise valid AI Answer.
+- [x] Agent traces identify which recalled memories and source evidence supported the answer without exposing secrets or another bank.
+- [x] Automated scenarios cover an implicit sibling, a two-step constraint recommendation, a three-step person-to-object relation, changing plans, conflict, ambiguity, prompt injection, and strict bank isolation.
 
-**What to build:** Keep canonical subject and scope keys stable while showing human-readable names resolved by client integrations such as Telegram.
+## Revise Memory from Replied Evidence
 
-**Blocked by:** Augment AI Conversations and learn from them.
+**What to build:** Let the owner use instructed `/ai_memory` to correct or suppress current memory for the directly replied human while preserving the original evidence and history.
 
-- [x] The standalone memory service exposes a generic bounded identity-label upsert contract with no Telegram dependency and persists labels outside the vector records.
-- [x] Identity updates create no observations, facts, episodes, embeddings, or profile changes.
-- [x] Telefire resolves sender and chat names through Telegram when available and updates labels only after successful memory-producing operations.
-- [x] Subject lists, details, records, search, and scope filters show display names while retaining canonical keys.
-- [x] Dashboard rendering uses text-only DOM APIs for untrusted names, and the existing private response headers remain enabled.
-- [x] Tests cover identity API validation, persistence, Telethon entity resolution, inspection responses, and dashboard rendering contracts.
+**Blocked by:** Remember and Recall One Telegram Conversation.
 
-## Render account-aware Telegram AI answers
+- [x] Only the owner can request a Revision, and the target must be the directly replied human Memory Subject.
+- [x] The bounded human reply chain is retained idempotently before the Revision is applied, even when automatic capture is disabled for the scope.
+- [x] The instruction and retained evidence use the Hindsight-native correction mechanism validated by the contract ticket.
+- [x] A later correction can supersede an earlier current state while both dated evidence trails remain inspectable.
+- [x] A suppression or forget instruction prevents matching content from normal future recall without hard-deleting its source Episode.
+- [x] A Revision never recreates the old Markdown Subject Profile, subject-owned Fact model, or a Telefire suppression index.
+- [x] A target AI Answer, missing reply, ambiguous target, malformed instruction, or memory-service failure produces a bounded owner-visible error and no guessed target.
+- [x] A successful Revision produces a concise acknowledgement without exposing internal Hindsight identifiers or raw model output.
+- [x] Revision effects remain isolated to the active bank and do not alter another chat containing the same canonical actor.
+- [x] Tests cover addition, correction, temporal supersession, suppression, malformed output, direct-human targeting, retained evidence, history inspection, and bank isolation.
 
-**What to build:** Render streamed AI output with Telegram-native formatting instead of exposing model markup, while using Rich Messages when the authenticated account is a bot.
+## Inspect Memory and Capture Health by Bank
 
-**Blocked by:** Stream an owner-only AI Answer.
+**What to build:** Give the owner a read-only bank-first inspection experience for Hindsight memory and Telefire's capture-delivery state.
 
-- [x] User accounts receive a strict regular-message HTML response guide covering bold, italic, quotations, links, code, and preformatted compact tables.
-- [x] Streamed HTML is parsed into native Telegram entities, including when opening tags arrive before visible text.
-- [x] Bot accounts receive Telegram Rich Markdown instructions and edit answers through the layer-228 rich-message field, including native pipe tables.
-- [x] Telethon 1.44 is required so local tools and containers understand Telegram's current message and rich-message schema.
-- [x] Automated tests cover account selection, native regular-message entities, rich-message edits, and split streaming tags.
-- [x] A live user-account test verifies native bold, italic, blockquote, and preformatted entities without visible raw markup.
+**Blocked by:** Run Scheduled and Recoverable Dream Cycles; Reason Over Implicit Identities and Relationships.
 
-## Execute every AI Request through Pi
+- [x] The primary memory view lists Hindsight banks with canonical scope keys and current chat or workspace display labels.
+- [x] A bank detail view exposes bounded Episodes, extracted memories, entities, observations, temporal information, and source evidence available through Hindsight.
+- [x] Actor references show current display labels alongside canonical actor keys without treating labels as identity.
+- [x] A memory or observation can be traced to its supporting source document or chunk and the relevant attribution and timestamps.
+- [x] The inspection experience distinguishes direct statements, third-party claims, conflicting evidence, current observations, and superseded material when Hindsight exposes that metadata.
+- [x] Telefire's thin operational view shows Memory-Enabled state, stable document delivery status, latest Dream attempt and success, cursor position, receipt counts, and bounded failures.
+- [x] Delivery receipts, cursors, and enablement are clearly separated from Hindsight Facts, entities, relationships, and observations.
+- [x] The old subject-profile dashboard and Zvec record read model are not retained as a parallel memory representation.
+- [x] The dashboard remains read-only; record editing, graph manipulation, hard deletion, and Dream administration are not exposed through it.
+- [x] Untrusted display names and source text are rendered through safe text APIs, and private cache, framing, content-type, and referrer protections remain enabled.
+- [x] The published endpoint binds only to the explicitly configured local interface and is not exposed publicly by default.
+- [x] HTTP and browser tests cover empty, loading, populated, ambiguous-name, source-drilldown, delivery-failure, security-header, responsive, and restart states.
 
-**What to build:** Replace the direct chat completion path with a dedicated Pi Agent Engine while preserving Telegram authorization, reply branches, streaming presentation, memory augmentation, and account-aware formatting.
+## Migrate Zvec Evidence and Retire the Old Runtime
 
-**Blocked by:** Render account-aware Telegram AI answers; Augment AI Conversations and learn from them.
+**What to build:** Re-ingest recoverable source evidence into Hindsight, report the migration, cut the running stack over completely, and remove the obsolete Zvec memory implementation.
 
-- [x] A dedicated Node service exposes validated health, streaming run, and cancellation endpoints without Telegram, Matrix, or memory credentials.
-- [x] Pi persists one Agent Session tree per root Trigger Message, and every successful AI Answer stores its Pi session and terminal entry identifiers.
-- [x] Continuations resume from the mapped entry, replies to earlier AI Answers branch from that entry, and runs within one Agent Session are serialized.
-- [x] Owner runs receive the configured Pi filesystem and shell tools; delegated runs receive only constrained web search, page retrieval, and QuickJS execution.
-- [x] `pi-web-access` is pinned and wrapped so delegated fetching is HTTP(S)-only, Exa search uses raw results, and local files, browser cookies, video handling, and GitHub cloning are unavailable.
-- [x] QuickJS runs in a fresh guest runtime with no host APIs and bounded code, time, memory, stack, and output.
-- [x] Telegram shows transient sanitized Tool Snapshots, streams the final answer in the existing message, and supports cancellation without retaining tool output in the completed answer.
-- [x] The Pi service reuses the existing OpenAI-compatible model configuration and does not expose secrets in logs, responses, or health data.
-- [x] Unit and integration tests cover API validation, streaming, cancellation, tool policies, code limits, session continuation, branching, persistence, and failure without external credentials.
-- [x] The local Docker Compose stack builds healthy `pi`, `memory`, and `ai` services and passes owner, delegated, web, calculation, continuation, fork, memory, and cancellation live checks in the allowlisted Telegram group.
+**Blocked by:** Capture Saved Messages Sources as Episodes; Run Scheduled and Recoverable Dream Cycles; Reason Over Implicit Identities and Relationships; Revise Memory from Replied Evidence; Inspect Memory and Capture Health by Bank.
 
-## Describe reply-chain attachments without storing raw media
+- [x] A dry-run inventories legacy Observations, identity labels, explicit owner Revisions, derived records, vector metadata, malformed records, and destination banks without writing Hindsight.
+- [x] Each recoverable legacy Observation becomes a marked standalone legacy Episode with stable document identity, original subject actor, scope, time, text, and available metadata.
+- [x] Recoverable identity labels become bank or actor display metadata without creating synthetic factual evidence.
+- [x] Recoverable explicit owner Revisions are retained as marked legacy correction evidence using the validated Hindsight mechanism.
+- [x] Derived Zvec Facts, Episodes, vectors, automatic Subject Profiles, relevance scores, and suppressed copies are not imported as source truth.
+- [x] Migration reuses the pinned local embedding model and re-embeds source text rather than copying an incompatible vector space.
+- [x] Repeating the migration is idempotent and does not duplicate documents, memories, labels, or corrections already accepted by Hindsight.
+- [x] The migration report includes examined, accepted, unchanged, skipped, and failed counts grouped by scope, with bounded actionable reasons and no secrets.
+- [x] A failed scope can be retried without rolling back successfully accepted, isolated banks.
+- [x] Cutover removes Zvec from the running Compose stack and makes Hindsight the only runtime memory service without dual-write or fallback reads.
+- [x] Obsolete subject-scoped APIs, extraction policy, Subject Profile code, Zvec dependencies, configuration, dashboard assumptions, and compatibility tests are removed in the same controlled migration.
+- [x] The pre-cutover Zvec volume is preserved as an offline rollback artifact for a documented bounded period and is never mounted or queried by the running application.
+- [x] Full automated tests, a migration dry run, a real temporary migration, and post-cutover Compose health checks pass before the old runtime is considered retired.
 
-**What to build:** Include bounded attachment descriptions in AI context and per-user memory while keeping raw Telegram media transient.
+## Pass the Contextual Memory Release Gate
 
-**Blocked by:** Execute every AI Request through Pi.
+**What to build:** Verify the completed Hindsight system against the agreed behavioral, security, migration, recovery, and live Telegram scenarios before treating it as deployed.
 
-- [x] Photos and image documents are normalized in memory and described through a non-persistent authenticated Pi vision endpoint.
-- [x] PDFs and UTF-8 text-like files are extracted in memory and summarized, while unsupported media contributes safe metadata only.
-- [x] The current request attachment and up to three reply-chain attachments become labeled untrusted context; attachment-only requests receive a default instruction.
-- [x] Memory observations attribute generated descriptions as content the subject shared and do not infer ownership, authorship, or truth about the subject.
-- [x] Raw bytes, Telegram URLs, and temporary paths are absent from Pi Agent Sessions, SQLite state, Zvec observations, and logs.
-- [x] Unit, provider, and live Telegram tests cover image analysis, document extraction, endpoint authentication, context assembly, memory ingestion, and non-persistence.
+**Blocked by:** Migrate Zvec Evidence and Retire the Old Runtime.
 
-## Ingest memory from Saved Messages forwards
+- [x] The scoped alias plus directly stated constraint scenario passes with three materially different query paraphrases.
+- [x] The implicit person plus two-step recommendation scenario passes with three materially different query paraphrases.
+- [x] The three-step person-to-person-to-object relationship scenario passes with three materially different query paraphrases.
+- [x] The superseded plan, promise, ownership, and completion scenario passes with three materially different query paraphrases.
+- [x] The hearsay, direct verification, retraction, and temporal precedence scenario passes with three materially different query paraphrases.
+- [x] The attachment-derived group-lore scenario passes with three materially different query paraphrases and no raw media persistence.
+- [x] The ambiguous same-name and identical cross-bank alias scenario passes with three materially different query paraphrases.
+- [x] Every behavioral pass includes the necessary evidence in recall or reflect traces, preserves attribution and time, avoids invented relationships, uses calibrated uncertainty, and reaches equivalent conclusions without exact-prose comparison.
+- [x] No scenario includes evidence, entities, source chunks, or operational state from another Hindsight bank.
+- [x] Prompt-injection fixtures prove retained text cannot select banks, invoke memory writes or deletion, raise budgets, or escape read-only tool policy.
+- [x] Container restart during retain, recall, and Dream work recovers accepted work, cursors, receipts, leases, and dashboard access without duplicate or partial cross-bank records.
+- [x] The migration dry run and real temporary migration produce complete reports and preserve the old Zvec source as an offline artifact.
+- [x] The local Compose stack starts healthy with AI, Pi, Hindsight, and the embedding service, and remains healthy through recreation.
+- [x] A live Telegram smoke test uses the existing owner, second authorized session, and disposable group to prove enablement, standalone Dream capture, reply capture, exact mention, implicit reference, Saved Messages source capture, continuation, and cross-chat isolation.
+- [x] Live tests send only synthetic content to the explicit disposable group and clean up only messages they created.
+- [x] Operational documentation describes configuration, scope controls, Dream scheduling, dashboard access, migration, backup, recovery, and known first-version limits without stale Zvec or AI allowed-chat instructions.
+- [x] Focused tests, the full project suite, behavioral gate, Compose checks, migration checks, and live smoke test all pass; any intentionally unrun check is reported with its exact residual risk.
 
-**What to build:** Let the owner privately request natural memory ingestion by forwarding a source message to Saved Messages, without posting `/ai_memory` in the source chat.
+## Verification Evidence (2026-07-13)
 
-**Blocked by:** Revise a replied user's profile from Telegram; Describe reply-chain attachments without storing raw media.
-
-- [x] Only a newly forwarded message in the authenticated owner's Saved Messages activates the trigger; direct Saved Messages text and forwards to other chats retain their existing behavior.
-- [x] Telefire uses Telegram's Saved Messages source peer and message ID to fetch the original message and ingest the same bounded ancestor chain as bare `/ai_memory`, including per-author attachment descriptions.
-- [x] The forwarded copy remains in Saved Messages; reaction tags are best-effort for Premium accounts, non-Premium success is silent, and every failure receives a private reply that distinguishes unavailable source metadata from retryable processing failure.
-- [x] A persistent adapter receipt prevents duplicate delivery of one saved copy from repeating ingestion, while re-forwarding the same source remains an intentional retry.
-- [x] Missing, private, deleted, or inaccessible source messages fail without guessing attribution or starting an AI request from forwarded command text.
-- [x] Focused, full-suite, and live Telegram tests pass against the rebuilt local Docker stack.
+- Changed-file Ruff: 18 Python files pass `ruff check` and `ruff format --check`; `git diff --check` passes. Repository-wide Ruff still reports 100 pre-existing findings in untouched legacy plugins and is not presented as a clean gate.
+- Default Python suite: `169 passed, 5 skipped`. The skipped cases are the explicit real-service and optional legacy-backend gates run separately below.
+- Pi Agent Engine: `32 passed`; `npm audit --omit=dev` reports 0 vulnerabilities.
+- Real Hindsight contract: `4 passed`, including the production `MemoryEpisode` serializer, retain/replace, recall, actor identity, reflection, invalidation, and bank isolation.
+- Seven-family Hindsight behavioral gate: `1 passed` in 94.36 seconds; each family uses three query paraphrases.
+- Migration dry run and idempotent execute examined 344 legacy documents across 6 banks: 181 unchanged source/correction documents, 161 derived records skipped, 2 profile-only records skipped, 18 recoverable suppressions, and 0 failures. The source vector metadata is `qwen3-embedding:0.6b` with dimension 1024.
+- Restart drill interrupted a retain, recreated Hindsight/Pi/dashboard, recovered one stable document, and preserved recall and dashboard access. Dream lease, watermark, retry, and crash-window behavior also pass focused regression tests.
+- Compose was rebuilt and force-recreated. AI, Pi, Hindsight, dashboard, and the standalone Qwen embedding service are healthy; every application container is read-only, drops all capabilities, and uses `no-new-privileges`. The offline `telefire-legacy-zvec` volume is not mounted by a runtime service.
+- Browser QA passed populated bank navigation, source and memory-evidence drill-down, safe rendering, foreign-Host rejection, desktop layout, and a 390x844 viewport with no page overflow (`1151px` table inside a `366px` scroll panel).
+- Live Telegram smoke passed with the existing owner and second account in the two-member disposable group: authorization, enable/disable, standalone and reply Dream capture, explicit memory, exact mention, continuation, implicit alias, delegated `code_exec`, attachment description, Saved Messages source link, revision, bank isolation, deny, and cleanup.

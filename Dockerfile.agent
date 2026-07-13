@@ -2,7 +2,7 @@ FROM node:24-bookworm-slim
 
 ENV NODE_ENV=production \
     HOME=/agent-data \
-    TELEFIRE_PI_DATA_DIR=/agent-data/.telefire-pi
+    PI_DATA_DIR=/agent-data/.pi-agent
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -22,7 +22,7 @@ RUN npm ci --omit=dev --ignore-scripts \
 COPY agent/src ./src
 
 RUN useradd --create-home --home-dir /agent-data --uid 10001 agent \
-    && mkdir -p /agent-data/.telefire-pi \
+    && mkdir -p /agent-data/.pi-agent \
     && chmod a+r package.json package-lock.json \
     && chmod -R a+rX /app/src \
     && chown -R agent:agent /agent-data

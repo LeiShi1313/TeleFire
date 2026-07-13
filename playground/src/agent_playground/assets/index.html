@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent Playground</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <h1>Agent Playground</h1>
+        <span id="service-status" class="service-status">Connecting</span>
+      </div>
+      <button id="new-chat" class="secondary-button" type="button">New chat</button>
+    </header>
+
+    <main class="workspace">
+      <aside class="control-panel" aria-label="Run configuration">
+        <section class="control-section">
+          <h2>Engine</h2>
+          <div class="segmented" role="group" aria-label="Engine mode">
+            <button type="button" data-mode="llm" aria-pressed="false">LLM</button>
+            <button type="button" data-mode="agent" aria-pressed="true">Pi Agent</button>
+          </div>
+        </section>
+
+        <section class="control-section">
+          <label for="memory-bank">Memory bank</label>
+          <select id="memory-bank">
+            <option value="">Memory off</option>
+          </select>
+          <label for="memory-query">Recall query override</label>
+          <textarea id="memory-query" rows="3" maxlength="8000" placeholder="Automatic from the current request"></textarea>
+          <button id="preview-memory" class="secondary-button full-width" type="button">Preview recall</button>
+        </section>
+
+        <details class="control-section advanced">
+          <summary>Advanced context</summary>
+          <label for="pasted-context">Pasted context</label>
+          <textarea id="pasted-context" rows="5" maxlength="16000"></textarea>
+          <label for="system-prompt">System prompt</label>
+          <textarea id="system-prompt" rows="7" maxlength="32000"></textarea>
+        </details>
+      </aside>
+
+      <section class="conversation" aria-label="Conversation">
+        <div id="transcript" class="transcript" aria-live="polite">
+          <div id="empty-chat" class="empty-chat">
+            <h2>No messages yet</h2>
+          </div>
+        </div>
+        <form id="composer" class="composer">
+          <label class="visually-hidden" for="prompt">Message</label>
+          <textarea id="prompt" rows="3" maxlength="16000" placeholder="Ask the model or agent..." required></textarea>
+          <div class="composer-actions">
+            <span id="run-status" class="run-status">Ready</span>
+            <button id="stop-run" class="secondary-button" type="button" hidden>Stop</button>
+            <button id="send" class="primary-button" type="submit">Send</button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="inspector" aria-label="Run inspector">
+        <div class="inspector-header">
+          <h2>Run inspector</h2>
+          <div class="tabs" role="tablist" aria-label="Inspector views">
+            <button type="button" role="tab" data-tab="memory" aria-selected="true">Memory</button>
+            <button type="button" role="tab" data-tab="request" aria-selected="false">Request</button>
+            <button type="button" role="tab" data-tab="tools" aria-selected="false">Tools</button>
+          </div>
+        </div>
+        <section id="inspector-memory" class="inspector-body" role="tabpanel"></section>
+        <section id="inspector-request" class="inspector-body" role="tabpanel" hidden></section>
+        <section id="inspector-tools" class="inspector-body" role="tabpanel" hidden></section>
+      </aside>
+    </main>
+  </body>
+</html>

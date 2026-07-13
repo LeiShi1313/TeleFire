@@ -79,7 +79,7 @@ def _telegram_system_prompt(
     return f"{base_prompt.rstrip()}\n\n{guide}".lstrip()
 
 
-ToolPolicy = Literal["owner", "delegated"]
+ToolPolicy = Literal["owner", "delegated", "none"]
 AgentEventType = Literal[
     "run_started",
     "tool_snapshot",

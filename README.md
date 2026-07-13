@@ -187,82 +187,64 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 
 ### Telegram AI and Memory
 
-Copy the settings from `.env.example` into a private `.env` and configure an
-OpenAI-compatible chat provider. Pi uses `TELEFIRE_AI_CHAT_MODEL` and
-`TELEFIRE_AI_REASONING_EFFORT` for Agent Runs. Hindsight independently uses
-`TELEFIRE_MEMORY_LLM_MODEL` and `TELEFIRE_MEMORY_LLM_REASONING_EFFORT` for
-memory extraction, consolidation, and reflection. These memory operations share
-the same provider endpoint and credentials. The embedding model and dimension
-define one fixed vector space; changing either requires an explicit re-ingestion
-and re-embedding operation.
-Both reasoning-effort settings accept `none`, `minimal`, `low`, `medium`, `high`,
-`xhigh`, or `max` when supported by their selected models.
+The local deployment is split into three independently owned Compose projects:
+
+- `memory/compose.yml` runs Hindsight and the read-only Memory Inspector. It has
+  no Telefire or Telegram dependency.
+- `agent/compose.yml` runs the Pi service and Agent Playground. It depends only
+  on the Memory Stack HTTP API.
+- `docker-compose.yml` runs the Telegram adapter. It calls Pi and Hindsight over
+  their private Docker networks.
+
+Create private environment files from each stack's template:
+
+```bash
+cp memory/.env.example memory/.env
+cp agent/.env.example agent/.env
+cp .env.example .env
+```
+
+Configure the memory and agent providers in their respective files. Set the same
+private token as `PI_AGENT_TOKEN` in `agent/.env` and `TELEFIRE_PI_TOKEN` in the
+root `.env`. The memory embedding model and dimension define one fixed vector
+space; changing either requires explicit re-ingestion and re-embedding. Reasoning
+effort accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` when
+supported by the selected model.
+
 `TELEFIRE_AI_EDIT_CADENCE` is the account-wide minimum interval between Telegram
 message edits and defaults to 4 seconds. Intermediate stream updates are skipped
 when the edit slot is busy; final answers wait for the next slot.
 `TELEFIRE_MEMORY_COMMAND_DELETE_DELAY` controls how many seconds accepted owner
 memory commands remain visible and defaults to 3 seconds.
 
-For a host-only development run, start Hindsight through Compose, then the Pi
-Agent Engine:
-
-```bash
-docker compose up -d hindsight
-cd agent
-npm ci
-set -a
-source ../.env
-set +a
-npm start
-```
-
-It binds to `127.0.0.1:8790` when `TELEFIRE_PI_HOST=127.0.0.1` is set. The
-read-only operational dashboard can be started separately from the repository
-root:
-
-```bash
-set -a
-source .env
-set +a
-uv run telefire-memory-dashboard
-```
-
-It binds to `127.0.0.1:8765` by default. In another terminal, start the Telegram
-userbot:
-
-```bash
-uv run telefire telegram ai
-```
-
 ### Docker compose
 
-Build and run Hindsight, Pi, the read-only dashboard, and the Telegram AI
-userbot:
+Start the Memory Stack first, then the Agent Stack, then Telefire:
 
 ```bash
-docker compose up -d
+docker compose --env-file memory/.env -f memory/compose.yml up -d --build
+docker compose --env-file agent/.env -f agent/compose.yml up -d --build
+docker compose --env-file .env up -d --build
 ```
 
-The stack uses `hindsight` as the sole memory engine, `pi` as the Agent Engine,
-`memory-dashboard` as a read-only inspection surface, and `ai` as the long-running
-userbot. The userbot container has no model API key. Pi receives only a host-pinned
-bank and bounded references for each run; memory tools cannot select another bank
-or write memory.
+All published ports bind to loopback because memory and agent sessions contain
+private data:
 
-Pi health is published on loopback at
-`http://127.0.0.1:${TELEFIRE_PI_EXPOSE_PORT:-18790}/health`. Its run API is an
-authenticated internal Telefire interface rather than a public
-OpenAI-compatible endpoint. Set one private `TELEFIRE_PI_TOKEN` value in
-`.env`; Compose supplies it only to the Pi and AI containers.
+- Memory API: `http://127.0.0.1:18888`
+- Native Hindsight UI: `http://127.0.0.1:19999`
+- Memory Inspector: `http://127.0.0.1:18866`
+- Private Pi API: `http://127.0.0.1:18790`
+- Agent Playground: `http://127.0.0.1:18867`
 
-The Telefire dashboard is available at
-`http://127.0.0.1:${TELEFIRE_MEMORY_DASHBOARD_EXPOSE_PORT:-18866}/admin` and the
-native Hindsight UI at
-`http://127.0.0.1:${TELEFIRE_HINDSIGHT_UI_EXPOSE_PORT:-19999}`. Both published
-ports bind to loopback because they contain private chat-derived evidence.
+The playground can run a plain model session with all tools disabled, or a Pi
+session with the same constrained web, code, and bank-pinned memory tools used by
+the Telegram adapter. It exposes the exact prepared request, recalled evidence,
+and transient tool snapshots in the browser without exposing provider keys or the
+Pi token. Pi's HTTP API remains a private authenticated interface, not an
+OpenAI-compatible endpoint.
 
-`TELEGRAM_API_ID` and `TELEGRAM_API_HASH` must be set in `.env` (or provided via
-host config). Pi and Hindsight provider variables come from the same file.
+`TELEGRAM_API_ID` and `TELEGRAM_API_HASH` must be set in the root `.env`. The
+userbot container receives neither model-provider nor embedding credentials.
 
 A Telegram API login/session still needs to be initialized once:
 
@@ -277,21 +259,21 @@ docker compose restart ai
 ```
 
 The standalone Ollama Compose stack joins the external `ollama-embedding` network.
-Point Hindsight at that service in `.env`:
+Point Hindsight at that service in `memory/.env`:
 
 ```bash
-TELEFIRE_AI_EMBEDDING_BASE_URL=http://ollama-embedding-ollama-1:11434/v1
-TELEFIRE_AI_EMBEDDING_API_KEY=ollama
+MEMORY_EMBEDDING_BASE_URL=http://ollama-embedding-ollama-1:11434/v1
+MEMORY_EMBEDDING_API_KEY=ollama
 ```
 
 For a host Ollama process instead, use
-`TELEFIRE_AI_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1`.
+`MEMORY_EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1`.
 Compose maps that hostname to the Linux host gateway. In Docker,
 `http://127.0.0.1:11434` is the Hindsight container itself and must not be used.
 
-Configuration is loaded from `.env` in the repository root. `telefire-runtime`
-contains `ai.db` and Telegram sessions, `telefire-hindsight` contains memory, and
-Pi's private Agent Sessions live in `telefire-pi-runtime`.
+The root `telefire-runtime` volume contains `ai.db` and Telegram sessions,
+`memory-hindsight-data` contains Hindsight, and Pi's private Agent Sessions live
+in `pi-agent-data`.
 
 Commands and reply behavior:
 
@@ -392,14 +374,18 @@ Back up the three active volumes while their writers are stopped, or through a
 storage-aware snapshot mechanism:
 
 ```bash
-docker compose stop ai pi hindsight memory-dashboard
+docker compose --env-file .env stop ai
+docker compose --env-file agent/.env -f agent/compose.yml stop pi-agent
+docker compose --env-file memory/.env -f memory/compose.yml stop memory-api
 docker run --rm -v telefire_telefire-runtime:/source:ro \
   -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-runtime.tgz .
-docker run --rm -v telefire_telefire-pi-runtime:/source:ro \
-  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-pi-runtime.tgz .
-docker run --rm -v telefire_telefire-hindsight:/source:ro \
-  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/telefire-hindsight.tgz .
-docker compose up -d
+docker run --rm -v pi-agent-data:/source:ro \
+  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/pi-agent-data.tgz .
+docker run --rm -v memory-hindsight-data:/source:ro \
+  -v "$PWD/backups":/backup alpine tar -C /source -czf /backup/memory-hindsight-data.tgz .
+docker compose --env-file memory/.env -f memory/compose.yml up -d
+docker compose --env-file agent/.env -f agent/compose.yml up -d
+docker compose --env-file .env up -d
 ```
 
 Restore into empty volumes while the stack is stopped, then recreate the stack and
@@ -423,8 +409,8 @@ docker run --rm \
   alpine sh -c 'cp -a /source/. /archive/'
 docker run --rm -v telefire-legacy-zvec:/archive:ro \
   alpine sh -c 'test -n "$(find /archive -mindepth 1 -print -quit)"'
-docker inspect telefire-ai telefire-pi telefire-hindsight \
-  telefire-memory-dashboard --format '{{range .Mounts}}{{.Name}} {{end}}'
+docker inspect telefire-ai pi-agent memory-api memory-inspector \
+  --format '{{range .Mounts}}{{.Name}} {{end}}'
 ```
 
 The final inspection must not print `telefire-legacy-zvec`. A dry run or explicit
@@ -454,8 +440,10 @@ host. They are not authenticated public services and must remain bound to loopba
 or be accessed through a trusted local tunnel.
 
 If the userbot replies with `AI request failed`, inspect bounded service logs with
-`docker compose logs ai pi hindsight memory-dashboard`. Responses and health checks do not expose API
-keys or raw provider payloads.
+`docker compose --env-file .env logs ai`,
+`docker compose --env-file agent/.env -f agent/compose.yml logs pi-agent`, and
+`docker compose --env-file memory/.env -f memory/compose.yml logs memory-api`.
+Responses and health checks do not expose API keys or raw provider payloads.
 
 Matrix examples:
 

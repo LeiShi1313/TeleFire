@@ -146,9 +146,7 @@ class InspectorData:
             self._session = aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=self._settings.request_timeout)
             )
-        async with self._session.get(
-            f"{self._settings.memory_url}{path}"
-        ) as response:
+        async with self._session.get(f"{self._settings.memory_url}{path}") as response:
             if response.status < 200 or response.status >= 300:
                 raise RuntimeError(f"Memory API returned HTTP {response.status}")
             payload = await response.json()

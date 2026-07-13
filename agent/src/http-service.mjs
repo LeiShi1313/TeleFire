@@ -56,7 +56,7 @@ export function validateRunRequest(value) {
     (!isRoot && !isContinuation) ||
     !isBoundedString(value.prompt, 1, 16_000) ||
     !isBoundedString(value.systemPrompt, 1, 32_000) ||
-    !new Set(["owner", "delegated"]).has(value.toolPolicy) ||
+    !new Set(["owner", "delegated", "none"]).has(value.toolPolicy) ||
     !Array.isArray(value.context) ||
     value.context.length > 4
   ) {

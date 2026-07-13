@@ -160,15 +160,11 @@ async def hindsight_server() -> tuple[web.AppRunner, str]:
     app.router.add_get("/v1/default/banks/{bank_id}/memories/{memory_id}", memory)
     app.router.add_get("/v1/default/banks/{bank_id}/documents", documents)
     app.router.add_get("/v1/default/banks/{bank_id}/entities", entities)
-    app.router.add_get(
-        "/v1/default/banks/{bank_id}/observations/scopes", observations
-    )
+    app.router.add_get("/v1/default/banks/{bank_id}/observations/scopes", observations)
     app.router.add_get(
         "/v1/default/banks/{bank_id}/documents/{document_id}/chunks", chunks
     )
-    app.router.add_get(
-        "/v1/default/banks/{bank_id}/documents/{document_id}", document
-    )
+    app.router.add_get("/v1/default/banks/{bank_id}/documents/{document_id}", document)
     return await start(app)
 
 

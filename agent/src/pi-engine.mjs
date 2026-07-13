@@ -16,13 +16,13 @@ import { executeJavaScript } from "./code-exec.mjs";
 import { createMemoryTools, MEMORY_TOOL_NAMES } from "./memory-tools.mjs";
 import { constrainWebTools } from "./web-tools.mjs";
 
-const PROVIDER = "telefire-openai";
+const PROVIDER = "openai-compatible";
 const RESTRICTED_TOOLS = Object.freeze([
   "web_search",
   "fetch_content",
   "code_exec",
 ]);
-const TOOL_POLICIES = new Set(["owner", "delegated"]);
+const TOOL_POLICIES = new Set(["owner", "delegated", "none"]);
 
 class AsyncQueue {
   #items = [];
@@ -102,6 +102,7 @@ export function buildRunPrompt({ prompt, context }) {
 
 export function toolNamesForPolicy(policy, memoryEnabled = false) {
   if (!TOOL_POLICIES.has(policy)) throw new Error("Unknown tool policy");
+  if (policy === "none") return [];
   const memoryTools = memoryEnabled ? MEMORY_TOOL_NAMES : [];
   return [...RESTRICTED_TOOLS, ...memoryTools];
 }
@@ -341,7 +342,7 @@ export class PiEngine {
   async initialize() {
     await this.#ensureDirectories();
     const loader = await this.#resourceLoader(
-      "You are the Telefire agent engine. Follow the current request.",
+      "You are the Pi agent engine. Follow the current request.",
     );
     const names = new Set(
       loader

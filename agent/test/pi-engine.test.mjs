@@ -204,6 +204,8 @@ test("owner and delegated runs receive the same restricted tools", () => {
   assert.deepEqual(toolNamesForPolicy("delegated"), genericTools);
   assert.deepEqual(toolNamesForPolicy("owner", true), toolsWithMemory);
   assert.deepEqual(toolNamesForPolicy("delegated", true), toolsWithMemory);
+  assert.deepEqual(toolNamesForPolicy("none"), []);
+  assert.deepEqual(toolNamesForPolicy("none", true), []);
 });
 
 test("persists a session tree and branches from mapped entries", async () => {

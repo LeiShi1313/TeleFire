@@ -1,118 +1,18 @@
 services:
-  hindsight:
-    image: ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a560735aaf6f314e4b63c36c73159742dfa1a7
-    container_name: telefire-hindsight
-    environment:
-      HINDSIGHT_API_LLM_PROVIDER: openai
-      HINDSIGHT_API_LLM_API_KEY: ${TELEFIRE_AI_API_KEY}
-      HINDSIGHT_API_LLM_MODEL: ${TELEFIRE_MEMORY_LLM_MODEL}
-      HINDSIGHT_API_LLM_BASE_URL: ${TELEFIRE_AI_BASE_URL}
-      HINDSIGHT_API_LLM_REASONING_EFFORT: ${TELEFIRE_MEMORY_LLM_REASONING_EFFORT:-low}
-      HINDSIGHT_API_LLM_TEMPERATURE: none
-      HINDSIGHT_API_EMBEDDINGS_PROVIDER: openai
-      HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY: ${TELEFIRE_AI_EMBEDDING_API_KEY:-ollama}
-      HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL: ${TELEFIRE_AI_EMBEDDING_MODEL:-qwen3-embedding:0.6b}
-      HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL: ${TELEFIRE_AI_EMBEDDING_BASE_URL:-http://ollama-embedding-ollama-1:11434/v1}
-      HINDSIGHT_API_EMBEDDINGS_OPENAI_DIMENSIONS: ${TELEFIRE_AI_EMBEDDING_DIMENSION:-1024}
-      HINDSIGHT_API_RERANKER_PROVIDER: rrf
-      HINDSIGHT_API_RETAIN_ENTITY_LOOKUP: full
-      HINDSIGHT_API_WORKER_ID: telefire-hindsight
-    networks:
-      - default
-      - ollama-embedding
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "127.0.0.1:${TELEFIRE_HINDSIGHT_EXPOSE_PORT:-18888}:8888"
-      - "127.0.0.1:${TELEFIRE_HINDSIGHT_UI_EXPOSE_PORT:-19999}:9999"
-    volumes:
-      - telefire-hindsight:/home/hindsight/.pg0
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=256m
-    pids_limit: 512
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD
-        - curl
-        - --fail
-        - --silent
-        - http://127.0.0.1:8888/health
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
-  pi:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-    container_name: telefire-pi
-    depends_on:
-      hindsight:
-        condition: service_healthy
-    environment:
-      TELEFIRE_AI_BASE_URL: ${TELEFIRE_AI_BASE_URL}
-      TELEFIRE_AI_API_KEY: ${TELEFIRE_AI_API_KEY}
-      TELEFIRE_AI_CHAT_MODEL: ${TELEFIRE_AI_CHAT_MODEL}
-      TELEFIRE_AI_REASONING_EFFORT: ${TELEFIRE_AI_REASONING_EFFORT:-none}
-      TELEFIRE_AI_MAX_OUTPUT_TOKENS: ${TELEFIRE_AI_MAX_OUTPUT_TOKENS:-4000}
-      TELEFIRE_AI_CONTEXT_WINDOW: ${TELEFIRE_AI_CONTEXT_WINDOW:-128000}
-      TELEFIRE_AI_REQUEST_TIMEOUT: ${TELEFIRE_AI_REQUEST_TIMEOUT:-90}
-      TELEFIRE_PI_HOST: "0.0.0.0"
-      TELEFIRE_PI_PORT: "8790"
-      TELEFIRE_PI_DATA_DIR: /agent-data/.telefire-pi
-      TELEFIRE_PI_TOKEN: ${TELEFIRE_PI_TOKEN}
-      TELEFIRE_HINDSIGHT_URL: http://hindsight:8888
-    init: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=128m
-    pids_limit: 256
-    ports:
-      - "127.0.0.1:${TELEFIRE_PI_EXPOSE_PORT:-18790}:8790"
-    volumes:
-      - telefire-pi-runtime:/agent-data
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - fetch('http://127.0.0.1:8790/health').then(r=>{if(!r.ok)process.exit(1)})
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
-
   ai:
     build:
       context: .
     container_name: telefire-ai
     command: ["python", "-m", "telefire.cli", "telegram", "ai", "--account", "default"]
-    depends_on:
-      hindsight:
-        condition: service_healthy
-      pi:
-        condition: service_healthy
     environment:
       PYTHONPATH: /app/src
       HOME: /telefire-data
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
-      TELEFIRE_PI_URL: http://telefire-pi:8790
+      TELEFIRE_PI_URL: http://pi-agent:8790
       TELEFIRE_PI_TOKEN: ${TELEFIRE_PI_TOKEN}
       TELEFIRE_PI_RUN_TIMEOUT: ${TELEFIRE_PI_RUN_TIMEOUT:-300}
-      TELEFIRE_HINDSIGHT_URL: http://hindsight:8888
+      TELEFIRE_HINDSIGHT_URL: http://memory-api:8888
       TELEFIRE_HINDSIGHT_TIMEOUT: ${TELEFIRE_HINDSIGHT_TIMEOUT:-90}
       TELEFIRE_MEMORY_DREAM_LOOKBACK_HOURS: ${TELEFIRE_MEMORY_DREAM_LOOKBACK_HOURS:-24}
       TELEFIRE_MEMORY_DREAM_OVERLAP_SECONDS: ${TELEFIRE_MEMORY_DREAM_OVERLAP_SECONDS:-600}
@@ -139,6 +39,9 @@ services:
       TELEFIRE_AI_DELEGATED_COOLDOWN: ${TELEFIRE_AI_DELEGATED_COOLDOWN:-30}
     volumes:
       - telefire-runtime:/telefire-data
+    networks:
+      - memory-platform
+      - agent-platform
     cap_drop:
       - ALL
     security_opt:
@@ -151,11 +54,11 @@ services:
 
 volumes:
   telefire-runtime:
-  telefire-pi-runtime:
-  telefire-hindsight:
 
 networks:
-  default:
-  ollama-embedding:
+  memory-platform:
     external: true
-    name: ollama-embedding
+    name: memory-platform
+  agent-platform:
+    external: true
+    name: agent-platform

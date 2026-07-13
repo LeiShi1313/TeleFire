@@ -1,4 +1,5 @@
-.env
+.env*
+**/.env*
 .git
 .venv
 __pypackages__
@@ -18,4 +19,7 @@ __pycache__
 logs
 dist
 build
+docs
+memory
+playground
 **/node_modules

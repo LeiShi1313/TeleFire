@@ -97,6 +97,34 @@ test("rejects invalid run input before invoking the engine", async () => {
   }
 });
 
+test("accepts a no-tools model run", async () => {
+  let received;
+  const app = await listen({
+    async *run(request) {
+      received = request;
+      yield { type: "run_completed", sessionId: "s", entryId: "e", answer: "ok" };
+    },
+    async cancel() {
+      return false;
+    },
+  });
+  try {
+    const response = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({ ...validRun, toolPolicy: "none" }),
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(received.toolPolicy, "none");
+  } finally {
+    await app.close();
+  }
+});
+
 test("accepts bounded host-pinned memory access and rejects bank injection", async () => {
   let received;
   const app = await listen({

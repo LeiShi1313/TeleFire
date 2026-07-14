@@ -1,0 +1,24 @@
+FROM ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a560735aaf6f314e4b63c36c73159742dfa1a7
+
+USER root
+
+# Hindsight runs from its bundled virtualenv and invokes Node directly. Remove
+# package managers left by the upstream build and apply available OS fixes.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf \
+        /app/sdk/node_modules/@hey-api/openapi-ts \
+        /usr/lib/node_modules/npm \
+        /usr/local/lib/python3.11/site-packages/* \
+        /var/lib/apt/lists/* \
+    && rm -f \
+        /usr/bin/npm \
+        /usr/bin/npx \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.11 \
+        /usr/local/bin/uv \
+        /usr/local/bin/uvx \
+        /usr/local/bin/wheel
+
+USER hindsight

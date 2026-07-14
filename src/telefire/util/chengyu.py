@@ -1,16 +1,8 @@
-import pickle
 from collections import defaultdict
 
 
 def load_chengyu_dict():
     """Load chengyu dictionary from a list file and build character index"""
-    try:
-        # Try to load pre-built dictionary first
-        with open('chengyu_dict.pkl', 'rb') as f:
-            return pickle.load(f)
-    except FileNotFoundError:
-        pass
-    
     chengyu_dict = defaultdict(list)
     try:
         with open('chengyu_list.txt', 'r', encoding='utf-8') as f:
@@ -85,11 +77,4 @@ def load_chengyu_dict():
         first_char = chengyu[0]
         chengyu_dict[first_char].append(chengyu)
     
-    chengyu_dict = dict(chengyu_dict)
-    try:
-        with open('chengyu_dict.pkl', 'wb') as f:
-            pickle.dump(chengyu_dict, f)
-    except Exception as e:
-        print(f"Warning: Could not save chengyu dictionary: {e}")
-    
-    return chengyu_dict
+    return dict(chengyu_dict)

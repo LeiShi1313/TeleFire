@@ -33,7 +33,7 @@ Reusable instructions and supporting resources that guide the agent engine throu
 _Avoid_: Tool, prompt, extension
 
 **AI Conversation**:
-A reply branch opened by an `/ai` trigger and continued by replying directly to AI answers. Replying to an earlier AI answer creates a new branch with the same preceding context.
+A reply branch opened by an `/ai` trigger and continued without a command by replying directly to AI answers. An explicit `/ai` elsewhere in the reply ancestry rejoins the nearest completed AI turn; replying to an earlier AI answer creates a new branch with the same preceding context.
 _Avoid_: Session, thread
 
 **AI Answer**:
@@ -81,7 +81,7 @@ A bounded, sanitized, temporary view of the active tool and its result shown whi
 _Avoid_: Tool log, reasoning, final answer
 
 **Trigger Message**:
-A message beginning with `/ai` that opens an AI conversation. It may stand alone or reply within an existing chat chain.
+A message beginning with `/ai` that makes an explicit AI request. It starts a new AI conversation when its reply ancestry has no completed AI turn; otherwise it rejoins the nearest one.
 _Avoid_: Command message
 
 **User Memory**:

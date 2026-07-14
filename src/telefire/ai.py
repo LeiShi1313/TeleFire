@@ -394,6 +394,10 @@ class ConversationStore(Protocol):
         self, chat_id: int, answer_message_id: int
     ) -> AIAnswerMarker | None: ...
 
+    async def get_turn_for_message(
+        self, chat_id: int, message_id: int
+    ) -> AIAnswerMarker | None: ...
+
     async def save_answer(self, marker: AIAnswerMarker) -> None: ...
 
     async def is_allowed(self, user_id: int) -> bool: ...
@@ -1136,6 +1140,12 @@ class AIStateRepository:
         )
         await self._connection.execute(
             """
+            CREATE INDEX IF NOT EXISTS ai_answers_by_trigger
+            ON ai_answers (chat_id, trigger_message_id, answer_message_id DESC)
+            """
+        )
+        await self._connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS ai_memory_scope_labels (
                 scope_id TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
@@ -1288,6 +1298,23 @@ class AIStateRepository:
         cursor = await connection.execute(
             "SELECT * FROM ai_answers WHERE chat_id = ? AND answer_message_id = ?",
             (chat_id, answer_message_id),
+        )
+        row = await cursor.fetchone()
+        return _marker_from_row(row) if row else None
+
+    async def get_turn_for_message(
+        self, chat_id: int, message_id: int
+    ) -> AIAnswerMarker | None:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            """
+            SELECT * FROM ai_answers
+            WHERE chat_id = ?
+              AND (answer_message_id = ? OR trigger_message_id = ?)
+            ORDER BY answer_message_id = ? DESC, answer_message_id DESC
+            LIMIT 1
+            """,
+            (chat_id, message_id, message_id, message_id),
         )
         row = await cursor.fetchone()
         return _marker_from_row(row) if row else None
@@ -2047,6 +2074,16 @@ class AIConversationHandler:
         rate_released = False
         run_id: str | None = None
         try:
+            if trigger_prompt is not None:
+                parent = await self._find_explicit_parent(message)
+                if (
+                    parent is not None
+                    and parent.agent_session_id
+                    and parent.agent_entry_id
+                ):
+                    parent_answer_id = parent.answer_message_id
+                    agent_session_id = parent.agent_session_id
+                    parent_entry_id = parent.agent_entry_id
             current_attachment = await self._prompt_builder.describe_attachment(message)
             current_identity = await self._prompt_builder.resolve_identity(message)
             current_mentions = await self._prompt_builder.resolve_mentions(message)
@@ -2159,6 +2196,26 @@ class AIConversationHandler:
     async def remember_reply_chain(self, target: ReplyTarget) -> bool:
         retained = await self._retain_memory_chain(target)
         return retained is not None and bool(retained.observations)
+
+    async def _find_explicit_parent(
+        self,
+        message: ReplyTarget,
+    ) -> AIAnswerMarker | None:
+        assert message.chat_id is not None
+        current = await message.get_reply_message()
+        seen: set[tuple[int | None, int]] = set()
+        for _ in range(self._prompt_builder.max_context_messages):
+            if current is None:
+                return None
+            identity = (current.chat_id, current.id)
+            if identity in seen:
+                return None
+            seen.add(identity)
+            turn = await self._store.get_turn_for_message(message.chat_id, current.id)
+            if turn is not None:
+                return turn
+            current = await current.get_reply_message()
+        return None
 
     async def _handle_cancel(self, message: ReplyTarget) -> bool:
         assert message.sender_id is not None

@@ -633,7 +633,11 @@ export class PiEngine {
             };
             terminalRecorded = true;
             await record("run.failed", failed);
-            queue.push({ type: "run_failed", ...failed });
+            queue.push({
+              type: "run_failed",
+              code: failed.code,
+              message: failed.message,
+            });
           } else if (lastAssistant?.stopReason === "error") {
             const rateLimited = isProviderRateLimit(lastAssistant);
             const failed = {

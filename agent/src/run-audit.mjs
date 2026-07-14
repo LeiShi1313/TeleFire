@@ -25,11 +25,35 @@ function isPrivateKey(key) {
     normalized === "cookie" ||
     normalized === "setcookie" ||
     normalized === "password" ||
+    normalized === "errormessage" ||
     normalized === "thinkingsignature" ||
     normalized === "apikey" ||
     normalized.endsWith("token") ||
     normalized.includes("secret")
   );
+}
+
+function sanitizedUrl(value) {
+  if (typeof value !== "string") return sanitizeAuditValue(value);
+  try {
+    const parsed = new URL(value);
+    parsed.username = "";
+    parsed.password = "";
+    for (const key of parsed.searchParams.keys()) {
+      const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (
+        isPrivateKey(key) ||
+        normalized === "key" ||
+        normalized === "sig" ||
+        normalized.includes("signature")
+      ) {
+        parsed.searchParams.set(key, "[REDACTED]");
+      }
+    }
+    return bounded(parsed.toString());
+  } catch {
+    return bounded(value);
+  }
 }
 
 function bounded(value, max = MAX_STRING_CHARS) {
@@ -66,9 +90,18 @@ export function sanitizeAuditValue(value, depth = 0, seen = new WeakSet()) {
     }
     const result = {};
     for (const [key, item] of Object.entries(value).slice(0, MAX_OBJECT_KEYS)) {
-      result[key] = isPrivateKey(key)
-        ? "[REDACTED]"
-        : sanitizeAuditValue(item, depth + 1, seen);
+      const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (isPrivateKey(key)) result[key] = "[REDACTED]";
+      else if (normalized === "url" || normalized.endsWith("url")) {
+        result[key] = sanitizedUrl(item);
+      } else if (
+        (normalized === "urls" || normalized.endsWith("urls")) &&
+        Array.isArray(item)
+      ) {
+        result[key] = item
+          .slice(0, MAX_ARRAY_ITEMS)
+          .map((url) => sanitizedUrl(url));
+      } else result[key] = sanitizeAuditValue(item, depth + 1, seen);
     }
     return result;
   } finally {
@@ -121,9 +154,16 @@ class RunAuditRecorder {
 
 function parseAudit(content, expectedRunId) {
   const events = [];
-  for (const line of content.split("\n")) {
+  const lines = content.split("\n");
+  for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue;
-    const event = JSON.parse(line);
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (error) {
+      if (index === lines.length - 1 && !content.endsWith("\n")) break;
+      throw error;
+    }
     if (
       !event ||
       event.version !== 1 ||

@@ -432,7 +432,8 @@ function pretty(value) {
 }
 
 async function loadSessions({ append = false } = {}) {
-  if (state.historyLoading) return;
+  const loadToken = (state.sessionLoadToken || 0) + 1;
+  state.sessionLoadToken = loadToken;
   state.historyLoading = true;
   state.historyError = null;
   renderSessionList();
@@ -442,7 +443,7 @@ async function loadSessions({ append = false } = {}) {
   if (append && state.sessionCursor) params.set("cursor", state.sessionCursor);
   try {
     const page = await requestJson(`/api/sessions?${params}`);
-    if (queryAtStart !== state.sessionQuery) return;
+    if (loadToken !== state.sessionLoadToken || queryAtStart !== state.sessionQuery) return;
     state.sessions = append ? [...state.sessions, ...page.items] : page.items;
     state.sessionTotal = page.total;
     state.sessionCursor = page.nextCursor;
@@ -454,11 +455,14 @@ async function loadSessions({ append = false } = {}) {
       else clearSelectedSession();
     }
   } catch (error) {
+    if (loadToken !== state.sessionLoadToken) return;
     state.historyError = error.message;
     renderSessionList();
   } finally {
-    state.historyLoading = false;
-    renderSessionList();
+    if (loadToken === state.sessionLoadToken) {
+      state.historyLoading = false;
+      renderSessionList();
+    }
   }
 }
 

@@ -19,6 +19,7 @@ function isPrivateKey(key) {
     normalized === "cookie" ||
     normalized === "setcookie" ||
     normalized === "password" ||
+    normalized === "errormessage" ||
     normalized === "thinkingsignature" ||
     normalized === "apikey" ||
     normalized.endsWith("token") ||
@@ -28,12 +29,36 @@ function isPrivateKey(key) {
 
 function imageMetadata(value) {
   const supplied = typeof value.data === "string" ? value.data : "";
+  const padding = supplied.endsWith("==") ? 2 : supplied.endsWith("=") ? 1 : 0;
   return {
     type: "image",
     mimeType: bounded(value.mimeType, 256),
-    sizeBytes: Math.floor((supplied.length * 3) / 4),
+    sizeBytes: Math.max(0, Math.floor((supplied.length * 3) / 4) - padding),
     data: "[OMITTED]",
   };
+}
+
+function sanitizedUrl(value) {
+  if (typeof value !== "string") return sanitizeSessionValue(value);
+  try {
+    const parsed = new URL(value);
+    parsed.username = "";
+    parsed.password = "";
+    for (const key of parsed.searchParams.keys()) {
+      const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (
+        isPrivateKey(key) ||
+        normalized === "key" ||
+        normalized === "sig" ||
+        normalized.includes("signature")
+      ) {
+        parsed.searchParams.set(key, "[REDACTED]");
+      }
+    }
+    return bounded(parsed.toString(), MAX_STRING_CHARS);
+  } catch {
+    return bounded(value, MAX_STRING_CHARS);
+  }
 }
 
 export function sanitizeSessionValue(value, depth = 0, seen = new WeakSet()) {
@@ -54,9 +79,18 @@ export function sanitizeSessionValue(value, depth = 0, seen = new WeakSet()) {
     }
     const result = {};
     for (const [key, item] of Object.entries(value).slice(0, MAX_OBJECT_KEYS)) {
-      result[key] = isPrivateKey(key)
-        ? "[REDACTED]"
-        : sanitizeSessionValue(item, depth + 1, seen);
+      const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+      if (isPrivateKey(key)) result[key] = "[REDACTED]";
+      else if (normalized === "url" || normalized.endsWith("url")) {
+        result[key] = sanitizedUrl(item);
+      } else if (
+        (normalized === "urls" || normalized.endsWith("urls")) &&
+        Array.isArray(item)
+      ) {
+        result[key] = item
+          .slice(0, MAX_ARRAY_ITEMS)
+          .map((url) => sanitizedUrl(url));
+      } else result[key] = sanitizeSessionValue(item, depth + 1, seen);
     }
     return result;
   } finally {

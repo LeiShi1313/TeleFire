@@ -594,14 +594,15 @@ def _parse_audit_page(payload: dict[str, Any]) -> dict[str, Any]:
                 "eventCount": event_count,
             }
         )
+    next_cursor = payload.get("nextCursor")
+    if next_cursor is not None and (
+        not isinstance(next_cursor, str) or not _RUN_ID_RE.fullmatch(next_cursor)
+    ):
+        raise UpstreamUnavailable("Pi agent returned malformed audits")
     return {
         "items": items,
         "total": total,
-        "nextCursor": (
-            _optional_history_string(payload, "nextCursor", 36)
-            if payload.get("nextCursor") is not None
-            else None
-        ),
+        "nextCursor": next_cursor,
     }
 
 

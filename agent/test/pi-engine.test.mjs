@@ -553,6 +553,11 @@ test("classifies provider rate limits without exposing provider details", async 
       "Agent provider is temporarily rate limited",
     );
     assert.doesNotMatch(JSON.stringify(events), /credential detail/);
+    const audit = await app.engine.getRunAudit(
+      "55555555-5555-4555-8555-555555555555",
+    );
+    assert(audit.events.some((event) => event.type === "run.failed"));
+    assert.doesNotMatch(JSON.stringify(audit), /credential detail/);
   } finally {
     await app.close();
   }

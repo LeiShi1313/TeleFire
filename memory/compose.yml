@@ -1,6 +1,9 @@
 services:
   memory-api:
-    image: ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a560735aaf6f314e4b63c36c73159742dfa1a7
+    build:
+      context: .
+      dockerfile: Dockerfile.hindsight
+    image: telefire-hindsight:0.8.4-hardened
     container_name: memory-api
     environment:
       HINDSIGHT_API_LLM_PROVIDER: openai

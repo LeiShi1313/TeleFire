@@ -140,7 +140,7 @@ def test_settings_use_generic_environment_names(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_run_previews_memory_and_streams_pi_events():
+async def test_agent_run_delegates_memory_to_pi_and_streams_events():
     dependency_runners, memory_url, pi_url, received = await dependencies()
     playground_runner, playground_url = await request_app(memory_url, pi_url)
     try:
@@ -184,29 +184,28 @@ async def test_agent_run_previews_memory_and_streams_pi_events():
         assert prepared["type"] == "run_prepared"
         assert prepared["mode"] == "agent"
         assert prepared["toolPolicy"] == "owner"
-        assert prepared["memory"]["memories"][0]["id"] == "memory-1"
+        assert prepared["memory"] == {
+            "bankId": "chat:engineering",
+            "query": "Automatic from request and references",
+            "memories": [],
+            "managedBy": "agent",
+        }
         assert prepared["request"]["systemPrompt"] == "Use evidence carefully."
         assert events[-1]["type"] == "run_completed"
         assert events[-1]["answer"] == "Alice owns it."
 
-        assert len(received["recalls"]) == 2
-        assert "Earlier we discussed" in received["recalls"][-1]["query"]
+        assert len(received["recalls"]) == 1
         pi_request = received["runs"][0]
         assert pi_request["toolPolicy"] == "owner"
-        assert pi_request["memoryAccess"] == {
-            "bankId": "chat:engineering",
-            "references": [
-                {
-                    "memoryId": "memory-1",
-                    "documentId": "conversation:41",
-                    "chunkId": "chunk-1",
-                }
-            ],
+        assert pi_request["memory"] == {
+            "scopeId": "chat:engineering",
+            "anchors": [],
         }
         assert [item["kind"] for item in pi_request["context"]] == [
-            "memory",
-            "reply",
+            "reference",
+            "reference",
         ]
+        assert "Earlier we discussed" in pi_request["context"][0]["text"]
         assert "private-pi-token" not in json.dumps(events)
     finally:
         await playground_runner.cleanup()

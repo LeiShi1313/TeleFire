@@ -151,7 +151,7 @@ class MemoryRecall:
     def render(self, *, max_chars: int = 4_000) -> str:
         if max_chars < 1 or not self.memories:
             return ""
-        sections = ["Relevant evidence recalled from this chat bank:"]
+        sections = ["Relevant evidence recalled from the selected memory scope:"]
         for memory in self.memories:
             details: list[str] = []
             if memory.memory_type:

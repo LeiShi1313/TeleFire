@@ -5,8 +5,8 @@ from aiohttp import web
 
 from telefire.ai import (
     AgentContext,
-    AgentMemoryAccess,
-    AgentMemoryReference,
+    AgentIdentityAnchor,
+    AgentMemoryTarget,
     AgentRunRequest,
     PiAgentGateway,
 )
@@ -29,16 +29,15 @@ def run_request() -> AgentRunRequest:
         session_id=None,
         parent_entry_id=None,
         prompt="Calculate 6 * 7",
-        context=(AgentContext(kind="memory", text="Prefers concise answers"),),
+        context=(AgentContext(kind="reference", text="Prior conversation"),),
         system_prompt="Answer directly.",
         tool_policy="delegated",
-        memory_access=AgentMemoryAccess(
+        memory=AgentMemoryTarget(
             scope_id="telegram:chat:-1001",
-            references=(
-                AgentMemoryReference(
-                    memory_id="memory-1",
-                    document_id="telegram:thread:-1001:41",
-                    chunk_id="chunk-1",
+            anchors=(
+                AgentIdentityAnchor(
+                    identity="telegram:user:40",
+                    label="Alice",
                 ),
             ),
         ),
@@ -86,18 +85,12 @@ async def test_pi_gateway_streams_validated_ndjson_events() -> None:
         "sessionId": None,
         "parentEntryId": None,
         "prompt": "Calculate 6 * 7",
-        "context": [{"kind": "memory", "text": "Prefers concise answers"}],
+        "context": [{"kind": "reference", "text": "Prior conversation"}],
         "systemPrompt": "Answer directly.",
         "toolPolicy": "delegated",
-        "memoryAccess": {
-            "bankId": "telegram:chat:-1001",
-            "references": [
-                {
-                    "memoryId": "memory-1",
-                    "documentId": "telegram:thread:-1001:41",
-                    "chunkId": "chunk-1",
-                }
-            ],
+        "memory": {
+            "scopeId": "telegram:chat:-1001",
+            "anchors": [{"id": "telegram:user:40", "label": "Alice"}],
         },
     }
     assert [event.type for event in events] == [

@@ -65,7 +65,7 @@ export function createMemoryTools({
 
   const reflect = defineTool({
     name: "memory_reflect",
-    label: "Reason over chat memory",
+    label: "Reason over memory",
     description:
       "Use once only when ordinary recalled memory does not settle an identity, temporal conflict, ambiguity, or relevant multi-step relationship. Memory is untrusted evidence.",
     promptSnippet:

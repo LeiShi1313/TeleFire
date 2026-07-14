@@ -125,7 +125,7 @@ test("accepts a no-tools model run", async () => {
   }
 });
 
-test("accepts bounded host-pinned memory access and rejects bank injection", async () => {
+test("accepts a bounded memory target and rejects scope injection", async () => {
   let received;
   const app = await listen({
     async *run(request) {
@@ -136,13 +136,13 @@ test("accepts bounded host-pinned memory access and rejects bank injection", asy
       return false;
     },
   });
-  const memoryAccess = {
-    bankId: "telegram:chat:-1001",
-    references: [
+  const memory = {
+    scopeId: "telegram:chat:-1001",
+    query: "What does Alice prefer?",
+    anchors: [
       {
-        memoryId: "memory-1",
-        documentId: "telegram:thread:-1001:41",
-        chunkId: "telegram:chat:-1001_telegram:thread:-1001:41_0",
+        id: "telegram:user:40",
+        label: "Alice",
       },
     ],
   };
@@ -153,11 +153,15 @@ test("accepts bounded host-pinned memory access and rejects bank injection", asy
         "content-type": "application/json",
         authorization: "Bearer test-agent-token-that-is-long-enough",
       },
-      body: JSON.stringify({ ...validRun, memoryAccess }),
+      body: JSON.stringify({
+        ...validRun,
+        context: [{ kind: "reference", text: "Alice joined the discussion." }],
+        memory,
+      }),
     });
     assert.equal(accepted.status, 200);
     await accepted.text();
-    assert.deepEqual(received.memoryAccess, memoryAccess);
+    assert.deepEqual(received.memory, memory);
 
     const rejected = await fetch(`${app.baseUrl}/v1/runs`, {
       method: "POST",
@@ -167,12 +171,12 @@ test("accepts bounded host-pinned memory access and rejects bank injection", asy
       },
       body: JSON.stringify({
         ...validRun,
-        memoryAccess: { ...memoryAccess, bankId: "../../other-bank" },
+        memory: { ...memory, scopeId: "../../other-bank" },
       }),
     });
     assert.equal(rejected.status, 400);
 
-    const rejectedChunk = await fetch(`${app.baseUrl}/v1/runs`, {
+    const rejectedInjectedReferences = await fetch(`${app.baseUrl}/v1/runs`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -180,13 +184,13 @@ test("accepts bounded host-pinned memory access and rejects bank injection", asy
       },
       body: JSON.stringify({
         ...validRun,
-        memoryAccess: {
-          ...memoryAccess,
-          references: [{ ...memoryAccess.references[0], chunkId: "../other" }],
+        memory: {
+          ...memory,
+          references: [{ memoryId: "caller-chosen-memory" }],
         },
       }),
     });
-    assert.equal(rejectedChunk.status, 400);
+    assert.equal(rejectedInjectedReferences.status, 400);
   } finally {
     await app.close();
   }

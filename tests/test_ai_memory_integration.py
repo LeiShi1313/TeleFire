@@ -583,7 +583,7 @@ async def test_exact_memory_retry_uses_delivery_receipt_without_second_retain():
 
 
 @pytest.mark.asyncio
-async def test_ai_request_uses_one_bank_recall_before_reply_context():
+async def test_ai_request_delegates_scope_and_identity_anchors_to_agent():
     ancestor = FakeMessage("I use PostgreSQL at work", sender_id=20)
     trigger = FakeMessage(
         "/ai which database should we use?",
@@ -600,64 +600,46 @@ async def test_ai_request_uses_one_bank_recall_before_reply_context():
 
     assert await handler.handle(trigger) is True
 
-    assert len(memory.recall_calls) == 1
-    recall_call = memory.recall_calls[0]
-    assert recall_call["scope_id"] == "telegram:chat:-1001"
-    assert "which database should we use?" in recall_call["query"]
-    assert "telegram:user:10" in recall_call["query"]
-    assert "telegram:user:20" in recall_call["query"]
+    assert memory.recall_calls == []
     request = gateway.requests[0]
-    assert [item.kind for item in request.context] == ["memory", "reply"]
-    assert "Relevant evidence recalled from this chat bank" in request.context[0].text
-    assert "Untrusted reply context" in request.context[1].text
-    assert request.memory_access is not None
-    assert request.memory_access.scope_id == "telegram:chat:-1001"
-    assert request.memory_access.references[0].memory_id == "memory-1"
+    assert [item.kind for item in request.context] == ["reference"]
+    assert "Untrusted reply context" in request.context[0].text
+    assert request.memory is not None
+    assert request.memory.scope_id == "telegram:chat:-1001"
+    assert [(item.identity, item.label) for item in request.memory.anchors] == [
+        ("telegram:user:10", "User 10"),
+        ("telegram:user:20", "User 20"),
+    ]
     assert memory.retain_calls == []
 
 
 @pytest.mark.asyncio
-async def test_ai_request_bounds_host_pinned_memory_references():
-    memories = tuple(
-        RecalledMemory(
-            memory_id=f"memory-{index}",
-            text=f"Evidence {index}",
-            memory_type="world",
-            entities=(),
-            occurred_start=None,
-            occurred_end=None,
-            mentioned_at=None,
-            document_id=f"telegram:thread:-1001:{index}",
-            chunk_id=f"telegram:chat:-1001_telegram:thread:-1001:{index}_0",
-        )
-        for index in range(60)
-    )
-    memory = FakeMemory(
-        recall_result=MemoryRecall(
-            scope_id="telegram:chat:-1001",
-            memories=memories,
-        )
-    )
+async def test_ai_request_bounds_identity_anchors_for_agent_contract():
+    memory = FakeMemory()
     gateway = FakeGateway(["bounded"])
-    handler = make_handler(gateway, memory)
+    trigger = FakeMessage("/ai summarize", sender_id=10)
+    trigger.entities = tuple(SimpleNamespace(user_id=index) for index in range(40, 110))
+    handler = make_handler(gateway, memory, mention_resolver=FakeMentionResolver())
 
-    assert await handler.handle(FakeMessage("/ai summarize", sender_id=10)) is True
+    assert await handler.handle(trigger) is True
 
-    access = gateway.requests[0].memory_access
-    assert access is not None
-    assert len(access.references) == 50
-    assert access.references[-1].memory_id == "memory-49"
+    target = gateway.requests[0].memory
+    assert target is not None
+    assert len(target.anchors) == 64
+    assert target.anchors[0].identity == "telegram:user:10"
+    assert target.anchors[-1].identity == "telegram:user:102"
 
 
 @pytest.mark.asyncio
-async def test_out_of_chain_exact_mention_enters_recall_and_episode_entities():
+async def test_out_of_chain_exact_mention_enters_agent_anchors_and_episode_entities():
     store = FakeStore()
     store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory()
     trigger = FakeMessage("/ai what does @alice prefer?", sender_id=10)
     trigger.entities = (SimpleNamespace(user_id=40),)
+    gateway = FakeGateway(["answer"])
     handler = make_handler(
-        FakeGateway(["answer"]),
+        gateway,
         memory,
         store=store,
         identity_resolver=FakeIdentityResolver(),
@@ -665,7 +647,11 @@ async def test_out_of_chain_exact_mention_enters_recall_and_episode_entities():
     )
 
     assert await handler.handle(trigger) is True
-    assert "User 40 (telegram:user:40)" in memory.recall_calls[0]["query"]
+    target = gateway.requests[0].memory
+    assert target is not None
+    assert ("telegram:user:40", "User 40") in [
+        (item.identity, item.label) for item in target.anchors
+    ]
     event = memory.retain_calls[0]["episode"].events[0]
     assert event.mentioned_actors == (("telegram:user:40", "User 40"),)
     assert "telegram:user:40" in memory.retain_calls[0]["episode"].actor_ids
@@ -769,7 +755,7 @@ async def test_episode_preserves_quote_and_forward_provenance_without_raw_media(
     [TimeoutError(), ConnectionError(), ValueError("malformed")],
 )
 @pytest.mark.asyncio
-async def test_memory_recall_failure_is_logged_and_answer_fails_open(failure):
+async def test_telefire_does_not_call_memory_recall(failure):
     logger = FakeLogger()
     memory = FakeMemory(recall_error=failure)
     gateway = FakeGateway(["answer without memory"])
@@ -779,8 +765,9 @@ async def test_memory_recall_failure_is_logged_and_answer_fails_open(failure):
     assert await handler.handle(trigger) is True
     assert trigger.replies[0].text == "answer without memory"
     assert gateway.requests[0].context == ()
-    assert gateway.requests[0].memory_access is None
-    assert logger.warnings
+    assert gateway.requests[0].memory is not None
+    assert memory.recall_calls == []
+    assert logger.warnings == []
 
 
 @pytest.mark.asyncio
@@ -957,7 +944,7 @@ async def test_saved_memory_entrypoint_rejects_non_human_source():
 
 
 @pytest.mark.asyncio
-async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boundary():
+async def test_telegram_handler_retains_through_hindsight_and_delegates_recall():
     received = {"profiles": [], "retain": [], "recall": []}
 
     async def upsert_bank(request):
@@ -1030,11 +1017,10 @@ async def test_telegram_handler_retains_then_recalls_through_hindsight_http_boun
         retained = received["retain"][0]["items"][0]
         assert retained["document_id"] == f"telegram:thread:-1001:{source.id}"
         assert retained["entities"] == [{"text": "telegram:user:20", "type": "PERSON"}]
-        assert len(received["recall"]) == 1
-        assert "which database should we use?" in received["recall"][0]["query"]
-        memory_context = gateway.requests[0].context[0]
-        assert memory_context.kind == "memory"
-        assert "User 20 uses PostgreSQL" in memory_context.text
+        assert received["recall"] == []
+        target = gateway.requests[0].memory
+        assert target is not None
+        assert target.scope_id == "telegram:chat:-1001"
     finally:
         await client.close()
         await runner.cleanup()
@@ -1138,19 +1124,23 @@ async def test_enabled_continuation_retains_human_chain_across_ai_answer():
         ("telegram:user:10", "what do they mean?"),
         ("telegram:user:10", "They meant your implementation"),
     ]
-    assert "User 20 (telegram:user:20)" in memory.recall_calls[1]["query"]
-    assert not any(item.kind == "reply" for item in gateway.requests[1].context)
+    assert any(
+        item.identity == "telegram:user:20"
+        for item in gateway.requests[1].memory.anchors
+    )
+    assert not any(item.kind == "reference" for item in gateway.requests[1].context)
 
 
 @pytest.mark.asyncio
-async def test_disabled_scope_still_recalls_but_does_not_automatically_retain():
+async def test_disabled_scope_still_delegates_memory_but_does_not_retain():
     memory = FakeMemory()
     gateway = FakeGateway(["answer"])
     handler = make_handler(gateway, memory, store=FakeStore())
     trigger = FakeMessage("/ai answer from memory", sender_id=10)
 
     assert await handler.handle(trigger) is True
-    assert len(memory.recall_calls) == 1
+    assert gateway.requests[0].memory is not None
+    assert memory.recall_calls == []
     assert memory.retain_calls == []
 
 

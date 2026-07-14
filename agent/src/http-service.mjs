@@ -5,11 +5,10 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_ATTACHMENT_BODY_BYTES = 3 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_TEXT_CHARS = 50_000;
-const MAX_MEMORY_REFERENCES = 50;
+const MAX_MEMORY_ANCHORS = 64;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const BANK_ID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
-const DOCUMENT_ID_RE = /^[A-Za-z0-9:_.-]{1,512}$/;
 const MIME_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -41,6 +40,10 @@ function isBoundedString(value, min, max) {
   return typeof value === "string" && value.length >= min && value.length <= max;
 }
 
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
 export function validateRunRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const sessionId = value.sessionId;
@@ -67,54 +70,61 @@ export function validateRunRequest(value) {
     if (
       !item ||
       typeof item !== "object" ||
-      !new Set(["memory", "reply"]).has(item.kind) ||
+      item.kind !== "reference" ||
       !isBoundedString(item.text, 1, 16_000)
     ) {
       return null;
     }
     context.push({ kind: item.kind, text: item.text });
   }
-  let memoryAccess;
-  if (value.memoryAccess !== undefined) {
-    const supplied = value.memoryAccess;
+  let memory;
+  if (value.memory !== undefined) {
+    const supplied = value.memory;
     if (
       !supplied ||
       typeof supplied !== "object" ||
       Array.isArray(supplied) ||
-      !BANK_ID_RE.test(supplied.bankId ?? "") ||
-      !Array.isArray(supplied.references) ||
-      supplied.references.length > MAX_MEMORY_REFERENCES
+      !hasOnlyKeys(supplied, new Set(["scopeId", "query", "anchors"])) ||
+      !BANK_ID_RE.test(supplied.scopeId ?? "") ||
+      !(
+        supplied.query === undefined ||
+        supplied.query === null ||
+        isBoundedString(supplied.query, 1, 8_000)
+      ) ||
+      !Array.isArray(supplied.anchors) ||
+      supplied.anchors.length > MAX_MEMORY_ANCHORS
     ) {
       return null;
     }
-    const references = [];
+    const anchors = [];
     const seen = new Set();
-    for (const reference of supplied.references) {
+    for (const anchor of supplied.anchors) {
       if (
-        !reference ||
-        typeof reference !== "object" ||
-        Array.isArray(reference) ||
-        !IDENTIFIER_RE.test(reference.memoryId ?? "") ||
+        !anchor ||
+        typeof anchor !== "object" ||
+        Array.isArray(anchor) ||
+        !hasOnlyKeys(anchor, new Set(["id", "label"])) ||
+        !isBoundedString(anchor.id, 1, 256) ||
         !(
-          reference.documentId === null ||
-          DOCUMENT_ID_RE.test(reference.documentId ?? "")
+          anchor.label === null ||
+          anchor.label === undefined ||
+          isBoundedString(anchor.label, 1, 256)
         ) ||
-        !(
-          reference.chunkId === null ||
-          DOCUMENT_ID_RE.test(reference.chunkId ?? "")
-        ) ||
-        seen.has(reference.memoryId)
+        seen.has(anchor.id)
       ) {
         return null;
       }
-      seen.add(reference.memoryId);
-      references.push({
-        memoryId: reference.memoryId,
-        documentId: reference.documentId,
-        chunkId: reference.chunkId,
+      seen.add(anchor.id);
+      anchors.push({
+        id: anchor.id,
+        label: anchor.label ?? null,
       });
     }
-    memoryAccess = { bankId: supplied.bankId, references };
+    memory = {
+      scopeId: supplied.scopeId,
+      ...(supplied.query ? { query: supplied.query } : {}),
+      anchors,
+    };
   }
   return {
     runId: value.runId,
@@ -124,7 +134,7 @@ export function validateRunRequest(value) {
     context,
     systemPrompt: value.systemPrompt,
     toolPolicy: value.toolPolicy,
-    ...(memoryAccess ? { memoryAccess } : {}),
+    ...(memory ? { memory } : {}),
   };
 }
 

@@ -161,7 +161,9 @@ async def test_trigger_in_reply_chain_labels_ancestors_as_untrusted_context():
     request = gateway.requests[0]
     assert request.system_prompt == PromptBuilder().system_prompt
     assert request.prompt == "which database fits?"
-    reply_context = next(item.text for item in request.context if item.kind == "reply")
+    reply_context = next(
+        item.text for item in request.context if item.kind == "reference"
+    )
     assert "Untrusted reply context" in reply_context
     assert "We are comparing SQLite" in reply_context
     assert "/ai in quoted text" in reply_context
@@ -371,7 +373,7 @@ async def test_reply_context_depth_and_size_are_bounded():
     await handler.handle(trigger)
 
     context = next(
-        item.text for item in gateway.requests[0].context if item.kind == "reply"
+        item.text for item in gateway.requests[0].context if item.kind == "reference"
     )
     assert "newest context" in context
     assert "middle context" in context

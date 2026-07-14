@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 from typing import Any, ClassVar
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import aiohttp
@@ -847,20 +847,6 @@ def _valid_host(value: str) -> bool:
     return port is None or 1 <= int(port) <= 65_535
 
 
-def _valid_origin(request: web.Request) -> bool:
-    origin = request.headers.get("Origin")
-    if origin is None:
-        return True
-    try:
-        parsed = urlsplit(origin)
-    except ValueError:
-        return False
-    return (
-        parsed.scheme in {"http", "https"}
-        and parsed.netloc.casefold() == request.host.casefold()
-    )
-
-
 DATA_KEY = web.AppKey("playground_data", PlaygroundData)
 
 
@@ -869,8 +855,6 @@ async def _private_request(request: web.Request, handler: Any) -> web.StreamResp
     hosts = request.headers.getall("Host", [])
     if len(hosts) != 1 or not _valid_host(hosts[0]):
         return web.Response(status=400, text="Invalid Host header")
-    if request.method not in {"GET", "HEAD"} and not _valid_origin(request):
-        return _error_response(403, "FORBIDDEN", "Cross-origin request rejected")
     return await handler(request)
 
 

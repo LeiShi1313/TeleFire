@@ -296,7 +296,7 @@ def test_settings_use_generic_environment_names(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_run_delegates_memory_to_pi_and_streams_events():
+async def test_agent_run_accepts_proxy_origin_and_streams_pi_events():
     dependency_runners, memory_url, pi_url, received = await dependencies()
     playground_runner, playground_url = await request_app(memory_url, pi_url)
     try:
@@ -320,6 +320,7 @@ async def test_agent_run_delegates_memory_to_pi_and_streams_events():
 
             async with session.post(
                 f"{playground_url}/api/runs",
+                headers={"Origin": "http://sessions.telefire.localhost:18865"},
                 json={
                     "mode": "agent",
                     "prompt": "Who owns deploys?",

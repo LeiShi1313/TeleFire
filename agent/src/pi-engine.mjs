@@ -383,6 +383,14 @@ export class PiEngine {
       timeoutMs: this.config.requestTimeoutMs,
       fetchImpl: this.config.memoryFetch,
     });
+    if (request.includeMemorySnapshot && request.memory) {
+      yield {
+        type: "memory_snapshot",
+        scopeId: request.memory.scopeId,
+        queries: recalled.queries,
+        memories: recalled.memories,
+      };
+    }
     const enrichedRequest = recalled.context
       ? {
           ...request,

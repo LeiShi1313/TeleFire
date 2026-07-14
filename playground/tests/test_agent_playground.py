@@ -6,7 +6,12 @@ import aiohttp
 from aiohttp import web
 import pytest
 
-from agent_playground.app import PlaygroundSettings, create_app
+from agent_playground.app import (
+    PlaygroundSettings,
+    UpstreamUnavailable,
+    _parse_pi_event,
+    create_app,
+)
 
 
 async def start(app: web.Application) -> tuple[web.AppRunner, str]:
@@ -77,6 +82,24 @@ async def dependencies() -> tuple[list[web.AppRunner], str, str, dict]:
         )
         await response.prepare(request)
         events = (
+            {
+                "type": "memory_snapshot",
+                "scopeId": payload["memory"]["scopeId"],
+                "queries": ["Who owns deploys?"],
+                "memories": [
+                    {
+                        "id": "memory-1",
+                        "text": "Alice maintains the deployment pipeline.",
+                        "type": "world",
+                        "entities": ["Alice", "actor:alice"],
+                        "occurredStart": "2026-07-13T12:00:00Z",
+                        "occurredEnd": None,
+                        "mentionedAt": "2026-07-13T12:01:00Z",
+                        "documentId": "conversation:41",
+                        "chunkId": "chunk-1",
+                    }
+                ],
+            },
             {
                 "type": "run_started",
                 "runId": payload["runId"],
@@ -189,10 +212,13 @@ async def test_agent_run_delegates_memory_to_pi_and_streams_events():
             "query": "Automatic from request and references",
             "memories": [],
             "managedBy": "agent",
+            "status": "pending",
         }
         assert prepared["request"]["systemPrompt"] == "Use evidence carefully."
         assert events[-1]["type"] == "run_completed"
         assert events[-1]["answer"] == "Alice owns it."
+        assert events[1]["type"] == "memory_snapshot"
+        assert events[1]["memories"][0]["id"] == "memory-1"
 
         assert len(received["recalls"]) == 1
         pi_request = received["runs"][0]
@@ -201,6 +227,7 @@ async def test_agent_run_delegates_memory_to_pi_and_streams_events():
             "scopeId": "chat:engineering",
             "anchors": [],
         }
+        assert pi_request["includeMemorySnapshot"] is True
         assert [item["kind"] for item in pi_request["context"]] == [
             "reference",
             "reference",
@@ -285,6 +312,7 @@ async def test_playground_rejects_invalid_input_and_untrusted_hosts():
                 assert "innerHTML" not in script
                 assert "textContent" in script
                 assert 'if (event.type === "run_started") return;' in script
+                assert 'if (event.type === "memory_snapshot")' in script
                 assert (
                     "state.sessionId = event.sessionId || state.sessionId" not in script
                 )
@@ -294,3 +322,27 @@ async def test_playground_rejects_invalid_input_and_untrusted_hosts():
         await playground_runner.cleanup()
         for runner in dependency_runners:
             await runner.cleanup()
+
+
+@pytest.mark.parametrize(
+    "event",
+    (
+        {},
+        {
+            "type": "memory_snapshot",
+            "scopeId": "chat:engineering",
+            "queries": ["Who owns deploys?"],
+            "memories": [
+                {
+                    "id": "memory-1",
+                    "text": "Alice maintains the deployment pipeline.",
+                    "entities": ["Alice"],
+                    "documentId": "not a valid source id",
+                }
+            ],
+        },
+    ),
+)
+def test_playground_rejects_malformed_pi_memory_events(event):
+    with pytest.raises(UpstreamUnavailable, match="malformed events"):
+        _parse_pi_event(json.dumps(event).encode())

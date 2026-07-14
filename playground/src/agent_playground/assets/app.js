@@ -180,6 +180,18 @@ function handleEvent(event, assistant) {
     renderInspector();
     return;
   }
+  if (event.type === "memory_snapshot") {
+    state.memory = {
+      bankId: event.scopeId,
+      query: event.queries.join("\n\n"),
+      queries: event.queries,
+      memories: event.memories,
+      managedBy: "agent",
+      status: "complete",
+    };
+    renderInspector();
+    return;
+  }
   if (event.type === "run_started") return;
   if (event.type === "tool_snapshot") {
     state.tools.push(event);
@@ -250,14 +262,29 @@ function renderMemory() {
   }
   const blocks = [
     field("Bank", state.memory.bankId),
-    field("Recall query", state.memory.query),
+    field(
+      Array.isArray(state.memory.queries) && state.memory.queries.length > 1
+        ? "Recall queries"
+        : "Recall query",
+      state.memory.query,
+    ),
   ];
   const memories = Array.isArray(state.memory.memories) ? state.memory.memories : [];
-  if (memories.length === 0) blocks.push(node("p", "No matching memories.", "empty-inspector"));
+  if (state.memory.status === "pending") {
+    blocks.push(node("p", "Agent is fetching memory...", "empty-inspector"));
+  } else if (memories.length === 0) {
+    blocks.push(node("p", "No matching memories.", "empty-inspector"));
+  }
   for (const memory of memories) {
     const item = node("section", null, "memory-item");
     item.append(node("div", memory.type || "memory", "memory-type"));
     item.append(node("p", memory.text, "memory-text"));
+    const metadata = [
+      ...(memory.entities || []),
+      memory.occurredStart,
+      memory.documentId,
+    ].filter(Boolean).join(" · ");
+    if (metadata) item.append(node("div", metadata, "memory-meta"));
     item.append(node("code", memory.id, "memory-id"));
     blocks.push(item);
   }

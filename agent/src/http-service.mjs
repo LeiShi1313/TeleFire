@@ -48,6 +48,7 @@ export function validateRunRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const sessionId = value.sessionId;
   const parentEntryId = value.parentEntryId;
+  const includeMemorySnapshot = value.includeMemorySnapshot;
   const isRoot = sessionId === null && parentEntryId === null;
   const isContinuation =
     typeof sessionId === "string" &&
@@ -60,6 +61,10 @@ export function validateRunRequest(value) {
     !isBoundedString(value.prompt, 1, 16_000) ||
     !isBoundedString(value.systemPrompt, 1, 32_000) ||
     !new Set(["owner", "delegated", "none"]).has(value.toolPolicy) ||
+    !(
+      includeMemorySnapshot === undefined ||
+      typeof includeMemorySnapshot === "boolean"
+    ) ||
     !Array.isArray(value.context) ||
     value.context.length > 4
   ) {
@@ -134,6 +139,7 @@ export function validateRunRequest(value) {
     context,
     systemPrompt: value.systemPrompt,
     toolPolicy: value.toolPolicy,
+    ...(includeMemorySnapshot ? { includeMemorySnapshot: true } : {}),
     ...(memory ? { memory } : {}),
   };
 }

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 import sqlite3
 import stat
 
@@ -51,6 +52,7 @@ class FakeMessage:
         chat_id: int = -1001,
         reply_to=None,
         file=None,
+        date=None,
     ):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
@@ -60,6 +62,7 @@ class FakeMessage:
         self.reply_to_msg_id = reply_to.id if reply_to else None
         self._reply_to = reply_to
         self.file = file
+        self.date = date or datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
         self.replies: list[FakeAnswer] = []
 
     async def get_reply_message(self):
@@ -91,6 +94,16 @@ class FakeGateway:
 
     async def cancel(self, run_id: str) -> bool:
         return True
+
+
+class FakeHistorySource:
+    def __init__(self, messages=()):
+        self.messages = tuple(messages)
+        self.calls = []
+
+    async def fetch_recent(self, trigger, *, limit):
+        self.calls.append((trigger.id, limit))
+        return self.messages[-limit:]
 
 
 class FakeStore:
@@ -185,12 +198,138 @@ async def test_trigger_in_reply_chain_labels_ancestors_as_untrusted_context():
     reply_context = next(
         item.text for item in request.context if item.kind == "reference"
     )
-    assert "Untrusted reply context" in reply_context
+    assert "Untrusted chat context" in reply_context
+    assert "context=reply_path" in reply_context
+    assert "Current request replies to [m2]" in reply_context
     assert "We are comparing SQLite" in reply_context
     assert "/ai in quoted text" in reply_context
     marker = next(iter(store.markers.values()))
     assert marker.prompt == "which database fits?"
     assert marker.reference_context == reply_context
+
+
+@pytest.mark.asyncio
+async def test_numbered_trigger_uses_recent_chat_context_in_a_new_session():
+    start = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
+    older = FakeMessage("Older ambient message", sender_id=20, date=start)
+    recent = FakeMessage(
+        "Most recent ambient message",
+        sender_id=30,
+        date=start + timedelta(minutes=1),
+    )
+    trigger = FakeMessage(
+        "/ai2 summarize the discussion",
+        date=start + timedelta(minutes=2),
+    )
+    history = FakeHistorySource((older, recent))
+    gateway = FakeGateway(["Summary"])
+    handler, _ = make_handler(gateway, history_source=history)
+
+    assert await handler.handle(trigger) is True
+
+    request = gateway.requests[0]
+    assert request.prompt == "summarize the discussion"
+    assert request.session_id is None
+    assert request.parent_entry_id is None
+    assert history.calls == [(trigger.id, 2)]
+    context = request.context[0].text
+    assert context.index("Older ambient message") < context.index(
+        "Most recent ambient message"
+    )
+    assert context.count("context=recent") == 2
+    assert "reply_path" not in context
+
+
+@pytest.mark.asyncio
+async def test_numbered_trigger_unifies_reply_path_and_recent_context():
+    start = datetime(2026, 7, 14, 10, 0, tzinfo=UTC)
+    root = FakeMessage("Original proposal", sender_id=20, date=start)
+    branch = FakeMessage(
+        "Reply on the proposal",
+        sender_id=30,
+        reply_to=root,
+        date=start + timedelta(minutes=1),
+    )
+    ambient = FakeMessage(
+        "Related ambient update",
+        sender_id=40,
+        date=start + timedelta(minutes=2),
+    )
+    trigger = FakeMessage(
+        "/ai2 compare these",
+        reply_to=branch,
+        date=start + timedelta(minutes=3),
+    )
+    history = FakeHistorySource((branch, ambient))
+    gateway = FakeGateway(["Comparison"])
+    handler, _ = make_handler(gateway, history_source=history)
+
+    assert await handler.handle(trigger) is True
+
+    context = gateway.requests[0].context[0].text
+    assert context.count("Reply on the proposal") == 1
+    assert "context=reply_path,recent" in context
+    assert "Current request replies to [m2]" in context
+    assert context.index("Original proposal") < context.index("Reply on the proposal")
+    assert context.index("Reply on the proposal") < context.index(
+        "Related ambient update"
+    )
+
+
+@pytest.mark.asyncio
+async def test_numbered_trigger_rejoins_nearest_ai_session():
+    gateway = FakeGateway(["First answer", "Contextual follow-up"])
+    history = FakeHistorySource()
+    handler, store = make_handler(gateway, history_source=history)
+    trigger = FakeMessage("/ai explain vectors")
+    await handler.handle(trigger)
+    first_answer = trigger.replies[0]
+    branch = FakeMessage("A later human comment", sender_id=20, reply_to=first_answer)
+    rejoin = FakeMessage("/ai3 relate recent chat", reply_to=branch)
+    history.messages = (branch,)
+
+    assert await handler.handle(rejoin) is True
+
+    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    request = gateway.requests[1]
+    assert request.session_id == root_marker.agent_session_id
+    assert request.parent_entry_id == root_marker.agent_entry_id
+    assert "A later human comment" in request.context[0].text
+    assert "role=assistant" in request.context[0].text
+
+
+@pytest.mark.asyncio
+async def test_numbered_trigger_rejects_recent_count_above_configured_limit():
+    trigger = FakeMessage("/ai3 summarize")
+    gateway = FakeGateway(["unused"])
+    handler, _ = make_handler(
+        gateway,
+        history_source=FakeHistorySource(),
+        max_context_messages=2,
+    )
+
+    assert await handler.handle(trigger) is True
+
+    assert gateway.requests == []
+    assert "between 1 and 2" in trigger.replies[0].text
+
+
+@pytest.mark.asyncio
+async def test_numbered_trigger_reports_unavailable_recent_history():
+    class FailingHistorySource:
+        async def fetch_recent(self, trigger, *, limit):
+            raise ConnectionError("Telegram unavailable")
+
+    trigger = FakeMessage("/ai2 summarize")
+    gateway = FakeGateway(["unused"])
+    handler, _ = make_handler(gateway, history_source=FailingHistorySource())
+
+    assert await handler.handle(trigger) is True
+
+    assert gateway.requests == []
+    assert trigger.replies[0].text == (
+        "Recent chat context is unavailable. Try again shortly."
+    )
 
 
 @pytest.mark.asyncio
@@ -455,4 +594,9 @@ async def test_reply_context_depth_and_size_are_bounded():
     assert "newest context" in context
     assert "middle context" in context
     assert "oldest context" not in context
-    assert len(context) <= 160
+    payload = "\n".join(
+        line.removeprefix("  ")
+        for line in context.splitlines()
+        if line.startswith("  ")
+    )
+    assert len(payload) <= 80

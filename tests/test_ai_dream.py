@@ -21,6 +21,7 @@ from telefire.ai_dream import (
     DreamSettings,
     DreamThreadLimitError,
     TelegramDreamScanner,
+    TelegramHistorySource,
 )
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import MemoryClientError, MemoryRetainResult
@@ -91,6 +92,62 @@ class FakeSource:
     async def fetch_message(self, chat_id, message_id):
         self.message_calls.append((chat_id, message_id))
         return self.by_id.get(message_id)
+
+
+@pytest.mark.asyncio
+async def test_telegram_history_source_fetches_recent_messages_from_current_topic():
+    older = FakeMessage(41, "Older topic message")
+    newer = FakeMessage(42, "Newer topic message")
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def iter_messages(self, chat_id, **kwargs):
+            self.calls.append((chat_id, kwargs))
+            for message in (newer, older):
+                yield message
+
+    client = Client()
+    trigger = FakeMessage(50, "/ai2 summarize")
+    trigger.reply_to = type(
+        "ReplyHeader",
+        (),
+        {
+            "forum_topic": True,
+            "reply_to_top_id": 12,
+            "reply_to_msg_id": 40,
+        },
+    )()
+
+    messages = await TelegramHistorySource(client).fetch_recent(trigger, limit=2)
+
+    assert messages == (older, newer)
+    assert client.calls == [
+        (-1001, {"limit": 2, "max_id": 50, "reply_to": 12})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_history_source_uses_whole_chat_outside_forum_topics():
+    message = FakeMessage(49, "Recent group message")
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        async def iter_messages(self, chat_id, **kwargs):
+            self.calls.append((chat_id, kwargs))
+            yield message
+
+    client = Client()
+    trigger = FakeMessage(50, "/ai1 summarize", reply_to=FakeMessage(48, "branch"))
+    trigger.reply_to = type("ReplyHeader", (), {"forum_topic": False})()
+
+    messages = await TelegramHistorySource(client).fetch_recent(trigger, limit=1)
+
+    assert messages == (message,)
+    assert client.calls == [(-1001, {"limit": 1, "max_id": 50})]
 
 
 class FakeMemory:

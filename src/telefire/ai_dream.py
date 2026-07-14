@@ -59,6 +59,37 @@ class TelegramHistorySource:
     def __init__(self, client: Any):
         self._client = client
 
+    async def fetch_recent(
+        self,
+        trigger: ReplyTarget,
+        *,
+        limit: int,
+    ) -> tuple[ReplyTarget, ...]:
+        if trigger.chat_id is None:
+            return ()
+        kwargs: dict[str, Any] = {
+            "limit": limit,
+            "max_id": trigger.id,
+        }
+        reply_header = getattr(trigger, "reply_to", None)
+        if bool(getattr(reply_header, "forum_topic", False)):
+            topic_id = getattr(reply_header, "reply_to_top_id", None) or getattr(
+                reply_header,
+                "reply_to_msg_id",
+                None,
+            )
+            if isinstance(topic_id, int) and topic_id > 0:
+                kwargs["reply_to"] = topic_id
+        messages = [
+            message
+            async for message in self._client.iter_messages(
+                trigger.chat_id,
+                **kwargs,
+            )
+        ]
+        messages.reverse()
+        return tuple(messages)
+
     async def fetch_window(
         self,
         chat_id: int,

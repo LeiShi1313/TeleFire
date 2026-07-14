@@ -208,6 +208,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         )
         self._responder = responder
         await self._store.connect()
+        history_source = TelegramHistorySource(self.client)
         prompt_builder = PromptBuilder(
             system_prompt=self._settings.system_prompt,
             max_context_messages=self._settings.max_context_messages,
@@ -224,10 +225,11 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 self.client,
                 logger=self.logger,
             ),
+            history_source=history_source,
         )
         dream_runner = (
             TelegramDreamScanner(
-                source=TelegramHistorySource(self.client),
+                source=history_source,
                 store=self._store,
                 memory=self._memory,
                 prompt_builder=prompt_builder,

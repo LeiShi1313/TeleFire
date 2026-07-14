@@ -37,6 +37,17 @@ function bounded(value, max = MAX_STRING_CHARS) {
   return text.length <= max ? text : `${text.slice(0, max - 3)}...`;
 }
 
+function imageMetadata(value) {
+  const supplied = typeof value.data === "string" ? value.data : "";
+  const padding = supplied.endsWith("==") ? 2 : supplied.endsWith("=") ? 1 : 0;
+  return {
+    type: "image",
+    mimeType: bounded(value.mimeType, 256),
+    sizeBytes: Math.max(0, Math.floor((supplied.length * 3) / 4) - padding),
+    data: "[OMITTED]",
+  };
+}
+
 export function sanitizeAuditValue(value, depth = 0, seen = new WeakSet()) {
   if (value === null || value === undefined) return value ?? null;
   if (typeof value === "string") return bounded(value);
@@ -47,6 +58,7 @@ export function sanitizeAuditValue(value, depth = 0, seen = new WeakSet()) {
   if (seen.has(value)) return "[CIRCULAR]";
   seen.add(value);
   try {
+    if (value.type === "image" && "data" in value) return imageMetadata(value);
     if (Array.isArray(value)) {
       return value
         .slice(0, MAX_ARRAY_ITEMS)

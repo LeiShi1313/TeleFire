@@ -27,6 +27,11 @@ test("records ordered append-only events and redacts credential-shaped fields", 
         systemPrompt: "Answer carefully.",
         memory: { scopeId: "chat:engineering" },
         authorization: "Bearer secret",
+        image: {
+          type: "image",
+          mimeType: "image/png",
+          data: "aW1hZ2UtcGF5bG9hZA==",
+        },
       }),
       audit.record("memory.http.request", {
         exchangeId: "recall-plain",
@@ -58,6 +63,12 @@ test("records ordered append-only events and redacts credential-shaped fields", 
       "run.completed",
     ]);
     assert.equal(result.events[0].data.authorization, "[REDACTED]");
+    assert.deepEqual(result.events[0].data.image, {
+      type: "image",
+      mimeType: "image/png",
+      sizeBytes: 13,
+      data: "[OMITTED]",
+    });
     assert.equal(
       result.events[1].data.request.body.apiKey,
       "[REDACTED]",

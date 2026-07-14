@@ -10,7 +10,7 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
-function fixture(handler) {
+function fixture(handler, observe) {
   const calls = [];
   const tools = createMemoryTools({
     baseUrl: "http://memory.internal:8888",
@@ -28,6 +28,7 @@ function fixture(handler) {
       calls.push({ url, options });
       return handler(url, options, calls.length);
     },
+    observe,
   });
   return { byName: new Map(tools.map((tool) => [tool.name, tool])), calls };
 }
@@ -157,4 +158,31 @@ test("memory tools are absent without a host capability", () => {
     createMemoryTools({ baseUrl: "http://memory", access: null }),
     [],
   );
+});
+
+test("observes memory tool HTTP with tool-call correlation", async () => {
+  const observed = [];
+  const payload = {
+    text: "Alice owns deployment.",
+    based_on: { memories: [{ id: "memory-2" }] },
+  };
+  const app = fixture(
+    () => jsonResponse(payload),
+    async (event) => observed.push(event),
+  );
+
+  await app.byName
+    .get("memory_reflect")
+    .execute("call-reflect-1", { question: "Who owns deployment?" });
+
+  assert.deepEqual(observed.map((event) => event.type), [
+    "memory.http.request",
+    "memory.http.response",
+  ]);
+  assert.equal(observed[0].data.operation, "reflect");
+  assert.equal(observed[0].data.toolCallId, "call-reflect-1");
+  assert.equal(observed[1].data.toolCallId, "call-reflect-1");
+  assert.equal(observed[1].data.exchangeId, observed[0].data.exchangeId);
+  assert.deepEqual(observed[0].data.request.body.query, "Who owns deployment?");
+  assert.deepEqual(observed[1].data.response.body, payload);
 });

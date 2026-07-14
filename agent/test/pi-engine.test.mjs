@@ -416,6 +416,119 @@ test("executes a delegated calculation and emits transient tool snapshots", asyn
   }
 });
 
+test("records a correlated run audit with memory, model, and tool details", async () => {
+  const runId = "77777777-7777-4777-8777-777777777777";
+  const app = await fixture(
+    (body, response) => {
+      if (body.messages.at(-1)?.role === "tool") {
+        sendText(response, "Alice owns deployment; 6 * 7 is 42.");
+      } else {
+        sendCodeToolCall(response);
+      }
+    },
+    {
+      memoryUrl: "http://memory.internal:8888",
+      memoryFetch: async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                id: "memory-1",
+                text: "Alice owns deployment.",
+                entities: ["Alice"],
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    },
+  );
+  try {
+    const events = await collect(
+      app.engine,
+      request(runId, {
+        prompt: "Who owns deployment, and what is 6 * 7?",
+        memory: { scopeId: "workspace:engineering", anchors: [] },
+      }),
+    );
+    const result = events.at(-1);
+    const audit = await app.engine.getRunAudit(runId);
+
+    assert.equal(result.type, "run_completed");
+    assert.equal(audit.runId, runId);
+    const types = audit.events.map((event) => event.type);
+    for (const type of [
+      "run.request",
+      "memory.http.request",
+      "memory.http.response",
+      "memory.context",
+      "session.opened",
+      "model.input",
+      "model.turn.started",
+      "model.turn.completed",
+      "tool.started",
+      "tool.completed",
+      "run.completed",
+    ]) {
+      assert(types.includes(type), `missing ${type}`);
+    }
+    const requestEvent = audit.events.find((event) => event.type === "run.request");
+    assert.equal(requestEvent.data.prompt, "Who owns deployment, and what is 6 * 7?");
+    assert.equal(requestEvent.data.systemPrompt, "Answer directly.");
+    assert.equal(requestEvent.data.memory.scopeId, "workspace:engineering");
+    const memoryRequest = audit.events.find(
+      (event) => event.type === "memory.http.request",
+    );
+    assert.equal(memoryRequest.data.request.body.budget, "mid");
+    const modelInput = audit.events.find((event) => event.type === "model.input");
+    assert.match(modelInput.data.prompt, /Alice owns deployment/);
+    assert.equal(modelInput.data.model.id, "test-model");
+    const toolStarted = audit.events.find((event) => event.type === "tool.started");
+    const toolCompleted = audit.events.find((event) => event.type === "tool.completed");
+    assert.equal(toolStarted.data.toolCallId, "call-code-1");
+    assert.deepEqual(toolStarted.data.args, { code: "6 * 7" });
+    assert.equal(toolCompleted.data.toolCallId, "call-code-1");
+    assert.equal(toolCompleted.data.isError, false);
+    assert(Number.isInteger(toolCompleted.data.durationMs));
+    const completed = audit.events.find((event) => event.type === "run.completed");
+    assert.equal(completed.data.sessionId, result.sessionId);
+    assert.equal(completed.data.entryId, result.entryId);
+    assert.equal(completed.data.answer, result.answer);
+    assert.doesNotMatch(JSON.stringify(audit), /test-key/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("keeps runs available when audit storage cannot start", async () => {
+  const app = await fixture(
+    (_body, response) => sendText(response, "Audit-independent answer."),
+    {
+      auditStore: {
+        async start() {
+          throw new Error("read-only filesystem");
+        },
+        async list() {
+          return { items: [], total: 0, nextCursor: null };
+        },
+        async get() {
+          return null;
+        },
+      },
+    },
+  );
+  try {
+    const events = await collect(
+      app.engine,
+      request("88888888-8888-4888-8888-888888888888"),
+    );
+    assert.equal(events.at(-1).type, "run_completed");
+    assert.equal(events.at(-1).answer, "Audit-independent answer.");
+  } finally {
+    await app.close();
+  }
+});
+
 test("classifies provider rate limits without exposing provider details", async () => {
   const app = await fixture((_body, response) => {
     response.writeHead(429, { "content-type": "application/json" });

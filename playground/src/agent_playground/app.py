@@ -5,11 +5,12 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
 from typing import Any, ClassVar
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from uuid import uuid4
 
 import aiohttp
@@ -25,6 +26,7 @@ _RUN_ID_RE = re.compile(
 )
 _MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 _DOCUMENT_ID_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,512}$")
+_MAX_UPSTREAM_BYTES = 64 * 1024 * 1024
 _HOST_RE = re.compile(
     r"^(?:localhost|127\.0\.0\.1|\[::1\])(?::(?P<port>[0-9]{1,5}))?$",
     re.IGNORECASE,
@@ -56,6 +58,10 @@ class InvalidRequest(ValueError):
 
 
 class UpstreamUnavailable(RuntimeError):
+    pass
+
+
+class UpstreamNotFound(RuntimeError):
     pass
 
 
@@ -291,6 +297,66 @@ class PlaygroundData:
         )
         return payload.get("cancelled") is True
 
+    async def sessions(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+        query: str,
+    ) -> dict[str, Any]:
+        params: dict[str, str | int] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if query:
+            params["q"] = query
+        payload = await self._pi_json("GET", "/v1/sessions", params=params)
+        return _parse_session_page(payload)
+
+    async def session(self, session_id: str) -> dict[str, Any]:
+        if not _IDENTIFIER_RE.fullmatch(session_id):
+            raise InvalidRequest("Invalid session identity")
+        payload = await self._pi_json(
+            "GET", f"/v1/sessions/{quote(session_id, safe='')}"
+        )
+        return _parse_session_detail(payload, session_id)
+
+    async def run_audits(
+        self,
+        *,
+        limit: int,
+        cursor: str | None,
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        params: dict[str, str | int] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if session_id is not None:
+            params["sessionId"] = session_id
+        payload = await self._pi_json("GET", "/v1/runs", params=params)
+        return _parse_audit_page(payload)
+
+    async def run_audit(self, run_id: str) -> dict[str, Any]:
+        if not _RUN_ID_RE.fullmatch(run_id):
+            raise InvalidRequest("Invalid run identity")
+        payload = await self._pi_json(
+            "GET", f"/v1/runs/{quote(run_id, safe='')}/audit"
+        )
+        return _parse_run_audit(payload, run_id)
+
+    async def _pi_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+    ) -> dict[str, Any]:
+        suffix = f"?{urlencode(params)}" if params else ""
+        return await self._json(
+            method,
+            f"{self._settings.pi_url}{path}{suffix}",
+            headers={"Authorization": f"Bearer {self._settings.pi_token}"},
+        )
+
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
@@ -310,11 +376,18 @@ class PlaygroundData:
             async with self._get_session().request(
                 method, url, json=payload, headers=headers
             ) as response:
+                if response.status == 404:
+                    raise UpstreamNotFound("Upstream resource was not found")
                 if response.status < 200 or response.status >= 300:
                     raise UpstreamUnavailable(
                         f"Upstream service returned HTTP {response.status}"
                     )
-                result = await response.json()
+                body = await response.read()
+                if len(body) > _MAX_UPSTREAM_BYTES:
+                    raise UpstreamUnavailable("Upstream response is too large")
+                result = json.loads(body)
+        except UpstreamNotFound:
+            raise
         except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             raise UpstreamUnavailable("Upstream service is unavailable") from exc
         if not isinstance(result, dict):
@@ -358,6 +431,205 @@ class PlaygroundData:
                 }
             )
         return memories
+
+
+def _optional_history_string(
+    value: dict[str, Any], key: str, maximum: int
+) -> str | None:
+    supplied = value.get(key)
+    if supplied is None:
+        return None
+    if not isinstance(supplied, str) or len(supplied) > maximum:
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    return supplied
+
+
+def _history_identifier(value: Any, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not _IDENTIFIER_RE.fullmatch(value):
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    return value
+
+
+def _validate_json_tree(value: Any) -> None:
+    remaining = [200_000]
+
+    def visit(item: Any, depth: int) -> None:
+        remaining[0] -= 1
+        if remaining[0] < 0 or depth > 24:
+            raise UpstreamUnavailable("Pi agent returned oversized history")
+        if item is None or isinstance(item, (str, bool, int)):
+            if isinstance(item, str) and len(item) > 1024 * 1024:
+                raise UpstreamUnavailable("Pi agent returned oversized history")
+            return
+        if isinstance(item, float):
+            if not math.isfinite(item):
+                raise UpstreamUnavailable("Pi agent returned malformed history")
+            return
+        if isinstance(item, list):
+            if len(item) > 50_000:
+                raise UpstreamUnavailable("Pi agent returned oversized history")
+            for child in item:
+                visit(child, depth + 1)
+            return
+        if isinstance(item, dict):
+            if len(item) > 2_000 or not all(isinstance(key, str) for key in item):
+                raise UpstreamUnavailable("Pi agent returned malformed history")
+            for child in item.values():
+                visit(child, depth + 1)
+            return
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+
+    visit(value, 0)
+
+
+def _parse_session_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    session_id = _history_identifier(value.get("id"))
+    message_count = value.get("messageCount")
+    if (
+        not isinstance(message_count, int)
+        or isinstance(message_count, bool)
+        or not 0 <= message_count <= 1_000_000
+    ):
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    return {
+        "id": session_id,
+        "name": _optional_history_string(value, "name", 1_000),
+        "createdAt": _optional_history_string(value, "createdAt", 64),
+        "modifiedAt": _optional_history_string(value, "modifiedAt", 64),
+        "messageCount": message_count,
+        "firstMessage": _optional_history_string(value, "firstMessage", 500) or "",
+    }
+
+
+def _parse_session_page(payload: dict[str, Any]) -> dict[str, Any]:
+    supplied = payload.get("items")
+    total = payload.get("total")
+    if (
+        not isinstance(supplied, list)
+        or len(supplied) > 100
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or not 0 <= total <= 1_000_000
+    ):
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    return {
+        "items": [_parse_session_summary(item) for item in supplied],
+        "total": total,
+        "nextCursor": _history_identifier(payload.get("nextCursor"), optional=True),
+    }
+
+
+def _parse_session_detail(
+    payload: dict[str, Any], expected_session_id: str
+) -> dict[str, Any]:
+    summary = _parse_session_summary(payload)
+    if summary["id"] != expected_session_id:
+        raise UpstreamUnavailable("Pi agent returned mismatched history")
+    entries = payload.get("entries")
+    header = payload.get("header")
+    if not isinstance(entries, list) or len(entries) > 50_000 or not isinstance(header, dict):
+        raise UpstreamUnavailable("Pi agent returned malformed history")
+    _validate_json_tree(header)
+    _validate_json_tree(entries)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise UpstreamUnavailable("Pi agent returned malformed history")
+        _history_identifier(entry.get("id"))
+        _history_identifier(entry.get("parentId"), optional=True)
+        if not isinstance(entry.get("type"), str) or len(entry["type"]) > 128:
+            raise UpstreamUnavailable("Pi agent returned malformed history")
+    return {
+        **summary,
+        "header": header,
+        "leafId": _history_identifier(payload.get("leafId"), optional=True),
+        "entries": entries,
+    }
+
+
+def _parse_audit_page(payload: dict[str, Any]) -> dict[str, Any]:
+    supplied = payload.get("items")
+    total = payload.get("total")
+    if (
+        not isinstance(supplied, list)
+        or len(supplied) > 100
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or not 0 <= total <= 1_000_000
+    ):
+        raise UpstreamUnavailable("Pi agent returned malformed audits")
+    items: list[dict[str, Any]] = []
+    for value in supplied:
+        if not isinstance(value, dict) or not _RUN_ID_RE.fullmatch(
+            str(value.get("runId", ""))
+        ):
+            raise UpstreamUnavailable("Pi agent returned malformed audits")
+        event_count = value.get("eventCount")
+        if (
+            not isinstance(event_count, int)
+            or isinstance(event_count, bool)
+            or not 0 <= event_count <= 1_000_000
+        ):
+            raise UpstreamUnavailable("Pi agent returned malformed audits")
+        status = value.get("status")
+        if status not in {"in_progress", "completed", "failed"}:
+            raise UpstreamUnavailable("Pi agent returned malformed audits")
+        items.append(
+            {
+                "runId": value["runId"],
+                "sessionId": _history_identifier(
+                    value.get("sessionId"), optional=True
+                ),
+                "entryId": _history_identifier(value.get("entryId"), optional=True),
+                "status": status,
+                "startedAt": _optional_history_string(value, "startedAt", 64),
+                "finishedAt": _optional_history_string(value, "finishedAt", 64),
+                "prompt": _optional_history_string(value, "prompt", 300) or "",
+                "memoryScopeId": _optional_history_string(
+                    value, "memoryScopeId", 512
+                ),
+                "eventCount": event_count,
+            }
+        )
+    return {
+        "items": items,
+        "total": total,
+        "nextCursor": (
+            _optional_history_string(payload, "nextCursor", 36)
+            if payload.get("nextCursor") is not None
+            else None
+        ),
+    }
+
+
+def _parse_run_audit(payload: dict[str, Any], expected_run_id: str) -> dict[str, Any]:
+    if payload.get("runId") != expected_run_id:
+        raise UpstreamUnavailable("Pi agent returned mismatched audit")
+    events = payload.get("events")
+    if not isinstance(events, list) or len(events) > 50_000:
+        raise UpstreamUnavailable("Pi agent returned malformed audit")
+    _validate_json_tree(events)
+    last_sequence = 0
+    for event in events:
+        if (
+            not isinstance(event, dict)
+            or event.get("version") != 1
+            or event.get("runId") != expected_run_id
+            or not isinstance(event.get("sequence"), int)
+            or isinstance(event.get("sequence"), bool)
+            or event["sequence"] <= last_sequence
+            or not isinstance(event.get("timestamp"), str)
+            or len(event["timestamp"]) > 64
+            or not isinstance(event.get("type"), str)
+            or not 1 <= len(event["type"]) <= 128
+            or not isinstance(event.get("data"), dict)
+        ):
+            raise UpstreamUnavailable("Pi agent returned malformed audit")
+        last_sequence = event["sequence"]
+    return {"runId": expected_run_id, "events": events}
 
 
 def _validate_run_request(value: Any, default_system_prompt: str) -> dict[str, Any]:
@@ -616,6 +888,10 @@ def create_app(settings: PlaygroundSettings | None = None) -> web.Application:
     app.router.add_post("/api/recall", _recall)
     app.router.add_post("/api/runs", _runs)
     app.router.add_post("/api/runs/{run_id}/cancel", _cancel)
+    app.router.add_get("/api/sessions", _sessions)
+    app.router.add_get("/api/sessions/{session_id}", _session)
+    app.router.add_get("/api/audits", _audits)
+    app.router.add_get("/api/audits/{run_id}", _audit)
     app.router.add_get("/", _index)
     app.router.add_get("/app.js", _script)
     app.router.add_get("/styles.css", _styles)
@@ -711,6 +987,103 @@ async def _cancel(request: web.Request) -> web.Response:
         return _error_response(400, "INVALID_REQUEST", str(exc))
     except Exception:
         return _error_response(502, "AGENT_UNAVAILABLE", "Agent unavailable")
+
+
+def _history_query(
+    request: web.Request, *, allowed: set[str]
+) -> dict[str, str]:
+    if any(key not in allowed for key in request.query):
+        raise InvalidRequest("Invalid history query")
+    values: dict[str, str] = {}
+    for key in allowed:
+        supplied = request.query.getall(key, [])
+        if len(supplied) > 1:
+            raise InvalidRequest("Invalid history query")
+        if supplied:
+            values[key] = supplied[0]
+    return values
+
+
+def _history_limit(value: str | None) -> int:
+    if value is None:
+        return 50
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise InvalidRequest("Invalid history limit") from exc
+    if not 1 <= limit <= 100:
+        raise InvalidRequest("Invalid history limit")
+    return limit
+
+
+async def _sessions(request: web.Request) -> web.Response:
+    try:
+        query = _history_query(request, allowed={"limit", "cursor", "q"})
+        cursor = query.get("cursor")
+        search = query.get("q", "").strip()
+        if cursor is not None and not _IDENTIFIER_RE.fullmatch(cursor):
+            raise InvalidRequest("Invalid session cursor")
+        if len(search) > 200:
+            raise InvalidRequest("Invalid session search")
+        result = await request.app[DATA_KEY].sessions(
+            limit=_history_limit(query.get("limit")),
+            cursor=cursor,
+            query=search,
+        )
+        return web.json_response(result)
+    except InvalidRequest as exc:
+        return _error_response(400, "INVALID_REQUEST", str(exc))
+    except Exception:
+        return _error_response(502, "HISTORY_UNAVAILABLE", "Session history unavailable")
+
+
+async def _session(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(
+            await request.app[DATA_KEY].session(request.match_info["session_id"])
+        )
+    except InvalidRequest as exc:
+        return _error_response(400, "INVALID_REQUEST", str(exc))
+    except UpstreamNotFound:
+        return _error_response(404, "SESSION_NOT_FOUND", "Session not found")
+    except Exception:
+        return _error_response(502, "HISTORY_UNAVAILABLE", "Session history unavailable")
+
+
+async def _audits(request: web.Request) -> web.Response:
+    try:
+        query = _history_query(
+            request, allowed={"limit", "cursor", "sessionId"}
+        )
+        cursor = query.get("cursor")
+        session_id = query.get("sessionId")
+        if cursor is not None and not _RUN_ID_RE.fullmatch(cursor):
+            raise InvalidRequest("Invalid audit cursor")
+        if session_id is not None and not _IDENTIFIER_RE.fullmatch(session_id):
+            raise InvalidRequest("Invalid session identity")
+        result = await request.app[DATA_KEY].run_audits(
+            limit=_history_limit(query.get("limit")),
+            cursor=cursor,
+            session_id=session_id,
+        )
+        return web.json_response(result)
+    except InvalidRequest as exc:
+        return _error_response(400, "INVALID_REQUEST", str(exc))
+    except Exception:
+        return _error_response(502, "HISTORY_UNAVAILABLE", "Run audits unavailable")
+
+
+async def _audit(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(
+            await request.app[DATA_KEY].run_audit(request.match_info["run_id"])
+        )
+    except InvalidRequest as exc:
+        return _error_response(400, "INVALID_REQUEST", str(exc))
+    except UpstreamNotFound:
+        return _error_response(404, "AUDIT_NOT_FOUND", "Run audit not found")
+    except Exception:
+        return _error_response(502, "HISTORY_UNAVAILABLE", "Run audit unavailable")
 
 
 async def _request_json(request: web.Request) -> Any:

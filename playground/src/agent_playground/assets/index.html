@@ -13,10 +13,17 @@
         <h1>Agent Playground</h1>
         <span id="service-status" class="service-status">Connecting</span>
       </div>
-      <button id="new-chat" class="secondary-button" type="button">New chat</button>
+      <nav class="view-tabs" aria-label="Workspace views">
+        <button type="button" data-view="playground" aria-pressed="true">Playground</button>
+        <button type="button" data-view="history" aria-pressed="false">Sessions</button>
+      </nav>
+      <div class="topbar-actions">
+        <button id="refresh-history" class="secondary-button" type="button" hidden>Refresh</button>
+        <button id="new-chat" class="secondary-button" type="button">New chat</button>
+      </div>
     </header>
 
-    <main class="workspace">
+    <main id="playground-view" class="workspace">
       <aside class="control-panel" aria-label="Run configuration">
         <section class="control-section">
           <h2>Engine</h2>
@@ -46,6 +53,10 @@
       </aside>
 
       <section class="conversation" aria-label="Conversation">
+        <div id="resume-banner" class="resume-banner" hidden>
+          <span id="resume-text"></span>
+          <button id="clear-resume" type="button" aria-label="Stop continuing this session" title="Stop continuing this session">&times;</button>
+        </div>
         <div id="transcript" class="transcript" aria-live="polite">
           <div id="empty-chat" class="empty-chat">
             <h2>No messages yet</h2>
@@ -74,6 +85,53 @@
         <section id="inspector-memory" class="inspector-body" role="tabpanel"></section>
         <section id="inspector-request" class="inspector-body" role="tabpanel" hidden></section>
         <section id="inspector-tools" class="inspector-body" role="tabpanel" hidden></section>
+      </aside>
+    </main>
+
+    <main id="history-view" class="history-workspace" hidden>
+      <aside class="session-browser" aria-label="Agent sessions">
+        <div class="history-panel-header">
+          <div>
+            <h2>Sessions</h2>
+            <span id="session-count" class="panel-count">0</span>
+          </div>
+          <form id="session-search" class="session-search" role="search">
+            <label class="visually-hidden" for="session-query">Search sessions</label>
+            <input id="session-query" type="search" maxlength="200" placeholder="Search sessions">
+          </form>
+        </div>
+        <div id="session-list" class="session-list" role="list"></div>
+        <button id="load-more-sessions" class="load-more" type="button" hidden>Load more</button>
+      </aside>
+
+      <section class="session-detail" aria-label="Session tree">
+        <header class="session-detail-header">
+          <div>
+            <h2 id="session-title">Select a session</h2>
+            <p id="session-meta">No session selected</p>
+          </div>
+          <button id="continue-leaf" class="primary-button" type="button" hidden>Continue from leaf</button>
+        </header>
+        <div id="session-tree" class="session-tree">
+          <p class="history-empty">Select a session to inspect its stored entries.</p>
+        </div>
+      </section>
+
+      <aside class="trace-browser" aria-label="Run trace">
+        <div class="history-panel-header trace-header">
+          <div>
+            <h2>Run trace</h2>
+            <span id="audit-count" class="panel-count">0</span>
+          </div>
+          <label class="visually-hidden" for="audit-select">Run audit</label>
+          <select id="audit-select" disabled>
+            <option value="">No audited runs</option>
+          </select>
+        </div>
+        <div id="audit-summary" class="audit-summary"></div>
+        <div id="audit-events" class="audit-events">
+          <p class="history-empty">Detailed audit is unavailable until a session is selected.</p>
+        </div>
       </aside>
     </main>
   </body>

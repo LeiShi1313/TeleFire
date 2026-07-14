@@ -44,6 +44,37 @@ function hasOnlyKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.has(key));
 }
 
+function listOptions(url, kind) {
+  const allowed =
+    kind === "sessions"
+      ? new Set(["limit", "cursor", "q"])
+      : new Set(["limit", "cursor", "sessionId"]);
+  for (const key of url.searchParams.keys()) {
+    if (!allowed.has(key) || url.searchParams.getAll(key).length !== 1) {
+      return null;
+    }
+  }
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? 50 : Number(rawLimit);
+  const cursor = url.searchParams.get("cursor");
+  if (
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    (cursor !== null && !IDENTIFIER_RE.test(cursor))
+  ) {
+    return null;
+  }
+  if (kind === "sessions") {
+    const query = url.searchParams.get("q") ?? "";
+    if (query.length > 200) return null;
+    return { limit, cursor, query };
+  }
+  const sessionId = url.searchParams.get("sessionId");
+  if (sessionId !== null && !IDENTIFIER_RE.test(sessionId)) return null;
+  return { limit, cursor, sessionId };
+}
+
 export function validateRunRequest(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const sessionId = value.sessionId;
@@ -230,6 +261,102 @@ export function createAgentServer({ engine, token, logger = console }) {
       json(response, 401, {
         error: { code: "UNAUTHORIZED", message: "Unauthorized" },
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/sessions") {
+      const options = listOptions(url, "sessions");
+      if (!options) {
+        json(response, 400, {
+          error: { code: "INVALID_REQUEST", message: "Invalid history request" },
+        });
+        return;
+      }
+      try {
+        json(response, 200, await engine.listSessions(options));
+      } catch {
+        json(response, 500, {
+          error: {
+            code: "HISTORY_UNAVAILABLE",
+            message: "Session history unavailable",
+          },
+        });
+      }
+      return;
+    }
+
+    const sessionMatch = url.pathname.match(
+      /^\/v1\/sessions\/([A-Za-z0-9_-]{1,128})$/,
+    );
+    if (request.method === "GET" && sessionMatch) {
+      try {
+        const session = await engine.getSession(sessionMatch[1]);
+        if (!session) {
+          json(response, 404, {
+            error: { code: "NOT_FOUND", message: "Session not found" },
+          });
+        } else {
+          json(response, 200, session);
+        }
+      } catch {
+        json(response, 500, {
+          error: {
+            code: "HISTORY_UNAVAILABLE",
+            message: "Session history unavailable",
+          },
+        });
+      }
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/runs") {
+      const options = listOptions(url, "runs");
+      if (!options) {
+        json(response, 400, {
+          error: { code: "INVALID_REQUEST", message: "Invalid history request" },
+        });
+        return;
+      }
+      try {
+        json(response, 200, await engine.listRunAudits(options));
+      } catch {
+        json(response, 500, {
+          error: {
+            code: "HISTORY_UNAVAILABLE",
+            message: "Run history unavailable",
+          },
+        });
+      }
+      return;
+    }
+
+    const auditMatch = url.pathname.match(
+      /^\/v1\/runs\/([0-9a-f-]+)\/audit$/i,
+    );
+    if (request.method === "GET" && auditMatch) {
+      if (!UUID_RE.test(auditMatch[1])) {
+        json(response, 400, {
+          error: { code: "INVALID_REQUEST", message: "Invalid history request" },
+        });
+        return;
+      }
+      try {
+        const audit = await engine.getRunAudit(auditMatch[1]);
+        if (!audit) {
+          json(response, 404, {
+            error: { code: "NOT_FOUND", message: "Run audit not found" },
+          });
+        } else {
+          json(response, 200, audit);
+        }
+      } catch {
+        json(response, 500, {
+          error: {
+            code: "HISTORY_UNAVAILABLE",
+            message: "Run history unavailable",
+          },
+        });
+      }
       return;
     }
 

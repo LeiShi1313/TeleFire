@@ -203,3 +203,57 @@ test("keeps reflection available after a successful empty recall", async () => {
     references: [],
   });
 });
+
+test("observes the complete initial recall HTTP exchange", async () => {
+  const observed = [];
+  const payload = {
+    results: [
+      {
+        id: "memory-1",
+        text: "Alice owns deployment.",
+        entities: ["Alice"],
+      },
+    ],
+  };
+
+  await retrieveMemoryContext({
+    baseUrl: "http://memory.internal:8888",
+    prompt: "Who owns deployment?",
+    context: [],
+    memory: { scopeId: "workspace:engineering", anchors: [] },
+    fetchImpl: async () =>
+      new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    observe: async (event) => observed.push(event),
+  });
+
+  assert.deepEqual(observed.map((event) => event.type), [
+    "memory.http.request",
+    "memory.http.response",
+  ]);
+  assert.equal(observed[0].data.operation, "recall");
+  assert.equal(observed[0].data.variant, "unanchored");
+  assert.match(observed[0].data.exchangeId, /^[0-9a-f-]{36}$/);
+  assert.equal(observed[1].data.exchangeId, observed[0].data.exchangeId);
+  assert.deepEqual(observed[0].data.request, {
+    method: "POST",
+    url: "http://memory.internal:8888/v1/default/banks/workspace%3Aengineering/memories/recall",
+    body: {
+      query: "Current request: Who owns deployment?",
+      budget: "mid",
+      max_tokens: 2_000,
+      types: ["world", "experience", "observation"],
+      include: {
+        entities: { max_tokens: 500 },
+        source_facts: { max_tokens: 750 },
+      },
+    },
+  });
+  assert.equal(observed[1].data.response.status, 200);
+  assert.equal(observed[1].data.response.ok, true);
+  assert.equal(observed[1].data.response.bodyBytes, Buffer.byteLength(JSON.stringify(payload)));
+  assert.deepEqual(observed[1].data.response.body, payload);
+  assert(Number.isInteger(observed[1].data.response.durationMs));
+});

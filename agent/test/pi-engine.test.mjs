@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
 import {
   PiEngine,
   buildRunPrompt,
@@ -161,10 +163,13 @@ async function fixture(handler, overrides = {}) {
     requestTimeoutMs: 5_000,
     workspaceDir: join(root, "workspace"),
     sessionDir: join(root, "sessions"),
+    auditDir: join(root, "audit"),
     agentDir: join(root, "agent"),
     webExtensionPath: null,
     memoryUrl: overrides.memoryUrl ?? null,
     memoryFetch: overrides.memoryFetch,
+    sessionHistory: overrides.sessionHistory,
+    auditStore: overrides.auditStore,
   });
   return {
     engine,
@@ -175,6 +180,45 @@ async function fixture(handler, overrides = {}) {
     },
   };
 }
+
+test("delegates read-only session history and run audit queries", async () => {
+  const calls = [];
+  const sessionHistory = {
+    async list(options) {
+      calls.push(["sessions.list", options]);
+      return { items: [{ id: "session-1" }], total: 1, nextCursor: null };
+    },
+    async get(sessionId) {
+      calls.push(["sessions.get", sessionId]);
+      return { id: sessionId, entries: [] };
+    },
+  };
+  const auditStore = {
+    async list(options) {
+      calls.push(["audits.list", options]);
+      return { items: [{ runId: "run-1" }], total: 1, nextCursor: null };
+    },
+    async get(runId) {
+      calls.push(["audits.get", runId]);
+      return { runId, events: [] };
+    },
+  };
+  const app = await fixture(() => {}, { sessionHistory, auditStore });
+  try {
+    assert.equal((await app.engine.listSessions({ limit: 5 })).total, 1);
+    assert.equal((await app.engine.getSession("session-1")).id, "session-1");
+    assert.equal((await app.engine.listRunAudits({ sessionId: "session-1" })).total, 1);
+    assert.equal((await app.engine.getRunAudit("run-1")).runId, "run-1");
+    assert.deepEqual(calls, [
+      ["sessions.list", { limit: 5 }],
+      ["sessions.get", "session-1"],
+      ["audits.list", { sessionId: "session-1" }],
+      ["audits.get", "run-1"],
+    ]);
+  } finally {
+    await app.close();
+  }
+});
 
 test("labels background separately from the current request", () => {
   const prompt = buildRunPrompt({
@@ -349,6 +393,54 @@ test("persists a session tree and branches from mapped entries", async () => {
   }
 });
 
+test("continues a recovered session created under an older workspace path", async () => {
+  const app = await fixture((_body, response) => sendText(response, "continued"));
+  try {
+    const legacy = SessionManager.create(
+      join(app.engine.config.workspaceDir, "legacy"),
+      app.engine.config.sessionDir,
+      { id: "99999999-9999-4999-8999-999999999999" },
+    );
+    legacy.appendMessage({
+      role: "user",
+      content: "legacy prompt",
+      timestamp: 1,
+    });
+    const parentEntryId = legacy.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "legacy answer" }],
+      api: "openai-completions",
+      provider: "openai-compatible",
+      model: "test-model",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 2,
+    });
+
+    const events = await collect(
+      app.engine,
+      request("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+        sessionId: legacy.getSessionId(),
+        parentEntryId,
+        prompt: "continue this session",
+      }),
+    );
+
+    assert.equal(events.at(-1).type, "run_completed");
+    assert.equal(events.at(-1).sessionId, legacy.getSessionId());
+    assert.match(JSON.stringify(app.provider.requests[0].messages), /legacy prompt/);
+  } finally {
+    await app.close();
+  }
+});
+
 test("executes a delegated calculation and emits transient tool snapshots", async () => {
   const app = await fixture((body, response) => {
     if (body.messages.at(-1)?.role === "tool") {
@@ -369,6 +461,119 @@ test("executes a delegated calculation and emits transient tool snapshots", asyn
     assert.equal(events.at(-1).type, "run_completed");
     assert.equal(events.at(-1).answer, "The result is 42.");
     assert.match(JSON.stringify(app.provider.requests[1].messages), /42/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("records a correlated run audit with memory, model, and tool details", async () => {
+  const runId = "77777777-7777-4777-8777-777777777777";
+  const app = await fixture(
+    (body, response) => {
+      if (body.messages.at(-1)?.role === "tool") {
+        sendText(response, "Alice owns deployment; 6 * 7 is 42.");
+      } else {
+        sendCodeToolCall(response);
+      }
+    },
+    {
+      memoryUrl: "http://memory.internal:8888",
+      memoryFetch: async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                id: "memory-1",
+                text: "Alice owns deployment.",
+                entities: ["Alice"],
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    },
+  );
+  try {
+    const events = await collect(
+      app.engine,
+      request(runId, {
+        prompt: "Who owns deployment, and what is 6 * 7?",
+        memory: { scopeId: "workspace:engineering", anchors: [] },
+      }),
+    );
+    const result = events.at(-1);
+    const audit = await app.engine.getRunAudit(runId);
+
+    assert.equal(result.type, "run_completed");
+    assert.equal(audit.runId, runId);
+    const types = audit.events.map((event) => event.type);
+    for (const type of [
+      "run.request",
+      "memory.http.request",
+      "memory.http.response",
+      "memory.context",
+      "session.opened",
+      "model.input",
+      "model.turn.started",
+      "model.turn.completed",
+      "tool.started",
+      "tool.completed",
+      "run.completed",
+    ]) {
+      assert(types.includes(type), `missing ${type}`);
+    }
+    const requestEvent = audit.events.find((event) => event.type === "run.request");
+    assert.equal(requestEvent.data.prompt, "Who owns deployment, and what is 6 * 7?");
+    assert.equal(requestEvent.data.systemPrompt, "Answer directly.");
+    assert.equal(requestEvent.data.memory.scopeId, "workspace:engineering");
+    const memoryRequest = audit.events.find(
+      (event) => event.type === "memory.http.request",
+    );
+    assert.equal(memoryRequest.data.request.body.budget, "mid");
+    const modelInput = audit.events.find((event) => event.type === "model.input");
+    assert.match(modelInput.data.prompt, /Alice owns deployment/);
+    assert.equal(modelInput.data.model.id, "test-model");
+    const toolStarted = audit.events.find((event) => event.type === "tool.started");
+    const toolCompleted = audit.events.find((event) => event.type === "tool.completed");
+    assert.equal(toolStarted.data.toolCallId, "call-code-1");
+    assert.deepEqual(toolStarted.data.args, { code: "6 * 7" });
+    assert.equal(toolCompleted.data.toolCallId, "call-code-1");
+    assert.equal(toolCompleted.data.isError, false);
+    assert(Number.isInteger(toolCompleted.data.durationMs));
+    const completed = audit.events.find((event) => event.type === "run.completed");
+    assert.equal(completed.data.sessionId, result.sessionId);
+    assert.equal(completed.data.entryId, result.entryId);
+    assert.equal(completed.data.answer, result.answer);
+    assert.doesNotMatch(JSON.stringify(audit), /test-key/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("keeps runs available when audit storage cannot start", async () => {
+  const app = await fixture(
+    (_body, response) => sendText(response, "Audit-independent answer."),
+    {
+      auditStore: {
+        async start() {
+          throw new Error("read-only filesystem");
+        },
+        async list() {
+          return { items: [], total: 0, nextCursor: null };
+        },
+        async get() {
+          return null;
+        },
+      },
+    },
+  );
+  try {
+    const events = await collect(
+      app.engine,
+      request("88888888-8888-4888-8888-888888888888"),
+    );
+    assert.equal(events.at(-1).type, "run_completed");
+    assert.equal(events.at(-1).answer, "Audit-independent answer.");
   } finally {
     await app.close();
   }
@@ -398,6 +603,11 @@ test("classifies provider rate limits without exposing provider details", async 
       "Agent provider is temporarily rate limited",
     );
     assert.doesNotMatch(JSON.stringify(events), /credential detail/);
+    const audit = await app.engine.getRunAudit(
+      "55555555-5555-4555-8555-555555555555",
+    );
+    assert(audit.events.some((event) => event.type === "run.failed"));
+    assert.doesNotMatch(JSON.stringify(audit), /credential detail/);
   } finally {
     await app.close();
   }

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const MAX_QUERY_CHARS = 8_000;
 const MAX_ANCHOR_CHARS = 3_000;
 const MAX_CONTEXT_CHARS = 4_000;
@@ -11,6 +13,22 @@ function bounded(value, max) {
 
 function oneLine(value, max) {
   return bounded(value, max).replace(/\s+/g, " ");
+}
+
+async function observeSafely(observe, type, data) {
+  if (!observe) return;
+  try {
+    await observe({ type, data });
+  } catch {
+    // Observability must never make memory retrieval unavailable.
+  }
+}
+
+function errorDetails(error) {
+  return {
+    name: bounded(error?.name || "Error", 128),
+    message: bounded(error?.message || "Memory request failed", 1_000),
+  };
 }
 
 export function buildMemoryQueries({ prompt, context, memory }) {
@@ -82,36 +100,89 @@ function parseMemories(payload) {
   });
 }
 
-async function recall({ baseUrl, scopeId, query, timeoutMs, fetchImpl }) {
+async function recall({
+  baseUrl,
+  scopeId,
+  query,
+  timeoutMs,
+  fetchImpl,
+  observe,
+  variant,
+}) {
   const bank = encodeURIComponent(scopeId);
-  const response = await fetchImpl(
-    `${baseUrl.replace(/\/$/, "")}/v1/default/banks/${bank}/memories/recall`,
-    {
+  const url = `${baseUrl.replace(/\/$/, "")}/v1/default/banks/${bank}/memories/recall`;
+  const body = {
+    query,
+    budget: "mid",
+    max_tokens: 2_000,
+    types: ["world", "experience", "observation"],
+    include: {
+      entities: { max_tokens: 500 },
+      source_facts: { max_tokens: 750 },
+    },
+  };
+  const exchangeId = randomUUID();
+  const startedAt = Date.now();
+  await observeSafely(observe, "memory.http.request", {
+    exchangeId,
+    operation: "recall",
+    variant,
+    toolCallId: null,
+    request: { method: "POST", url, body },
+  });
+  let response;
+  let text;
+  try {
+    response = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        query,
-        budget: "mid",
-        max_tokens: 2_000,
-        types: ["world", "experience", "observation"],
-        include: {
-          entities: { max_tokens: 500 },
-          source_facts: { max_tokens: 750 },
-        },
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch (error) {
+    await observeSafely(observe, "memory.http.error", {
+      exchangeId,
+      operation: "recall",
+      variant,
+      toolCallId: null,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      error: errorDetails(error),
+    });
+    throw new Error("Memory recall unavailable");
+  }
+  const bodyBytes = Buffer.byteLength(text);
+  let payload;
+  let malformed = false;
+  if (bodyBytes <= MAX_RESPONSE_BYTES) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      malformed = true;
+    }
+  }
+  await observeSafely(observe, "memory.http.response", {
+    exchangeId,
+    operation: "recall",
+    variant,
+    toolCallId: null,
+    response: {
+      status: response.status,
+      ok: response.ok,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      bodyBytes,
+      body:
+        bodyBytes > MAX_RESPONSE_BYTES
+          ? { omitted: true, reason: "response_too_large" }
+          : malformed
+            ? text
+            : payload,
     },
-  );
-  const text = await response.text();
+  });
   if (!response.ok || Buffer.byteLength(text) > MAX_RESPONSE_BYTES) {
     throw new Error("Memory recall unavailable");
   }
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new Error("Malformed memory response");
-  }
+  if (malformed) throw new Error("Malformed memory response");
   return parseMemories(payload);
 }
 
@@ -177,19 +248,22 @@ export async function retrieveMemoryContext({
   memory,
   timeoutMs = 30_000,
   fetchImpl = fetch,
+  observe = null,
 }) {
   if (!baseUrl || !memory) {
     return { queries: [], memories: [], context: "", access: null };
   }
   const queries = buildMemoryQueries({ prompt, context, memory });
   const settled = await Promise.allSettled(
-    queries.map((query) =>
+    queries.map((query, index) =>
       recall({
         baseUrl,
         scopeId: memory.scopeId,
         query,
         timeoutMs,
         fetchImpl,
+        observe,
+        variant: index === 0 ? "unanchored" : "anchored",
       }),
     ),
   );

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -24,11 +26,38 @@ function referenceFrom(value) {
   };
 }
 
+async function observeSafely(observe, type, data) {
+  if (!observe) return;
+  try {
+    await observe({ type, data });
+  } catch {
+    // Observability must never make a memory tool unavailable.
+  }
+}
+
+function requestBody(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function errorDetails(error) {
+  return {
+    name: bounded(error?.name || "Error", 128),
+    message: bounded(error?.message || "Memory request failed", 1_000),
+  };
+}
+
 export function createMemoryTools({
   baseUrl,
   access,
   timeoutMs = 30_000,
   fetchImpl = fetch,
+  observe = null,
 }) {
   if (!baseUrl || !access) return [];
   const bankPath = encodeURIComponent(access.bankId);
@@ -41,26 +70,71 @@ export function createMemoryTools({
   let reflectCalls = 0;
   let sourceCalls = 0;
 
-  async function request(path, options = {}) {
+  async function request(path, options = {}, metadata = {}) {
+    const url = `${baseUrl.replace(/\/$/, "")}${path}`;
+    const exchangeId = randomUUID();
+    const startedAt = Date.now();
+    const eventBase = {
+      exchangeId,
+      operation: metadata.operation ?? "request",
+      toolCallId: metadata.toolCallId ?? null,
+      ...metadata.context,
+    };
+    await observeSafely(observe, "memory.http.request", {
+      ...eventBase,
+      request: {
+        method: options.method ?? "GET",
+        url,
+        body: requestBody(options.body),
+      },
+    });
     let response;
+    let text;
     try {
-      response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      response = await fetchImpl(url, {
         ...options,
         headers: { "content-type": "application/json", ...options.headers },
         signal: AbortSignal.timeout(timeoutMs),
       });
-    } catch {
+      text = await response.text();
+    } catch (error) {
+      await observeSafely(observe, "memory.http.error", {
+        ...eventBase,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        error: errorDetails(error),
+      });
       throw new Error("Memory service unavailable");
     }
-    const text = await response.text();
-    if (!response.ok || Buffer.byteLength(text) > MAX_RESPONSE_BYTES) {
+    const bodyBytes = Buffer.byteLength(text);
+    let payload;
+    let malformed = false;
+    if (bodyBytes <= MAX_RESPONSE_BYTES) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        malformed = true;
+      }
+    }
+    await observeSafely(observe, "memory.http.response", {
+      ...eventBase,
+      response: {
+        status: response.status,
+        ok: response.ok,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        bodyBytes,
+        body:
+          bodyBytes > MAX_RESPONSE_BYTES
+            ? { omitted: true, reason: "response_too_large" }
+            : malformed
+              ? text
+              : payload,
+      },
+    });
+    if (!response.ok || bodyBytes > MAX_RESPONSE_BYTES) {
       throw new Error("Memory service unavailable");
     }
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error("Memory service returned invalid data");
-    }
+    if (malformed) throw new Error("Memory service returned invalid data");
+    return payload;
   }
 
   const reflect = defineTool({
@@ -73,24 +147,28 @@ export function createMemoryTools({
     parameters: Type.Object({
       question: Type.String({ minLength: 1, maxLength: 2_000 }),
     }),
-    async execute(_toolCallId, { question }) {
+    async execute(toolCallId, { question }) {
       if (reflectCalls >= 1) throw new Error("Memory reflection limit reached");
       reflectCalls += 1;
       let payload;
       try {
-        payload = await request(`/v1/default/banks/${bankPath}/reflect`, {
-          method: "POST",
-          body: JSON.stringify({
-            query: question,
-            budget: "mid",
-            max_tokens: 1_500,
-            fact_types: ["world", "experience", "observation"],
-            include: {
-              facts: { max_tokens: 2_000 },
-              tool_calls: { max_tokens: 750 },
-            },
-          }),
-        });
+        payload = await request(
+          `/v1/default/banks/${bankPath}/reflect`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              query: question,
+              budget: "mid",
+              max_tokens: 1_500,
+              fact_types: ["world", "experience", "observation"],
+              include: {
+                facts: { max_tokens: 2_000 },
+                tool_calls: { max_tokens: 750 },
+              },
+            }),
+          },
+          { operation: "reflect", toolCallId },
+        );
       } catch {
         return {
           content: [
@@ -154,7 +232,7 @@ export function createMemoryTools({
         maxItems: MAX_SOURCE_ITEMS,
       }),
     }),
-    async execute(_toolCallId, { memoryIds }) {
+    async execute(toolCallId, { memoryIds }) {
       if (sourceCalls >= 2) throw new Error("Memory source limit reached");
       sourceCalls += 1;
       const uniqueIds = [...new Set(memoryIds)];
@@ -167,6 +245,8 @@ export function createMemoryTools({
         try {
           const memory = await request(
             `/v1/default/banks/${bankPath}/memories/${encodeURIComponent(memoryId)}`,
+            {},
+            { operation: "memory.get", toolCallId, context: { memoryId } },
           );
           const documentId =
             reference.documentId ??
@@ -183,6 +263,12 @@ export function createMemoryTools({
           if (chunkId) {
             const chunks = await request(
               `/v1/default/banks/${bankPath}/documents/${documentPath}/chunks?limit=20`,
+              {},
+              {
+                operation: "document.chunks",
+                toolCallId,
+                context: { memoryId, documentId },
+              },
             );
             const chunk = Array.isArray(chunks?.items)
               ? chunks.items.find(
@@ -199,6 +285,12 @@ export function createMemoryTools({
           if (!sourceText) {
             const document = await request(
               `/v1/default/banks/${bankPath}/documents/${documentPath}`,
+              {},
+              {
+                operation: "document.get",
+                toolCallId,
+                context: { memoryId, documentId },
+              },
             );
             if (
               document?.bank_id === access.bankId &&

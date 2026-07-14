@@ -266,6 +266,8 @@ async def test_inspector_security_and_empty_state():
             for host in (
                 "localhost",
                 "localhost:8765",
+                "memory.telefire.localhost",
+                "memory.telefire.localhost:18865",
                 "127.0.0.1",
                 "[::1]:8765",
             ):
@@ -274,7 +276,14 @@ async def test_inspector_security_and_empty_state():
                 ) as response:
                     assert response.status == 200
 
-            for host in ("example.com", "localhost.example.com", "127.0.0.2"):
+            for host in (
+                "example.com",
+                "localhost.example.com",
+                "memory.telefire.localhost.example.com",
+                "-invalid.localhost",
+                "invalid-.localhost",
+                "127.0.0.2",
+            ):
                 async with session.get(
                     f"{inspector_url}/", headers={"Host": host}
                 ) as response:

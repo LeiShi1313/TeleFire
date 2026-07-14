@@ -9,6 +9,7 @@ from telefire.ai import (
     AIConversationHandler,
     AIResponder,
     AISettings,
+    AITrigger,
     AgentEvent,
     AgentRunRequest,
     MemoryBackfillRequest,
@@ -145,11 +146,19 @@ def make_request(prompt: str) -> AgentRunRequest:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/ai hello", "hello"),
-        ("/ai\nhello", "hello"),
-        ("/ai", ""),
+        ("/ai hello", AITrigger(prompt="hello")),
+        ("/ai\nhello", AITrigger(prompt="hello")),
+        ("/ai", AITrigger(prompt="")),
+        ("/ai10 hello", AITrigger(prompt="hello", recent_messages=10)),
+        (
+            "/ai10@TelefireBot summarize this",
+            AITrigger(prompt="summarize this", recent_messages=10),
+        ),
+        ("/ai0 invalid", AITrigger(prompt="invalid", recent_messages=0)),
         (" /ai hello", None),
         ("/air hello", None),
+        ("/ai10x hello", None),
+        ("/ai_memory hello", None),
         ("hello /ai", None),
     ],
 )

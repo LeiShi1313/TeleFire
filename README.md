@@ -282,6 +282,13 @@ Commands and reply behavior:
   answer, human-authored messages in that bounded chain are ingested under their
   respective users. Relevant scoped memory is retrieved for the requester and
   the human reply-chain participants.
+- `/ai10 <question>` starts with up to 10 messages immediately before the command
+  as additional chat context. Any number from 1 through
+  `TELEFIRE_AI_MAX_CONTEXT_MESSAGES` is accepted. When used in a reply, TeleFire
+  merges the chronological recent messages with the reply path, removes
+  duplicates, and preserves reply relationships. A prior AI answer on that reply
+  path still selects the Agent Session; recent-only messages can supply memory
+  participants but are not automatically retained as reply-thread evidence.
 - Reply directly to an AI answer without `/ai` to continue. Reply to an older
   AI answer to fork from that point.
 - Reply to a photo, image document, PDF, or UTF-8 text file with `/ai <question>`

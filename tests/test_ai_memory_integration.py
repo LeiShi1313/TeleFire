@@ -389,6 +389,7 @@ def make_handler(
     attachment_describer=None,
     identity_resolver=None,
     mention_resolver=None,
+    history_source=None,
     store=None,
     dream_runner=None,
     memory_command_delete_delay=0,
@@ -402,6 +403,7 @@ def make_handler(
             attachment_describer=attachment_describer,
             identity_resolver=identity_resolver,
             mention_resolver=mention_resolver,
+            history_source=history_source,
         ),
         rate_limiter=AIRateLimiter(store, cooldown_seconds=0),
         memory=memory,
@@ -615,7 +617,7 @@ async def test_ai_request_delegates_scope_and_identity_anchors_to_agent():
     assert memory.recall_calls == []
     request = gateway.requests[0]
     assert [item.kind for item in request.context] == ["reference"]
-    assert "Untrusted reply context" in request.context[0].text
+    assert "Untrusted chat context" in request.context[0].text
     assert request.memory is not None
     assert request.memory.scope_id == "telegram:chat:-1001"
     assert [(item.identity, item.label) for item in request.memory.anchors] == [
@@ -623,6 +625,63 @@ async def test_ai_request_delegates_scope_and_identity_anchors_to_agent():
         ("telegram:user:20", "User 20"),
     ]
     assert memory.retain_calls == []
+
+
+@pytest.mark.asyncio
+async def test_recent_chat_participants_become_memory_identity_anchors():
+    recent = FakeMessage("Alice prefers local models", sender_id=20)
+
+    class HistorySource:
+        async def fetch_recent(self, trigger, *, limit):
+            assert limit == 1
+            return (recent,)
+
+    memory = FakeMemory()
+    gateway = FakeGateway(["Use a local model"])
+    trigger = FakeMessage("/ai1 what does Alice prefer?", sender_id=10)
+    handler = make_handler(
+        gateway,
+        memory,
+        identity_resolver=FakeIdentityResolver(),
+        history_source=HistorySource(),
+    )
+
+    assert await handler.handle(trigger) is True
+
+    target = gateway.requests[0].memory
+    assert target is not None
+    assert [(item.identity, item.label) for item in target.anchors] == [
+        ("telegram:user:10", "User 10"),
+        ("telegram:user:20", "User 20"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recent_only_context_is_not_automatically_retained():
+    recent = FakeMessage("Alice prefers local models", sender_id=20)
+
+    class HistorySource:
+        async def fetch_recent(self, trigger, *, limit):
+            return (recent,)
+
+    store = FakeStore()
+    store.memory_enabled.add("telegram:chat:-1001")
+    memory = FakeMemory()
+    trigger = FakeMessage("/ai1 what does Alice prefer?", sender_id=10)
+    handler = make_handler(
+        FakeGateway(["Use a local model"]),
+        memory,
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+        history_source=HistorySource(),
+    )
+
+    assert await handler.handle(trigger) is True
+
+    episode = memory.retain_calls[0]["episode"]
+    assert [(event.actor_id, event.text) for event in episode.events] == [
+        ("telegram:user:10", "what does Alice prefer?")
+    ]
 
 
 @pytest.mark.asyncio

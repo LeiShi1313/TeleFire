@@ -6,24 +6,50 @@ authors = [{ name = "Lei Shi", email = "me@leishi.io" }]
 requires-python = ">=3.14"
 license = { text = "MIT" }
 dependencies = [
-    "telethon>=1.42.0",
+    "telethon>=1.44.0",
     "fire>=0.5.0",
-    "aiohttp>=3.9.0",
+    "aiohttp>=3.14.1",
     "aiosqlite>=0.20.0",
+    "openai>=2.45.0",
     "mautrix>=0.21.0",
-    "Pillow>=10.0.0",
+    "Pillow>=12.2.0",
+    "idna>=3.15",
+    "urllib3>=2.7.0",
     "python-dateutil>=2.8.0",
+    "croniter>=6.0.0,<7",
     "loguru>=0.7.0",
+    "pypdf>=6.8,<7",
 ]
 
 [project.optional-dependencies]
 ai = ["g4f>=0.3.8"]
+legacy-migration = ["zvec>=0.5.1,<0.6"]
+e2ee = [
+    "asyncpg>=0.30.0",
+    "base58>=2.1.1",
+    "pycryptodome>=3.23.0",
+    "python-olm>=3.2.16",
+    "unpaddedbase64>=2.1.0",
+]
 
 [project.scripts]
 telefire = "telefire.cli:main"
+telefire-memory-migrate = "telefire.memory_migrate:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/telefire"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

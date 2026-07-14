@@ -1,0 +1,327 @@
+import { createHash, timingSafeEqual } from "node:crypto";
+import { createServer } from "node:http";
+
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_ATTACHMENT_BODY_BYTES = 3 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const MAX_ATTACHMENT_TEXT_CHARS = 50_000;
+const MAX_MEMORY_ANCHORS = 64;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const BANK_ID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
+const MIME_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function json(response, status, payload) {
+  const body = JSON.stringify(payload);
+  response.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "content-length": Buffer.byteLength(body),
+    "cache-control": "no-store",
+  });
+  response.end(body);
+}
+
+async function readJson(request, maxBytes = MAX_BODY_BYTES) {
+  if (!request.headers["content-type"]?.toLowerCase().startsWith("application/json")) {
+    throw new Error("invalid content type");
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) throw new Error("request too large");
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function isBoundedString(value, min, max) {
+  return typeof value === "string" && value.length >= min && value.length <= max;
+}
+
+function hasOnlyKeys(value, allowed) {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+export function validateRunRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const sessionId = value.sessionId;
+  const parentEntryId = value.parentEntryId;
+  const isRoot = sessionId === null && parentEntryId === null;
+  const isContinuation =
+    typeof sessionId === "string" &&
+    IDENTIFIER_RE.test(sessionId) &&
+    typeof parentEntryId === "string" &&
+    IDENTIFIER_RE.test(parentEntryId);
+  if (
+    !UUID_RE.test(value.runId ?? "") ||
+    (!isRoot && !isContinuation) ||
+    !isBoundedString(value.prompt, 1, 16_000) ||
+    !isBoundedString(value.systemPrompt, 1, 32_000) ||
+    !new Set(["owner", "delegated", "none"]).has(value.toolPolicy) ||
+    !Array.isArray(value.context) ||
+    value.context.length > 4
+  ) {
+    return null;
+  }
+  const context = [];
+  for (const item of value.context) {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      item.kind !== "reference" ||
+      !isBoundedString(item.text, 1, 16_000)
+    ) {
+      return null;
+    }
+    context.push({ kind: item.kind, text: item.text });
+  }
+  let memory;
+  if (value.memory !== undefined) {
+    const supplied = value.memory;
+    if (
+      !supplied ||
+      typeof supplied !== "object" ||
+      Array.isArray(supplied) ||
+      !hasOnlyKeys(supplied, new Set(["scopeId", "query", "anchors"])) ||
+      !BANK_ID_RE.test(supplied.scopeId ?? "") ||
+      !(
+        supplied.query === undefined ||
+        supplied.query === null ||
+        isBoundedString(supplied.query, 1, 8_000)
+      ) ||
+      !Array.isArray(supplied.anchors) ||
+      supplied.anchors.length > MAX_MEMORY_ANCHORS
+    ) {
+      return null;
+    }
+    const anchors = [];
+    const seen = new Set();
+    for (const anchor of supplied.anchors) {
+      if (
+        !anchor ||
+        typeof anchor !== "object" ||
+        Array.isArray(anchor) ||
+        !hasOnlyKeys(anchor, new Set(["id", "label"])) ||
+        !isBoundedString(anchor.id, 1, 256) ||
+        !(
+          anchor.label === null ||
+          anchor.label === undefined ||
+          isBoundedString(anchor.label, 1, 256)
+        ) ||
+        seen.has(anchor.id)
+      ) {
+        return null;
+      }
+      seen.add(anchor.id);
+      anchors.push({
+        id: anchor.id,
+        label: anchor.label ?? null,
+      });
+    }
+    memory = {
+      scopeId: supplied.scopeId,
+      ...(supplied.query ? { query: supplied.query } : {}),
+      anchors,
+    };
+  }
+  return {
+    runId: value.runId,
+    sessionId,
+    parentEntryId,
+    prompt: value.prompt,
+    context,
+    systemPrompt: value.systemPrompt,
+    toolPolicy: value.toolPolicy,
+    ...(memory ? { memory } : {}),
+  };
+}
+
+function decodeBase64(value) {
+  if (
+    typeof value !== "string" ||
+    value.length < 4 ||
+    value.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  ) {
+    return null;
+  }
+  const decoded = Buffer.from(value, "base64");
+  const expected = value.replace(/=+$/, "");
+  const actual = decoded.toString("base64").replace(/=+$/, "");
+  if (
+    decoded.length === 0 ||
+    decoded.length > MAX_ATTACHMENT_BYTES ||
+    actual !== expected
+  ) {
+    return null;
+  }
+  return decoded;
+}
+
+export function validateAttachmentRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const mimeType = value.mimeType;
+  const filename = value.filename;
+  if (
+    typeof mimeType !== "string" ||
+    !MIME_RE.test(mimeType) ||
+    !(
+      filename === null ||
+      filename === undefined ||
+      isBoundedString(filename, 1, 200)
+    )
+  ) {
+    return null;
+  }
+  if (value.kind === "image" && IMAGE_MIME_TYPES.has(mimeType)) {
+    const data = decodeBase64(value.data);
+    if (!data || value.text !== undefined) return null;
+    return { kind: "image", mimeType, filename: filename ?? null, data };
+  }
+  if (
+    value.kind === "text" &&
+    isBoundedString(value.text, 1, MAX_ATTACHMENT_TEXT_CHARS) &&
+    value.data === undefined
+  ) {
+    return {
+      kind: "text",
+      mimeType,
+      filename: filename ?? null,
+      text: value.text,
+    };
+  }
+  return null;
+}
+
+function writeNdjson(response, event) {
+  return response.write(`${JSON.stringify(event)}\n`);
+}
+
+function isAuthorized(request, tokenDigest) {
+  const actual = request.headers.authorization ?? "";
+  const actualDigest = createHash("sha256").update(actual).digest();
+  return timingSafeEqual(actualDigest, tokenDigest);
+}
+
+export function createAgentServer({ engine, token, logger = console }) {
+  if (typeof token !== "string" || token.length < 24) {
+    throw new Error("Agent service token must contain at least 24 characters");
+  }
+  const tokenDigest = createHash("sha256").update(`Bearer ${token}`).digest();
+  return createServer(async (request, response) => {
+    response.setHeader("x-content-type-options", "nosniff");
+    response.setHeader("cache-control", "no-store");
+    const url = new URL(request.url ?? "/", "http://agent.invalid");
+
+    if (request.method === "GET" && url.pathname === "/health") {
+      json(response, 200, { status: "ok" });
+      return;
+    }
+
+    if (!isAuthorized(request, tokenDigest)) {
+      json(response, 401, {
+        error: { code: "UNAUTHORIZED", message: "Unauthorized" },
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/attachments/describe") {
+      let attachment;
+      try {
+        attachment = validateAttachmentRequest(
+          await readJson(request, MAX_ATTACHMENT_BODY_BYTES),
+        );
+      } catch {
+        attachment = null;
+      }
+      if (!attachment) {
+        json(response, 400, {
+          error: { code: "INVALID_REQUEST", message: "Invalid attachment request" },
+        });
+        return;
+      }
+      try {
+        const description = await engine.describeAttachment(attachment);
+        if (!isBoundedString(description, 1, 4_000)) {
+          throw new Error("Invalid attachment description");
+        }
+        json(response, 200, { description });
+      } catch (error) {
+        logger.error("Attachment analysis failed", {
+          errorType: error instanceof Error ? error.name : "UnknownError",
+        });
+        json(response, 502, {
+          error: { code: "ANALYSIS_FAILED", message: "Attachment analysis failed" },
+        });
+      }
+      return;
+    }
+
+    const cancelMatch = url.pathname.match(
+      /^\/v1\/runs\/([0-9a-f-]+)\/cancel$/i,
+    );
+    if (request.method === "POST" && cancelMatch) {
+      const runId = cancelMatch[1];
+      if (!UUID_RE.test(runId)) {
+        json(response, 400, {
+          error: { code: "INVALID_REQUEST", message: "Invalid run id" },
+        });
+        return;
+      }
+      json(response, 200, { cancelled: await engine.cancel(runId) });
+      return;
+    }
+
+    if (request.method !== "POST" || url.pathname !== "/v1/runs") {
+      json(response, 404, {
+        error: { code: "NOT_FOUND", message: "Not found" },
+      });
+      return;
+    }
+
+    let run;
+    try {
+      run = validateRunRequest(await readJson(request));
+    } catch {
+      run = null;
+    }
+    if (!run) {
+      json(response, 400, {
+        error: { code: "INVALID_REQUEST", message: "Invalid run request" },
+      });
+      return;
+    }
+
+    response.writeHead(200, {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "transfer-encoding": "chunked",
+    });
+    let completed = false;
+    response.on("close", () => {
+      if (!completed) void engine.cancel(run.runId);
+    });
+    try {
+      for await (const event of engine.run(run)) {
+        if (response.destroyed) break;
+        writeNdjson(response, event);
+      }
+      completed = true;
+    } catch (error) {
+      logger.error("Agent run failed", {
+        runId: run.runId,
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      });
+      if (!response.destroyed) {
+        writeNdjson(response, {
+          type: "run_failed",
+          code: "AGENT_ERROR",
+          message: "Agent run failed",
+        });
+      }
+    } finally {
+      if (!response.destroyed) response.end();
+    }
+  });
+}

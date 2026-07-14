@@ -1,0 +1,96 @@
+services:
+  pi-agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile.agent
+    container_name: pi-agent
+    environment:
+      AI_BASE_URL: ${AI_BASE_URL}
+      AI_API_KEY: ${AI_API_KEY}
+      AI_CHAT_MODEL: ${AI_CHAT_MODEL}
+      AI_REASONING_EFFORT: ${AI_REASONING_EFFORT:-none}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-4000}
+      AI_CONTEXT_WINDOW: ${AI_CONTEXT_WINDOW:-128000}
+      AI_REQUEST_TIMEOUT: ${AI_REQUEST_TIMEOUT:-90}
+      PI_HOST: "0.0.0.0"
+      PI_PORT: "8790"
+      PI_DATA_DIR: /agent-data/.pi-agent
+      PI_AGENT_TOKEN: ${PI_AGENT_TOKEN}
+      MEMORY_API_URL: http://memory-api:8888
+    init: true
+    networks:
+      - default
+      - memory-platform
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    pids_limit: 256
+    ports:
+      - "127.0.0.1:${PI_AGENT_EXPOSE_PORT:-18790}:8790"
+    volumes:
+      - agent-data:/agent-data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8790/health').then(r=>{if(!r.ok)process.exit(1)})
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  agent-playground:
+    build:
+      context: ../playground
+    container_name: agent-playground
+    command: ["--host", "0.0.0.0", "--port", "8780"]
+    depends_on:
+      pi-agent:
+        condition: service_healthy
+    environment:
+      PI_AGENT_URL: http://pi-agent:8790
+      PI_AGENT_TOKEN: ${PI_AGENT_TOKEN}
+      MEMORY_API_URL: http://memory-api:8888
+      PLAYGROUND_REQUEST_TIMEOUT: ${PLAYGROUND_REQUEST_TIMEOUT:-300}
+      PLAYGROUND_SYSTEM_PROMPT: ${PLAYGROUND_SYSTEM_PROMPT:-}
+    networks:
+      - default
+      - memory-platform
+    ports:
+      - "127.0.0.1:${PLAYGROUND_EXPOSE_PORT:-18867}:8780"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    pids_limit: 128
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/health', timeout=2).read()
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  agent-data:
+    name: pi-agent-data
+
+networks:
+  default:
+    name: agent-platform
+  memory-platform:
+    external: true
+    name: memory-platform

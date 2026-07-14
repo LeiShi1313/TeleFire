@@ -1,4 +1,10 @@
+import asyncio
+import os
+import secrets
 import shutil
+import time
+from contextlib import suppress
+from typing import Any
 
 from mautrix.api import HTTPAPI
 from mautrix.client import Client
@@ -11,14 +17,27 @@ from telefire.matrix.store import FileSyncStore, MatrixSession, MatrixSessionSto
 from telefire.runtime import build_logger
 
 
+class MatrixE2EEDependencyError(RuntimeError):
+    pass
+
+
 class MatrixService:
-    def __init__(self, config: MatrixRuntimeConfig, log_level: str = "info"):
+    def __init__(
+        self,
+        config: MatrixRuntimeConfig,
+        log_level: str = "info",
+        enable_crypto: bool = False,
+    ):
         self.config = config
+        self.enable_crypto = enable_crypto
         self.logger = build_logger(__name__, log_level=log_level)
         self._client: Client | None = None
         self.session_store = MatrixSessionStore(config.session_path)
         self.sync_store = FileSyncStore(config.sync_store_path)
         self.state_store = FileStateStore(config.state_store_path)
+        self.crypto_db: Any | None = None
+        self.crypto_store: Any | None = None
+        self.crypto_state_store: Any | None = None
         self._stores_open = False
         self._whoami_user_id = config.user_id
 
@@ -27,6 +46,13 @@ class MatrixService:
         if self._client is None:
             raise RuntimeError("Matrix client is not connected")
         return self._client
+
+    @property
+    def crypto(self) -> Any:
+        crypto = self.client.crypto
+        if crypto is None:
+            raise RuntimeError("Matrix E2EE is not enabled for this command")
+        return crypto
 
     @property
     def user_id(self) -> str:
@@ -48,8 +74,11 @@ class MatrixService:
             )
             try:
                 await self._validate_client(client)
+                await self._enable_client_crypto(client)
             except MatrixInvalidToken:
-                self.logger.info("Matrix session token is invalid, bootstrapping a new session.")
+                self.logger.info(
+                    "Matrix session token is invalid, bootstrapping a new session."
+                )
                 self.session_store.clear()
                 await self._dispose_client(client)
             except MatrixConnectionError:
@@ -86,6 +115,7 @@ class MatrixService:
                 device_id=bootstrap_device_id,
             )
             await self._validate_client(client)
+            await self._enable_client_crypto(client)
         except Exception:
             await self._dispose_client(client)
             raise
@@ -106,12 +136,66 @@ class MatrixService:
         if client is not None:
             await self._dispose_client(client)
 
-        await self.state_store.flush()
-        await self.sync_store.flush()
+        await self._flush_store(self.state_store)
+        if self.sync_store is not self.state_store:
+            await self._flush_store(self.sync_store)
+        await self._close_crypto_db()
         self._client = None
+        self.crypto_store = None
+        self.crypto_state_store = None
+        self._stores_open = False
 
     async def start_sync(self, filter_data: FilterID | Filter | None = None) -> None:
         await self.client.start(filter_data=filter_data)
+
+    async def sync_once(
+        self,
+        filter_data: FilterID | Filter | None = None,
+        timeout_ms: int = 30000,
+        full_state: bool = False,
+    ) -> dict:
+        filter_id = filter_data
+        if isinstance(filter_data, Filter):
+            filter_id = await self.client.create_filter(filter_data)
+
+        next_batch = await self.client.sync_store.get_next_batch()
+        data = await self.client.sync(
+            since=next_batch,
+            timeout=timeout_ms,
+            filter_id=filter_id,
+            full_state=full_state,
+            set_presence=self.client.presence,
+        )
+        if data.get("next_batch"):
+            await self.client.sync_store.put_next_batch(data["next_batch"])
+        tasks = self.client.handle_sync(data)
+        if tasks:
+            await asyncio.gather(*tasks)
+        return data
+
+    async def sync_for(
+        self,
+        seconds: float,
+        filter_data: FilterID | Filter | None = None,
+        timeout_ms: int = 30000,
+        full_state: bool = False,
+    ) -> int:
+        deadline = time.monotonic() + max(seconds, 0)
+        count = 0
+        while count == 0 or time.monotonic() < deadline:
+            remaining_ms = max(int((deadline - time.monotonic()) * 1000), 0)
+            request_timeout = (
+                timeout_ms if seconds <= 0 else min(timeout_ms, remaining_ms)
+            )
+            await self.sync_once(
+                filter_data=filter_data,
+                timeout_ms=max(request_timeout, 1000),
+                full_state=full_state,
+            )
+            count += 1
+            if seconds <= 0:
+                break
+        return count
 
     def _build_client(
         self,
@@ -133,9 +217,115 @@ class MatrixService:
 
         self.config.store_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_default_account_store()
-        await self.state_store.open()
         await self.sync_store.open()
+        if self.enable_crypto:
+            await self._open_crypto_state_store()
+        else:
+            await self.state_store.open()
         self._stores_open = True
+
+    async def _open_crypto_state_store(self) -> None:
+        try:
+            from mautrix.crypto.store.asyncpg.store import (
+                PgCryptoStateStore,
+                PgCryptoStore,
+            )
+            from mautrix.util.async_db import Database
+        except ModuleNotFoundError as exc:
+            raise MatrixE2EEDependencyError(
+                "Matrix E2EE dependencies are missing. Install the e2ee extra and libolm, "
+                f"for example: uv sync --extra e2ee. Missing module: {exc.name}"
+            ) from exc
+
+        self.config.crypto_store_path.parent.mkdir(parents=True, exist_ok=True)
+        db = Database.create(
+            f"sqlite:///{self.config.crypto_store_path}",
+            db_args={
+                "min_size": 1,
+                "init_commands": ["PRAGMA busy_timeout = 30000"],
+            },
+            upgrade_table=PgCryptoStore.upgrade_table,
+            owner_name="telefire-matrix-crypto",
+        )
+        await db.start()
+        await PgCryptoStateStore.upgrade_table.upgrade(db)
+
+        self.crypto_db = db
+        self.crypto_state_store = PgCryptoStateStore(db)
+        self.state_store = self.crypto_state_store
+
+    async def _enable_client_crypto(self, client: Client) -> None:
+        if not self.enable_crypto:
+            return
+        if self.crypto_db is None:
+            raise RuntimeError("Matrix crypto database is not open")
+
+        try:
+            from mautrix.crypto import OlmMachine
+            from mautrix.crypto.store.asyncpg.store import PgCryptoStore
+        except ModuleNotFoundError as exc:
+            raise MatrixE2EEDependencyError(
+                "Matrix E2EE dependencies are missing. Install the e2ee extra and libolm, "
+                f"for example: uv sync --extra e2ee. Missing module: {exc.name}"
+            ) from exc
+
+        pickle_key = self._load_crypto_pickle_key()
+        account_id = f"{client.mxid}/{client.device_id}"
+        self.crypto_store = PgCryptoStore(account_id, pickle_key, self.crypto_db)
+        await self.crypto_store.put_device_id(client.device_id)
+
+        crypto = OlmMachine(client, self.crypto_store, self.state_store)
+        client.crypto = crypto
+        await crypto.load()
+        if not crypto.account.shared:
+            self.logger.info("Sharing initial Matrix E2EE device keys.")
+            await crypto.share_keys()
+
+    def _load_crypto_pickle_key(self) -> str:
+        try:
+            key = self.config.crypto_pickle_key_path.read_text(encoding="utf-8").strip()
+            if key:
+                return key
+        except FileNotFoundError:
+            pass
+
+        key = secrets.token_urlsafe(48)
+        self.config.crypto_pickle_key_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.crypto_pickle_key_path.write_text(f"{key}\n", encoding="utf-8")
+        os.chmod(self.config.crypto_pickle_key_path, 0o600)
+        return key
+
+    async def _close_crypto_db(self) -> None:
+        if self.crypto_db is not None:
+            await self.crypto_db.stop()
+            self.crypto_db = None
+
+    async def _flush_store(self, store: Any) -> None:
+        flush = getattr(store, "flush", None)
+        if flush is not None:
+            await flush()
+
+    async def _drain_background_tasks(self, timeout: float = 2.0) -> None:
+        try:
+            from mautrix.util import background_task
+        except ImportError:
+            return
+
+        current_task = asyncio.current_task()
+        tasks = [
+            task
+            for task in list(background_task._tasks)
+            if task is not current_task and not task.done()
+        ]
+        if not tasks:
+            return
+
+        _, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in pending:
+            task.cancel()
+        if pending:
+            with suppress(asyncio.CancelledError):
+                await asyncio.gather(*pending, return_exceptions=True)
 
     def _load_env_session(self) -> MatrixSession | None:
         if not self.config.access_token:
@@ -151,7 +341,10 @@ class MatrixService:
         session = self.session_store.load()
         if session is None:
             return None
-        if session.base_url != self.config.base_url or session.user_id != self.config.user_id:
+        if (
+            session.base_url != self.config.base_url
+            or session.user_id != self.config.user_id
+        ):
             return None
         return session
 
@@ -199,6 +392,11 @@ class MatrixService:
                 shutil.copy2(source, target)
 
     async def _dispose_client(self, client: Client) -> None:
+        syncing_task = client.syncing_task
         client.stop()
+        if syncing_task is not None:
+            with suppress(asyncio.CancelledError):
+                await syncing_task
+        await self._drain_background_tasks()
         if not client.api.session.closed:
             await client.api.session.close()

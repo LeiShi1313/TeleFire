@@ -1436,7 +1436,7 @@ class AIStateRepository:
             batch = unique_ids[start : start + 500]
             placeholders = ",".join("?" for _ in batch)
             cursor = await connection.execute(
-                "SELECT document_id, content_hash, event_versions "
+                "SELECT document_id, content_hash, event_versions "  # nosec B608
                 "FROM ai_memory_documents WHERE scope_id = ? "
                 f"AND document_id IN ({placeholders})",
                 (scope_id, *batch),
@@ -1458,6 +1458,7 @@ class AIStateRepository:
         for start in range(0, len(unique_ids), 400):
             batch = unique_ids[start : start + 400]
             placeholders = ",".join("?" for _ in batch)
+            # Only the generated placeholder count is interpolated; values stay bound.
             query = f"""
                 SELECT document.document_id,
                        json_extract(event.value, '$[0]') AS source_id
@@ -1466,7 +1467,8 @@ class AIStateRepository:
                 WHERE document.scope_id = ?
                   AND json_extract(event.value, '$[0]') IN ({placeholders})
                 ORDER BY document.retained_at
-            """
+            """  # nosec B608
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             cursor = await connection.execute(
                 query,
                 (scope_id, *batch),
@@ -1833,7 +1835,7 @@ class AIStateRepository:
             batch = unique_ids[start : start + 500]
             placeholders = ",".join("?" for _ in batch)
             cursor = await connection.execute(
-                "SELECT message_id FROM ai_memory_excluded_messages "
+                "SELECT message_id FROM ai_memory_excluded_messages "  # nosec B608
                 f"WHERE chat_id = ? AND message_id IN ({placeholders})",
                 (chat_id, *batch),
             )
@@ -1853,7 +1855,7 @@ class AIStateRepository:
             batch = unique_ids[start : start + 500]
             placeholders = ",".join("?" for _ in batch)
             cursor = await connection.execute(
-                "SELECT answer_message_id FROM ai_answers "
+                "SELECT answer_message_id FROM ai_answers "  # nosec B608
                 f"WHERE chat_id = ? AND answer_message_id IN ({placeholders})",
                 (chat_id, *batch),
             )

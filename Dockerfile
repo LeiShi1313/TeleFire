@@ -6,13 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SETUPTOOLS_SCM_PRETEND_VERSION_FOR_TELEFIRE=0.0.0 \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
-    && groupadd --gid 10001 telefire \
+RUN groupadd --gid 10001 telefire \
     && useradd --uid 10001 --gid telefire --create-home --home-dir /home/telefire telefire \
     && mkdir -p /telefire-data \
-    && chown telefire:telefire /telefire-data \
-    && rm -rf /var/lib/apt/lists/*
+    && chown telefire:telefire /telefire-data
 
 WORKDIR /app
 COPY . /app

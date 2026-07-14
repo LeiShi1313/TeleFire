@@ -1,23 +1,16 @@
-FROM node:24-bookworm-slim
+FROM node:24-trixie-slim
 
 ENV NODE_ENV=production \
     HOME=/agent-data \
     PI_DATA_DIR=/agent-data/.pi-agent
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        bash \
-        ca-certificates \
-        curl \
-        git \
-        python3 \
-        ripgrep \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 COPY agent/package.json agent/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+        /usr/local/bin/yarn /usr/local/bin/yarnpkg /usr/local/bin/pnpm /usr/local/bin/pnpx
 
 COPY agent/src ./src
 

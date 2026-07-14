@@ -16,6 +16,16 @@ __pycache__
 *.session-journal
 *.session-shm
 *.session-wal
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+.telefire
 logs
 dist
 build

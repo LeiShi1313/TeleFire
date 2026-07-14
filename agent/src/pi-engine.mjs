@@ -719,10 +719,7 @@ export class PiEngine {
     if (request.sessionId === null) {
       return SessionManager.create(this.config.workspaceDir, this.config.sessionDir);
     }
-    const sessions = await SessionManager.list(
-      this.config.workspaceDir,
-      this.config.sessionDir,
-    );
+    const sessions = await SessionManager.listAll(this.config.sessionDir);
     const existing = sessions.find(({ id }) => id === request.sessionId);
     if (!existing) throw new Error("Agent session not found");
     const manager = SessionManager.open(

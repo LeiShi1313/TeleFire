@@ -121,10 +121,7 @@ export class SessionHistory {
   }
 
   async #sessions() {
-    const sessions = await SessionManager.list(
-      this.workspaceDir,
-      this.sessionDir,
-    );
+    const sessions = await SessionManager.listAll(this.sessionDir);
     return sessions.sort((left, right) => {
       const modified = right.modified.getTime() - left.modified.getTime();
       return modified || left.id.localeCompare(right.id);

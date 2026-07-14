@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+
 import {
   PiEngine,
   buildRunPrompt,
@@ -386,6 +388,54 @@ test("persists a session tree and branches from mapped entries", async () => {
     assert.match(serialized, /root prompt/);
     assert.match(serialized, /root answer/);
     assert.doesNotMatch(serialized, /child prompt|child answer/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("continues a recovered session created under an older workspace path", async () => {
+  const app = await fixture((_body, response) => sendText(response, "continued"));
+  try {
+    const legacy = SessionManager.create(
+      join(app.engine.config.workspaceDir, "legacy"),
+      app.engine.config.sessionDir,
+      { id: "99999999-9999-4999-8999-999999999999" },
+    );
+    legacy.appendMessage({
+      role: "user",
+      content: "legacy prompt",
+      timestamp: 1,
+    });
+    const parentEntryId = legacy.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "legacy answer" }],
+      api: "openai-completions",
+      provider: "openai-compatible",
+      model: "test-model",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 2,
+    });
+
+    const events = await collect(
+      app.engine,
+      request("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", {
+        sessionId: legacy.getSessionId(),
+        parentEntryId,
+        prompt: "continue this session",
+      }),
+    );
+
+    assert.equal(events.at(-1).type, "run_completed");
+    assert.equal(events.at(-1).sessionId, legacy.getSessionId());
+    assert.match(JSON.stringify(app.provider.requests[0].messages), /legacy prompt/);
   } finally {
     await app.close();
   }

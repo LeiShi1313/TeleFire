@@ -79,6 +79,8 @@ async function fixture() {
 
   return {
     history: new SessionHistory({ workspaceDir, sessionDir }),
+    root,
+    sessionDir,
     sessionId: manager.getSessionId(),
     branchId,
     close: () => rm(root, { recursive: true, force: true }),
@@ -99,6 +101,39 @@ test("lists persisted sessions with stable cursor pagination and search", async 
 
     const empty = await app.history.list({ limit: 20, query: "unrelated" });
     assert.deepEqual(empty, { items: [], total: 0, nextCursor: null });
+  } finally {
+    await app.close();
+  }
+});
+
+test("recovers valid sessions created under a different workspace", async () => {
+  const app = await fixture();
+  try {
+    const legacy = SessionManager.create(
+      join(app.root, "legacy-workspace"),
+      app.sessionDir,
+      { id: "22222222-2222-4222-8222-222222222222" },
+    );
+    legacy.appendMessage({
+      role: "user",
+      content: "A message from the old workspace",
+      timestamp: 10,
+    });
+    legacy.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "A legacy answer" }],
+      api: "openai-completions",
+      provider: "openai-compatible",
+      model: "test-model",
+      usage,
+      stopReason: "stop",
+      timestamp: 11,
+    });
+
+    const page = await app.history.list({ limit: 20 });
+    assert.equal(page.total, 2);
+    assert(page.items.some((item) => item.id === legacy.getSessionId()));
+    assert.equal((await app.history.get(legacy.getSessionId())).id, legacy.getSessionId());
   } finally {
     await app.close();
   }

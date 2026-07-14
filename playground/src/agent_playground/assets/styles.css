@@ -115,11 +115,11 @@ textarea:focus, select:focus, input:focus, button:focus-visible { outline: 2px s
 .load-more:hover { background: #edf1f2; }
 
 .session-detail { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); }
-.session-detail-header { min-height: 65px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 16px; border-bottom: 1px solid #c8d0d3; background: #fff; }
+.session-detail-header { width: 100%; min-width: 0; min-height: 65px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 16px; border-bottom: 1px solid #c8d0d3; background: #fff; }
 .session-detail-header > div { min-width: 0; }
 .session-detail-header h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-detail-header p { margin: 4px 0 0; color: #657176; font-size: 11px; overflow-wrap: anywhere; }
-.session-tree { min-height: 0; overflow: auto; padding-bottom: 30px; }
+.session-tree { width: 100%; min-width: 0; min-height: 0; overflow: auto; padding-bottom: 30px; }
 .history-empty { margin: 0; padding: 18px 16px; color: #68757a; line-height: 1.5; }
 .session-entry { --depth: 0; position: relative; margin-left: min(calc(var(--depth) * 18px), 144px); border-bottom: 1px solid #e1e5e6; border-left: 2px solid #c5d0d2; padding: 14px 16px 14px 14px; }
 .session-entry.is-leaf { border-left-color: #087f75; background: #f4f9f8; }

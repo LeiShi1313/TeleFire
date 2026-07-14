@@ -26,7 +26,9 @@ async function fixture() {
   });
   const userId = manager.appendMessage({
     role: "user",
-    content: "<current_request>\nInspect deployment history\n</current_request>",
+    content:
+      "<untrusted_memory_context>\nA long recalled memory should not become the title.\n</untrusted_memory_context>\n\n" +
+      "<current_request>\nInspect deployment history\n</current_request>",
     timestamp: 1,
   });
   manager.appendMessage({
@@ -98,6 +100,7 @@ test("lists persisted sessions with stable cursor pagination and search", async 
     assert.equal(page.items[0].name, "Deployment investigation");
     assert.equal(page.items[0].messageCount, 5);
     assert.match(page.items[0].firstMessage, /Inspect deployment history/);
+    assert.doesNotMatch(page.items[0].firstMessage, /long recalled memory/);
 
     const empty = await app.history.list({ limit: 20, query: "unrelated" });
     assert.deepEqual(empty, { items: [], total: 0, nextCursor: null });

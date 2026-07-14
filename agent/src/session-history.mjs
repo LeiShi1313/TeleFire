@@ -103,6 +103,12 @@ function iso(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function currentRequest(value) {
+  const text = String(value ?? "");
+  const match = text.match(/<current_request>\s*([\s\S]*?)\s*<\/current_request>/);
+  return bounded(match?.[1]?.trim() || text, 500);
+}
+
 function summary(info) {
   return {
     id: info.id,
@@ -110,7 +116,7 @@ function summary(info) {
     createdAt: iso(info.created),
     modifiedAt: iso(info.modified),
     messageCount: info.messageCount,
-    firstMessage: bounded(info.firstMessage, 500),
+    firstMessage: currentRequest(info.firstMessage),
   };
 }
 

@@ -427,6 +427,12 @@ function short(value, maximum = 180) {
   return text.length <= maximum ? text : `${text.slice(0, maximum - 3)}...`;
 }
 
+function currentRequest(value) {
+  const text = String(value ?? "");
+  const match = text.match(/<current_request>\s*([\s\S]*?)\s*<\/current_request>/);
+  return (match?.[1] || text).trim();
+}
+
 function pretty(value) {
   return JSON.stringify(value, null, 2) ?? "null";
 }
@@ -488,8 +494,8 @@ function renderSessionList() {
     const row = button(null, "session-row", () => void selectSession(session.id));
     row.setAttribute("role", "listitem");
     row.setAttribute("aria-current", String(session.id === state.selectedSessionId));
-    row.append(node("span", session.name || short(session.firstMessage, 70) || session.id, "session-row-title"));
-    row.append(node("span", short(session.firstMessage, 150) || "Empty session", "session-row-preview"));
+    row.append(node("span", session.name || short(currentRequest(session.firstMessage), 70) || session.id, "session-row-title"));
+    row.append(node("span", short(currentRequest(session.firstMessage), 150) || "Empty session", "session-row-preview"));
     row.append(node("span", `${session.messageCount} messages · ${formatDate(session.modifiedAt)}`, "session-row-meta"));
     return row;
   });
@@ -579,6 +585,25 @@ function contentPart(part) {
   return details;
 }
 
+function structuredPrompt(text) {
+  const pattern = /<(untrusted_memory_context|untrusted_reference_context|current_request)>\s*([\s\S]*?)\s*<\/\1>/g;
+  const parts = [];
+  for (const match of text.matchAll(pattern)) {
+    if (match[1] === "current_request") {
+      const block = node("section", null, "entry-current-request");
+      block.append(node("div", "Current request", "entry-section-label"));
+      block.append(node("pre", match[2].trim(), "entry-text"));
+      parts.push(block);
+    } else {
+      const details = node("details", null, "entry-part context");
+      const label = match[1] === "untrusted_memory_context" ? "Memory context" : "Reference context";
+      details.append(node("summary", label), node("pre", match[2].trim(), "entry-text"));
+      parts.push(details);
+    }
+  }
+  return parts;
+}
+
 function renderSessionEntry(entry, depth, isLeaf) {
   const message = entry.message && typeof entry.message === "object" ? entry.message : null;
   const role = String(message?.role || entry.type || "entry");
@@ -593,7 +618,9 @@ function renderSessionEntry(entry, depth, isLeaf) {
   article.append(header);
   const content = node("div", null, "entry-content");
   if (typeof message?.content === "string") {
-    content.append(node("pre", message.content, "entry-text"));
+    const promptParts = structuredPrompt(message.content);
+    if (promptParts.length > 0) content.append(...promptParts);
+    else content.append(node("pre", message.content, "entry-text"));
   } else if (Array.isArray(message?.content)) {
     for (const part of message.content) content.append(contentPart(part));
   } else if (message) {
@@ -630,7 +657,7 @@ function renderSessionDetail() {
     elements.sessionTree.replaceChildren(node("p", "Loading stored entries...", "history-empty"));
     return;
   }
-  elements.sessionTitle.textContent = detail.name || short(detail.firstMessage, 90) || detail.id;
+  elements.sessionTitle.textContent = detail.name || short(currentRequest(detail.firstMessage), 90) || detail.id;
   elements.sessionMeta.textContent = `${detail.messageCount} messages · ${formatDate(detail.createdAt)} · ${detail.id}`;
   const byId = new Map(detail.entries.map((entry) => [entry.id, entry]));
   const cache = new Map();
@@ -718,7 +745,7 @@ function auditDescription(event) {
   if (event.type === "memory.http.error") return `${data.operation || "memory"} · ${data.error?.message || "request failed"}`;
   if (event.type === "tool.started") return `${data.toolName || "tool"} started\n${short(pretty(data.args), 300)}`;
   if (event.type === "tool.completed") return `${data.toolName || "tool"} ${data.isError ? "failed" : "completed"} · ${data.durationMs ?? "?"} ms`;
-  if (event.type === "model.input") return `${data.model?.id || "model"} · ${(data.tools || []).length} tools\n${short(data.prompt, 300)}`;
+  if (event.type === "model.input") return `${data.model?.id || "model"} · ${(data.tools || []).length} tools\n${short(currentRequest(data.prompt), 300)}`;
   if (event.type === "model.turn.started") return `Model turn ${data.turn ?? "?"} started`;
   if (event.type === "model.turn.completed") return `Model turn ${data.turn ?? "?"} completed · ${data.durationMs ?? "?"} ms`;
   if (event.type === "memory.context") return `${(data.memories || []).length} memories merged from ${(data.queries || []).length} recall queries`;

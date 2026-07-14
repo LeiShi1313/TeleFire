@@ -137,6 +137,9 @@ textarea:focus, select:focus, input:focus, button:focus-visible { outline: 2px s
 .entry-part { margin: 9px 0 0; border-left: 3px solid #98a6aa; padding: 7px 9px; background: #f1f3f4; }
 .entry-part.thinking { border-left-color: #9b7a40; background: #f6f1e7; }
 .entry-part.tool-call { border-left-color: #b47413; background: #f7f0e5; }
+.entry-part.context { border-left-color: #6e8d91; background: #edf2f3; }
+.entry-current-request { margin-top: 8px; border-left: 3px solid #28736d; padding: 8px 10px; background: #edf7f5; }
+.entry-section-label { margin-bottom: 5px; color: #29655f; font-size: 10px; font-weight: 750; text-transform: uppercase; }
 .entry-part summary, .raw-details summary, .audit-event details summary { cursor: pointer; color: #4f5c61; font-size: 11px; font-weight: 700; }
 .entry-json, .audit-json { max-height: 520px; overflow: auto; margin: 8px 0 0; padding: 9px; border: 1px solid #d2d9db; border-radius: 4px; background: #fff; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; line-height: 1.5; }
 .entry-usage { margin-top: 9px; color: #68757a; font-size: 10px; }

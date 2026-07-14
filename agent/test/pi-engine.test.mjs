@@ -235,9 +235,34 @@ test("owns initial memory retrieval and injects recalled evidence", async () => 
           scopeId: "workspace:engineering",
           anchors: [{ id: "person:alice", label: "Alice" }],
         },
+        includeMemorySnapshot: true,
       }),
     );
 
+    const memorySnapshot = events.find(
+      (event) => event.type === "memory_snapshot",
+    );
+    assert.deepEqual(memorySnapshot, {
+      type: "memory_snapshot",
+      scopeId: "workspace:engineering",
+      queries: [
+        "Current request: What did Richard say?\nReference context:\nA telecom discussion.",
+        "Current request: What did Richard say?\nReference context:\nA telecom discussion.\nIdentity anchors for resolving references: Alice (person:alice)",
+      ],
+      memories: [
+        {
+          id: "memory-1",
+          text: "Richard favors lower telecom prices.",
+          type: "world",
+          entities: ["Richard"],
+          occurredStart: null,
+          occurredEnd: null,
+          mentionedAt: null,
+          documentId: "conversation:7",
+          chunkId: "chunk-7",
+        },
+      ],
+    });
     assert.equal(events.at(-1).answer, "Richard favors lower prices.");
     assert.equal(recalls.length, 2);
     assert(recalls.some(({ body }) => body.query.includes("Identity anchors")));

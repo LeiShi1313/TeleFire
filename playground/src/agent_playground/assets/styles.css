@@ -78,6 +78,7 @@ textarea:focus, select:focus, button:focus-visible { outline: 2px solid #087f75;
 .memory-item { padding: 11px 0; border-bottom: 1px solid #d9dfe1; }
 .memory-type { color: #976000; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .memory-text { margin: 5px 0 7px; line-height: 1.45; white-space: pre-wrap; }
+.memory-meta { margin: 0 0 7px; color: #536066; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .memory-id { color: #657176; font-size: 10px; overflow-wrap: anywhere; }
 .tool-row { display: grid; gap: 3px; padding: 10px 0; border-bottom: 1px solid #d9dfe1; }
 .tool-name { color: #7f4d00; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; font-weight: 700; }

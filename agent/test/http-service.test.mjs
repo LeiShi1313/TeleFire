@@ -157,11 +157,26 @@ test("accepts a bounded memory target and rejects scope injection", async () => 
         ...validRun,
         context: [{ kind: "reference", text: "Alice joined the discussion." }],
         memory,
+        includeMemorySnapshot: true,
       }),
     });
     assert.equal(accepted.status, 200);
     await accepted.text();
     assert.deepEqual(received.memory, memory);
+    assert.equal(received.includeMemorySnapshot, true);
+
+    const rejectedSnapshotFlag = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        includeMemorySnapshot: "yes",
+      }),
+    });
+    assert.equal(rejectedSnapshotFlag.status, 400);
 
     const rejected = await fetch(`${app.baseUrl}/v1/runs`, {
       method: "POST",

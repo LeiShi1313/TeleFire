@@ -209,6 +209,7 @@ class PlaygroundData:
                 or "Automatic from request and references",
                 "memories": [],
                 "managedBy": "agent",
+                "status": "pending",
             }
         if request["context"]:
             context.append(
@@ -235,6 +236,7 @@ class PlaygroundData:
                 "scopeId": bank_id,
                 "anchors": [],
             }
+            pi_request["includeMemorySnapshot"] = True
             if request["memoryQuery"]:
                 pi_request["memory"]["query"] = request["memoryQuery"]
         event = {
@@ -453,9 +455,36 @@ def _parse_pi_event(raw: bytes) -> dict[str, Any]:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise UpstreamUnavailable("Pi agent returned malformed events") from exc
-    if not isinstance(value, dict) or value.get("type") not in _PI_EVENT_FIELDS:
+    if not isinstance(value, dict):
         raise UpstreamUnavailable("Pi agent returned malformed events")
-    event_type = value["type"]
+    event_type = value.get("type")
+    if not isinstance(event_type, str):
+        raise UpstreamUnavailable("Pi agent returned malformed events")
+    if event_type == "memory_snapshot":
+        scope_id = value.get("scopeId")
+        queries = value.get("queries")
+        memories = value.get("memories")
+        if (
+            not isinstance(scope_id, str)
+            or not _BANK_RE.fullmatch(scope_id)
+            or not isinstance(queries, list)
+            or len(queries) > 2
+            or not all(
+                isinstance(query, str) and 1 <= len(query) <= 8_000
+                for query in queries
+            )
+            or not isinstance(memories, list)
+            or len(memories) > 50
+        ):
+            raise UpstreamUnavailable("Pi agent returned malformed events")
+        return {
+            "type": "memory_snapshot",
+            "scopeId": scope_id,
+            "queries": queries,
+            "memories": [_parse_snapshot_memory(item) for item in memories],
+        }
+    if event_type not in _PI_EVENT_FIELDS:
+        raise UpstreamUnavailable("Pi agent returned malformed events")
     result: dict[str, Any] = {"type": event_type}
     for field in _PI_EVENT_FIELDS[event_type]:
         supplied = value.get(field)
@@ -467,6 +496,49 @@ def _parse_pi_event(raw: bytes) -> dict[str, Any]:
         elif not isinstance(supplied, str) or len(supplied) > 64_000:
             raise UpstreamUnavailable("Pi agent returned malformed events")
         result[field] = supplied
+    return result
+
+
+def _parse_snapshot_memory(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise UpstreamUnavailable("Pi agent returned malformed events")
+    memory_id = value.get("id")
+    text = value.get("text")
+    entities = value.get("entities")
+    if (
+        not isinstance(memory_id, str)
+        or not _MEMORY_ID_RE.fullmatch(memory_id)
+        or not isinstance(text, str)
+        or not 1 <= len(text) <= 16_000
+        or not isinstance(entities, list)
+        or len(entities) > 100
+        or not all(isinstance(entity, str) and len(entity) <= 256 for entity in entities)
+    ):
+        raise UpstreamUnavailable("Pi agent returned malformed events")
+    result: dict[str, Any] = {
+        "id": memory_id,
+        "text": text,
+        "entities": entities,
+    }
+    for key, maximum in (
+        ("type", 16_000),
+        ("occurredStart", 16_000),
+        ("occurredEnd", 16_000),
+        ("mentionedAt", 16_000),
+        ("documentId", 512),
+        ("chunkId", 512),
+    ):
+        supplied = value.get(key)
+        if supplied is not None and (
+            not isinstance(supplied, str)
+            or len(supplied) > maximum
+            or (
+                key in {"documentId", "chunkId"}
+                and not _DOCUMENT_ID_RE.fullmatch(supplied)
+            )
+        ):
+            raise UpstreamUnavailable("Pi agent returned malformed events")
+        result[key] = supplied
     return result
 
 

@@ -3,9 +3,7 @@ import {
   appendFile,
   mkdir,
   open,
-  readFile,
   readdir,
-  stat,
 } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -226,13 +224,17 @@ export class RunAuditStore {
   async get(runId) {
     if (!RUN_ID_RE.test(runId ?? "")) return null;
     const path = this.#path(runId);
+    let handle;
     try {
-      const info = await stat(path);
+      handle = await open(path, "r");
+      const info = await handle.stat();
       if (!info.isFile() || info.size > MAX_FILE_BYTES) return null;
-      const events = parseAudit(await readFile(path, "utf8"), runId);
+      const events = parseAudit(await handle.readFile("utf8"), runId);
       return { runId, events };
     } catch {
       return null;
+    } finally {
+      await handle?.close();
     }
   }
 

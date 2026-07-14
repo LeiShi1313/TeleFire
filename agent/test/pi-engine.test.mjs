@@ -161,10 +161,13 @@ async function fixture(handler, overrides = {}) {
     requestTimeoutMs: 5_000,
     workspaceDir: join(root, "workspace"),
     sessionDir: join(root, "sessions"),
+    auditDir: join(root, "audit"),
     agentDir: join(root, "agent"),
     webExtensionPath: null,
     memoryUrl: overrides.memoryUrl ?? null,
     memoryFetch: overrides.memoryFetch,
+    sessionHistory: overrides.sessionHistory,
+    auditStore: overrides.auditStore,
   });
   return {
     engine,
@@ -175,6 +178,45 @@ async function fixture(handler, overrides = {}) {
     },
   };
 }
+
+test("delegates read-only session history and run audit queries", async () => {
+  const calls = [];
+  const sessionHistory = {
+    async list(options) {
+      calls.push(["sessions.list", options]);
+      return { items: [{ id: "session-1" }], total: 1, nextCursor: null };
+    },
+    async get(sessionId) {
+      calls.push(["sessions.get", sessionId]);
+      return { id: sessionId, entries: [] };
+    },
+  };
+  const auditStore = {
+    async list(options) {
+      calls.push(["audits.list", options]);
+      return { items: [{ runId: "run-1" }], total: 1, nextCursor: null };
+    },
+    async get(runId) {
+      calls.push(["audits.get", runId]);
+      return { runId, events: [] };
+    },
+  };
+  const app = await fixture(() => {}, { sessionHistory, auditStore });
+  try {
+    assert.equal((await app.engine.listSessions({ limit: 5 })).total, 1);
+    assert.equal((await app.engine.getSession("session-1")).id, "session-1");
+    assert.equal((await app.engine.listRunAudits({ sessionId: "session-1" })).total, 1);
+    assert.equal((await app.engine.getRunAudit("run-1")).runId, "run-1");
+    assert.deepEqual(calls, [
+      ["sessions.list", { limit: 5 }],
+      ["sessions.get", "session-1"],
+      ["audits.list", { sessionId: "session-1" }],
+      ["audits.get", "run-1"],
+    ]);
+  } finally {
+    await app.close();
+  }
+});
 
 test("labels background separately from the current request", () => {
   const prompt = buildRunPrompt({

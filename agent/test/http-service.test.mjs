@@ -283,6 +283,196 @@ test("health reveals no provider or credential details", async () => {
   }
 });
 
+test("serves authenticated session history and run audits", async () => {
+  const calls = [];
+  const engine = {
+    async *run() {},
+    async cancel() {
+      return false;
+    },
+    async listSessions(options) {
+      calls.push(["listSessions", options]);
+      return {
+        items: [
+          {
+            id: "session-1",
+            name: "Deployment",
+            messageCount: 4,
+            firstMessage: "Inspect deployment",
+          },
+        ],
+        total: 1,
+        nextCursor: null,
+      };
+    },
+    async getSession(sessionId) {
+      calls.push(["getSession", sessionId]);
+      return sessionId === "session-1"
+        ? { id: sessionId, leafId: "entry-1", entries: [] }
+        : null;
+    },
+    async listRunAudits(options) {
+      calls.push(["listRunAudits", options]);
+      return {
+        items: [{ runId: validRun.runId, sessionId: "session-1" }],
+        total: 1,
+        nextCursor: null,
+      };
+    },
+    async getRunAudit(runId) {
+      calls.push(["getRunAudit", runId]);
+      return runId === validRun.runId ? { runId, events: [] } : null;
+    },
+  };
+  const app = await listen(engine);
+  const headers = {
+    authorization: "Bearer test-agent-token-that-is-long-enough",
+  };
+  try {
+    const list = await fetch(
+      `${app.baseUrl}/v1/sessions?limit=20&q=deploy&cursor=session-0`,
+      { headers },
+    );
+    assert.equal(list.status, 200);
+    assert.equal((await list.json()).items[0].id, "session-1");
+
+    const session = await fetch(`${app.baseUrl}/v1/sessions/session-1`, {
+      headers,
+    });
+    assert.equal(session.status, 200);
+    assert.equal((await session.json()).leafId, "entry-1");
+
+    const audits = await fetch(
+      `${app.baseUrl}/v1/runs?limit=10&sessionId=session-1`,
+      { headers },
+    );
+    assert.equal(audits.status, 200);
+    assert.equal((await audits.json()).items[0].runId, validRun.runId);
+
+    const audit = await fetch(
+      `${app.baseUrl}/v1/runs/${validRun.runId}/audit`,
+      { headers },
+    );
+    assert.equal(audit.status, 200);
+    assert.equal((await audit.json()).runId, validRun.runId);
+
+    assert.deepEqual(calls, [
+      [
+        "listSessions",
+        { limit: 20, cursor: "session-0", query: "deploy" },
+      ],
+      ["getSession", "session-1"],
+      [
+        "listRunAudits",
+        { limit: 10, cursor: null, sessionId: "session-1" },
+      ],
+      ["getRunAudit", validRun.runId],
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("validates history queries and returns stable missing-resource errors", async () => {
+  let called = false;
+  const app = await listen({
+    async *run() {},
+    async cancel() {
+      return false;
+    },
+    async listSessions() {
+      called = true;
+      return { items: [], total: 0, nextCursor: null };
+    },
+    async getSession() {
+      return null;
+    },
+    async listRunAudits() {
+      called = true;
+      return { items: [], total: 0, nextCursor: null };
+    },
+    async getRunAudit() {
+      return null;
+    },
+  });
+  const headers = {
+    authorization: "Bearer test-agent-token-that-is-long-enough",
+  };
+  try {
+    for (const path of [
+      "/v1/sessions?limit=0",
+      "/v1/sessions?limit=101",
+      `/v1/sessions?q=${"x".repeat(201)}`,
+      "/v1/sessions?cursor=../../secret",
+      "/v1/runs?sessionId=../../secret",
+    ]) {
+      const response = await fetch(`${app.baseUrl}${path}`, { headers });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        error: { code: "INVALID_REQUEST", message: "Invalid history request" },
+      });
+    }
+    assert.equal(called, false);
+
+    const missingSession = await fetch(
+      `${app.baseUrl}/v1/sessions/missing-session`,
+      { headers },
+    );
+    assert.equal(missingSession.status, 404);
+    assert.deepEqual(await missingSession.json(), {
+      error: { code: "NOT_FOUND", message: "Session not found" },
+    });
+
+    const missingAudit = await fetch(
+      `${app.baseUrl}/v1/runs/33333333-3333-4333-8333-333333333333/audit`,
+      { headers },
+    );
+    assert.equal(missingAudit.status, 404);
+    assert.deepEqual(await missingAudit.json(), {
+      error: { code: "NOT_FOUND", message: "Run audit not found" },
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test("rejects unauthenticated history requests", async () => {
+  let called = false;
+  const engine = {
+    async *run() {},
+    async cancel() {
+      return false;
+    },
+    async listSessions() {
+      called = true;
+    },
+    async getSession() {
+      called = true;
+    },
+    async listRunAudits() {
+      called = true;
+    },
+    async getRunAudit() {
+      called = true;
+    },
+  };
+  const app = await listen(engine);
+  try {
+    for (const path of [
+      "/v1/sessions",
+      "/v1/sessions/session-1",
+      "/v1/runs",
+      `/v1/runs/${validRun.runId}/audit`,
+    ]) {
+      const response = await fetch(`${app.baseUrl}${path}`);
+      assert.equal(response.status, 401);
+    }
+    assert.equal(called, false);
+  } finally {
+    await app.close();
+  }
+});
+
 test("describes one bounded attachment through the authenticated API", async () => {
   let received;
   const app = await listen({

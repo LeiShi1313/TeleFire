@@ -55,6 +55,7 @@ export function loadConfig() {
         process.env.MEMORY_API_URL?.trim().replace(/\/$/, "") || null,
       workspaceDir: join(dataDir, "workspace"),
       sessionDir: join(dataDir, "sessions"),
+      auditDir: join(dataDir, "audit"),
       agentDir: join(dataDir, "agent"),
     },
   };

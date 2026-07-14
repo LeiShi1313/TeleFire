@@ -15,6 +15,8 @@ import { Type } from "typebox";
 import { executeJavaScript } from "./code-exec.mjs";
 import { retrieveMemoryContext } from "./memory-context.mjs";
 import { createMemoryTools, MEMORY_TOOL_NAMES } from "./memory-tools.mjs";
+import { RunAuditStore } from "./run-audit.mjs";
+import { SessionHistory } from "./session-history.mjs";
 import { constrainWebTools } from "./web-tools.mjs";
 
 const PROVIDER = "openai-compatible";
@@ -268,6 +270,13 @@ export class PiEngine {
     this.activeRuns = new Map();
     this.locks = new KeyedLock();
     this.codeTool = createCodeTool();
+    this.sessionHistory =
+      config.sessionHistory ??
+      new SessionHistory({
+        workspaceDir: config.workspaceDir,
+        sessionDir: config.sessionDir,
+      });
+    this.auditStore = config.auditStore ?? new RunAuditStore(config.auditDir);
     this.authStorage = AuthStorage.inMemory();
     this.authStorage.setRuntimeApiKey(PROVIDER, config.apiKey);
     this.modelRegistry = ModelRegistry.inMemory(this.authStorage);
@@ -301,6 +310,22 @@ export class PiEngine {
     if (!session) return false;
     await session.abort();
     return true;
+  }
+
+  listSessions(options) {
+    return this.sessionHistory.list(options);
+  }
+
+  getSession(sessionId) {
+    return this.sessionHistory.get(sessionId);
+  }
+
+  listRunAudits(options) {
+    return this.auditStore.list(options);
+  }
+
+  getRunAudit(runId) {
+    return this.auditStore.get(runId);
   }
 
   async describeAttachment(request) {
@@ -546,6 +571,7 @@ export class PiEngine {
     await Promise.all([
       mkdir(this.config.workspaceDir, { recursive: true, mode: 0o700 }),
       mkdir(this.config.sessionDir, { recursive: true, mode: 0o700 }),
+      mkdir(this.config.auditDir, { recursive: true, mode: 0o700 }),
       mkdir(this.config.agentDir, { recursive: true, mode: 0o700 }),
     ]);
   }

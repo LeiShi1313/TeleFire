@@ -23,4 +23,5 @@ test("loads the standalone agent configuration without Telefire names", () => {
   assert.equal(config.engine.reasoningEffort, "low");
   assert.equal(config.engine.memoryUrl, "http://memory.internal:8888");
   assert.equal(config.engine.workspaceDir, "/tmp/pi-agent-test/workspace");
+  assert.equal(config.engine.auditDir, "/tmp/pi-agent-test/audit");
 });

@@ -20,6 +20,8 @@ services:
       HINDSIGHT_API_RERANKER_PROVIDER: rrf
       HINDSIGHT_API_RETAIN_ENTITY_LOOKUP: full
       HINDSIGHT_API_WORKER_ID: memory-api
+      VIRTUAL_HOST: hindsight.telefire.localhost
+      VIRTUAL_PORT: "9999"
     networks:
       - default
       - ollama-embedding
@@ -27,7 +29,6 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${MEMORY_API_EXPOSE_PORT:-18888}:8888"
-      - "127.0.0.1:${MEMORY_UI_EXPOSE_PORT:-19999}:9999"
     volumes:
       - memory-data:/home/hindsight/.pg0
     cap_drop:
@@ -62,8 +63,10 @@ services:
     environment:
       MEMORY_API_URL: http://memory-api:8888
       MEMORY_API_TIMEOUT: ${MEMORY_API_TIMEOUT:-20}
-    ports:
-      - "127.0.0.1:${MEMORY_INSPECTOR_EXPOSE_PORT:-18866}:8765"
+      VIRTUAL_HOST: memory.telefire.localhost
+      VIRTUAL_PORT: "8765"
+    expose:
+      - "8765"
     cap_drop:
       - ALL
     security_opt:

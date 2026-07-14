@@ -1,0 +1,29 @@
+services:
+  dashboard-proxy:
+    image: nginxproxy/nginx-proxy:1.11.0
+    container_name: telefire-dashboard-proxy
+    ports:
+      - "127.0.0.1:${DASHBOARD_PROXY_EXPOSE_PORT:-18865}:80"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+    networks:
+      - agent-platform
+      - memory-platform
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+networks:
+  agent-platform:
+    external: true
+    name: agent-platform
+  memory-platform:
+    external: true
+    name: memory-platform

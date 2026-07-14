@@ -59,11 +59,13 @@ services:
       MEMORY_API_URL: http://memory-api:8888
       PLAYGROUND_REQUEST_TIMEOUT: ${PLAYGROUND_REQUEST_TIMEOUT:-300}
       PLAYGROUND_SYSTEM_PROMPT: ${PLAYGROUND_SYSTEM_PROMPT:-}
+      VIRTUAL_HOST: sessions.telefire.localhost
+      VIRTUAL_PORT: "8780"
     networks:
       - default
       - memory-platform
-    ports:
-      - "127.0.0.1:${PLAYGROUND_EXPOSE_PORT:-18867}:8780"
+    expose:
+      - "8780"
     cap_drop:
       - ALL
     security_opt:

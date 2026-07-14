@@ -562,7 +562,13 @@ function contentPart(part) {
   if (!part || typeof part !== "object") {
     return node("pre", String(part ?? ""), "entry-text");
   }
-  if (part.type === "text") return node("pre", part.text || "", "entry-text");
+  if (part.type === "text") {
+    const promptParts = structuredPrompt(part.text || "");
+    if (promptParts.length === 0) return node("pre", part.text || "", "entry-text");
+    const block = node("div");
+    block.append(...promptParts);
+    return block;
+  }
   if (part.type === "thinking") {
     const details = node("details", null, "entry-part thinking");
     details.append(node("summary", "Thinking"), node("pre", part.thinking || "", "entry-text"));

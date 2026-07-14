@@ -513,10 +513,27 @@ async def test_playground_rejects_invalid_input_and_untrusted_hosts():
                     body = await response.json()
                     assert body["error"]["code"] == "INVALID_REQUEST"
 
-            async with session.get(
-                f"{playground_url}/", headers={"Host": "example.com"}
-            ) as response:
-                assert response.status == 400
+            for host in (
+                "localhost",
+                "sessions.telefire.localhost",
+                "sessions.telefire.localhost:18865",
+            ):
+                async with session.get(
+                    f"{playground_url}/", headers={"Host": host}
+                ) as response:
+                    assert response.status == 200
+
+            for host in (
+                "example.com",
+                "localhost.example.com",
+                "sessions.telefire.localhost.example.com",
+                "-invalid.localhost",
+                "invalid-.localhost",
+            ):
+                async with session.get(
+                    f"{playground_url}/", headers={"Host": host}
+                ) as response:
+                    assert response.status == 400
 
             async with session.get(f"{playground_url}/app.js") as response:
                 script = await response.text()

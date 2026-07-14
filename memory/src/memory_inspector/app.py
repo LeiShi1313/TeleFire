@@ -17,8 +17,10 @@ _STATIC_PATH = Path(__file__).with_name("assets")
 _BANK_RE = re.compile(r"^[A-Za-z0-9:_-]{1,256}$")
 _DOCUMENT_RE = re.compile(r"^[A-Za-z0-9:_.-]{1,512}$")
 _MEMORY_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
+_LOCALHOST_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 _HOST_RE = re.compile(
-    r"^(?:localhost|127\.0\.0\.1|\[::1\])(?::(?P<port>[0-9]{1,5}))?$",
+    rf"^(?:(?:{_LOCALHOST_LABEL}\.)*localhost|127\.0\.0\.1|\[::1\])"
+    r"(?::(?P<port>[0-9]{1,5}))?$",
     re.IGNORECASE,
 )
 _PRIVATE_HEADERS = {
@@ -161,6 +163,8 @@ def _validate_identifier(value: str, pattern: re.Pattern[str], kind: str) -> Non
 
 
 def _valid_host(value: str) -> bool:
+    if len(value) > 260:
+        return False
     match = _HOST_RE.fullmatch(value)
     if match is None:
         return False

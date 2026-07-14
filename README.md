@@ -187,7 +187,7 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 
 ### Telegram AI and Memory
 
-The local deployment is split into three independently owned Compose projects:
+The local deployment is split into four independently owned Compose projects:
 
 - `memory/compose.yml` runs Hindsight and the read-only Memory Inspector. It has
   no Telefire or Telegram dependency.
@@ -195,6 +195,9 @@ The local deployment is split into three independently owned Compose projects:
   on the Memory Stack HTTP API.
 - `docker-compose.yml` runs the Telegram adapter. It calls Pi and Hindsight over
   their private Docker networks.
+- `proxy/compose.yml` provides one loopback dashboard ingress across the Memory
+  and Agent networks using
+  [`nginx-proxy`](https://github.com/nginx-proxy/nginx-proxy) virtual hosts.
 
 Create private environment files from each stack's template:
 
@@ -219,22 +222,33 @@ memory commands remain visible and defaults to 3 seconds.
 
 ### Docker compose
 
-Start the Memory Stack first, then the Agent Stack, then Telefire:
+Start the Memory Stack first, then the Agent Stack, Telefire, and the dashboard
+proxy:
 
 ```bash
 docker compose --env-file memory/.env -f memory/compose.yml up -d --build
 docker compose --env-file agent/.env -f agent/compose.yml up -d --build
 docker compose --env-file .env up -d --build
+docker compose -f proxy/compose.yml up -d
 ```
 
 All published ports bind to loopback because memory and agent sessions contain
 private data:
 
 - Memory API: `http://127.0.0.1:18888`
-- Native Hindsight UI: `http://127.0.0.1:19999`
-- Memory Inspector: `http://127.0.0.1:18866`
 - Private Pi API: `http://127.0.0.1:18790`
-- Agent Playground: `http://127.0.0.1:18867`
+
+All dashboards share port `18865` and are selected by hostname:
+
+- Memory Inspector: `http://memory.telefire.localhost:18865`
+- Native Hindsight UI: `http://hindsight.telefire.localhost:18865`
+- Agent sessions and Playground: `http://sessions.telefire.localhost:18865`
+
+Set `DASHBOARD_PROXY_EXPOSE_PORT` when starting `proxy/compose.yml` to override
+the shared port. The proxy joins only `memory-platform` and `agent-platform`;
+the embedding network remains backend-only. `nginx-proxy` reads Docker metadata
+through the read-only Docker socket, so this ingress must remain loopback-bound
+and should not be treated as an authenticated public gateway.
 
 The playground can run a plain model session with all tools disabled, or a Pi
 session with the same constrained web, code, and bank-pinned memory tools used by

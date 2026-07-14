@@ -90,6 +90,18 @@ class FakeStore:
     async def get_answer(self, chat_id, answer_message_id):
         return None
 
+    async def get_turn_for_message(self, chat_id, message_id):
+        return next(
+            (
+                marker
+                for marker in reversed(self.saved)
+                if marker.chat_id == chat_id
+                and message_id
+                in {marker.answer_message_id, marker.trigger_message_id}
+            ),
+            None,
+        )
+
     async def save_answer(self, marker):
         self.saved.append(marker)
 

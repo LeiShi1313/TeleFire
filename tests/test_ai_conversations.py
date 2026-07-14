@@ -19,13 +19,20 @@ from telefire.ai_attachments import AttachmentDescription
 class FakeAnswer:
     next_id = 100
 
-    def __init__(self, text: str, chat_id: int, reply_to_msg_id: int):
+    def __init__(self, text: str, chat_id: int, reply_to):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
         self.text = text
+        self.raw_text = text
+        self.sender_id = 10
         self.chat_id = chat_id
-        self.reply_to_msg_id = reply_to_msg_id
+        self.reply_to_msg_id = reply_to.id if hasattr(reply_to, "id") else reply_to
+        self._reply_to = reply_to if hasattr(reply_to, "id") else None
+        self.file = None
         self.edits: list[str] = []
+
+    async def get_reply_message(self):
+        return self._reply_to
 
     async def edit(self, text: str, **kwargs):
         self.text = text
@@ -59,7 +66,7 @@ class FakeMessage:
         return self._reply_to
 
     async def reply(self, text: str, **kwargs):
-        answer = FakeAnswer(text, self.chat_id, self.id)
+        answer = FakeAnswer(text, self.chat_id, self)
         self.replies.append(answer)
         return answer
 
@@ -92,6 +99,18 @@ class FakeStore:
 
     async def get_answer(self, chat_id: int, answer_message_id: int):
         return self.markers.get((chat_id, answer_message_id))
+
+    async def get_turn_for_message(self, chat_id: int, message_id: int):
+        return next(
+            (
+                marker
+                for marker in reversed(tuple(self.markers.values()))
+                if marker.chat_id == chat_id
+                and message_id
+                in {marker.answer_message_id, marker.trigger_message_id}
+            ),
+            None,
+        )
 
     async def save_answer(self, marker: AIAnswerMarker):
         self.markers[(marker.chat_id, marker.answer_message_id)] = marker
@@ -160,6 +179,8 @@ async def test_trigger_in_reply_chain_labels_ancestors_as_untrusted_context():
 
     request = gateway.requests[0]
     assert request.system_prompt == PromptBuilder().system_prompt
+    assert request.session_id is None
+    assert request.parent_entry_id is None
     assert request.prompt == "which database fits?"
     reply_context = next(
         item.text for item in request.context if item.kind == "reference"
@@ -206,6 +227,58 @@ async def test_direct_reply_to_ai_answer_continues_without_ai_command():
     assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
     second_marker = store.markers[(follow_up.chat_id, follow_up.replies[0].id)]
     assert second_marker.parent_answer_message_id == first_answer.id
+
+
+@pytest.mark.asyncio
+async def test_explicit_ai_reply_to_trigger_continues_completed_turn():
+    gateway = FakeGateway(["First answer", "Follow-up answer"])
+    handler, store = make_handler(gateway)
+    trigger = FakeMessage("/ai explain vectors")
+    await handler.handle(trigger)
+    first_answer = trigger.replies[0]
+
+    follow_up = FakeMessage("/ai Give me an example", reply_to=trigger)
+    assert await handler.handle(follow_up) is True
+
+    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    assert gateway.requests[1].prompt == "Give me an example"
+    assert gateway.requests[1].session_id == root_marker.agent_session_id
+    assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
+    second_marker = store.markers[(follow_up.chat_id, follow_up.replies[0].id)]
+    assert second_marker.parent_answer_message_id == first_answer.id
+
+
+@pytest.mark.asyncio
+async def test_explicit_ai_deeper_in_reply_branch_uses_nearest_answer():
+    gateway = FakeGateway(["First answer", "Rejoined answer"])
+    handler, store = make_handler(gateway)
+    trigger = FakeMessage("/ai explain vectors")
+    await handler.handle(trigger)
+    first_answer = trigger.replies[0]
+    human_branch = FakeMessage("I think matrices are clearer", reply_to=first_answer)
+
+    rejoin = FakeMessage("/ai Compare both explanations", reply_to=human_branch)
+    assert await handler.handle(rejoin) is True
+
+    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    assert gateway.requests[1].session_id == root_marker.agent_session_id
+    assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
+    rejoin_marker = store.markers[(rejoin.chat_id, rejoin.replies[0].id)]
+    assert rejoin_marker.parent_answer_message_id == first_answer.id
+
+
+@pytest.mark.asyncio
+async def test_prefixless_reply_to_ai_trigger_is_ignored():
+    gateway = FakeGateway(["First answer"])
+    handler, _ = make_handler(gateway)
+    trigger = FakeMessage("/ai explain vectors")
+    await handler.handle(trigger)
+
+    follow_up = FakeMessage("Give me an example", reply_to=trigger)
+    assert await handler.handle(follow_up) is False
+
+    assert len(gateway.requests) == 1
+    assert follow_up.replies == []
 
 
 @pytest.mark.asyncio
@@ -315,12 +388,16 @@ async def test_state_repository_migrates_pre_pi_answer_rows(tmp_path):
     store = await AIStateRepository(path).connect()
     try:
         marker = await store.get_answer(-1001, 50)
+        turn_from_answer = await store.get_turn_for_message(-1001, 50)
+        turn_from_trigger = await store.get_turn_for_message(-1001, 40)
     finally:
         await store.close()
 
     assert marker is not None
     assert marker.agent_session_id is None
     assert marker.agent_entry_id is None
+    assert turn_from_answer == marker
+    assert turn_from_trigger == marker
 
 
 @pytest.mark.asyncio

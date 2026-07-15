@@ -26,6 +26,7 @@ from telefire.memory_benchmark.evaluation import (
     read_cases,
     render_document,
     sample_memory_records,
+    semantically_validate_cases,
     write_cases,
 )
 from telefire.memory_benchmark.source import read_corpus, tencent_seed_payload
@@ -56,6 +57,14 @@ def main() -> None:
     cases.add_argument("--output", type=Path, required=True)
     cases.add_argument("--target", type=int, default=60)
     cases.add_argument("--concurrency", type=int, default=3)
+
+    validate_cases = subparsers.add_parser("validate-cases")
+    _add_llm_arguments(validate_cases)
+    validate_cases.add_argument("--source", type=Path, required=True)
+    validate_cases.add_argument("--cases", type=Path, required=True)
+    validate_cases.add_argument("--output", type=Path, required=True)
+    validate_cases.add_argument("--audit-output", type=Path, required=True)
+    validate_cases.add_argument("--concurrency", type=int, default=2)
 
     quality = subparsers.add_parser("quality")
     _add_llm_arguments(quality)
@@ -128,6 +137,29 @@ async def _dispatch(args: argparse.Namespace) -> None:
             )
             write_cases(generated, args.output)
             print(f"wrote {len(generated)} validated cases to {args.output}")
+        elif args.command == "validate-cases":
+            corpus = read_corpus(args.source)
+            supplied_cases = read_cases(args.cases)
+            accepted, reviews = await semantically_validate_cases(
+                corpus,
+                supplied_cases,
+                client,
+                concurrency=args.concurrency,
+            )
+            write_cases(accepted, args.output)
+            _write_json(
+                args.audit_output,
+                {
+                    "schema": "telefire.memory-benchmark.case-validation.v1",
+                    "model": client.model,
+                    "input_cases": len(supplied_cases),
+                    "accepted_cases": len(accepted),
+                    "reviews": reviews,
+                },
+            )
+            print(
+                f"accepted {len(accepted)}/{len(supplied_cases)} cases into {args.output}"
+            )
         elif args.command == "quality":
             await _run_quality(args, client)
         else:

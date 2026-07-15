@@ -284,6 +284,96 @@ async def grade_recall(
     return result
 
 
+async def semantically_validate_cases(
+    corpus: SourceCorpus,
+    cases: tuple[RecallCase, ...],
+    client: OpenAIJSONClient,
+    *,
+    concurrency: int = 2,
+) -> tuple[tuple[RecallCase, ...], list[dict[str, Any]]]:
+    documents = {document.document_id: document for document in corpus.documents}
+    items = []
+    for case in cases:
+        source_documents = tuple(
+            dict.fromkeys(evidence.document_id for evidence in case.evidence)
+        )
+        items.append(
+            {
+                "case_id": case.case_id,
+                "question": case.question,
+                "answer": case.answer,
+                "cited_evidence": [asdict(evidence) for evidence in case.evidence],
+                "source_context": [
+                    render_document(documents[document_id])
+                    for document_id in source_documents
+                ],
+            }
+        )
+    batches = _bounded_item_batches(items, max_items=5, max_characters=30_000)
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def validate(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        async with semaphore:
+            response = await client.complete_json(
+                system=(
+                    "你是聊天记忆评测集的独立审核员。只依据原始聊天上下文，严格检查"
+                    "问题是否清楚、答案是否完整且归属到正确发言者。输出合法 JSON。"
+                ),
+                prompt=(
+                    "逐条审核并返回："
+                    '{"reviews":[{"case_id":"...","valid":true或false,'
+                    '"reason":"简短理由"}]}。只有问题无歧义、答案完全被原文支持、人物归属和'
+                    "时间关系均正确时 valid 才能为 true。不要用外部知识。\n\n"
+                    + json.dumps({"cases": batch}, ensure_ascii=False)
+                ),
+                max_completion_tokens=3_000,
+            )
+        reviews = response.get("reviews")
+        if not isinstance(reviews, list):
+            raise ValueError("Case validator returned malformed reviews")
+        expected = {item["case_id"] for item in batch}
+        normalized = []
+        for review in reviews:
+            if not isinstance(review, dict) or review.get("case_id") not in expected:
+                continue
+            valid = review.get("valid")
+            if not isinstance(valid, bool):
+                raise ValueError("Case validator returned invalid verdict")
+            normalized.append(
+                {
+                    "case_id": review["case_id"],
+                    "valid": valid,
+                    "reason": str(review.get("reason") or ""),
+                }
+            )
+        if {review["case_id"] for review in normalized} != expected:
+            raise ValueError("Case validator omitted a case")
+        return normalized
+
+    reviewed = await asyncio.gather(*(validate(batch) for batch in batches))
+    reviews = [review for group in reviewed for review in group]
+    return filter_validated_cases(cases, reviews), reviews
+
+
+def filter_validated_cases(
+    cases: tuple[RecallCase, ...],
+    reviews: list[dict[str, Any]],
+) -> tuple[RecallCase, ...]:
+    verdicts: dict[str, bool] = {}
+    for review in reviews:
+        case_id = review.get("case_id")
+        valid = review.get("valid")
+        if not isinstance(case_id, str) or not isinstance(valid, bool):
+            raise ValueError("Malformed semantic case review")
+        if case_id in verdicts:
+            raise ValueError(f"Duplicate semantic review for {case_id}")
+        verdicts[case_id] = valid
+    missing = {case.case_id for case in cases} - set(verdicts)
+    if missing:
+        raise ValueError(f"Missing semantic reviews for {len(missing)} cases")
+    return tuple(case for case in cases if verdicts[case.case_id])
+
+
 async def grade_extraction_batch(
     client: OpenAIJSONClient,
     items: list[dict[str, Any]],
@@ -414,6 +504,28 @@ def _pack_documents(
     if current:
         packs.append(tuple(current))
     return packs
+
+
+def _bounded_item_batches(
+    items: list[dict[str, Any]],
+    *,
+    max_items: int,
+    max_characters: int,
+) -> list[list[dict[str, Any]]]:
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_size = 0
+    for item in items:
+        size = len(json.dumps(item, ensure_ascii=False))
+        if current and (len(current) >= max_items or current_size + size > max_characters):
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append(item)
+        current_size += size
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _generation_prompt(mode: str, documents: tuple[SourceDocument, ...]) -> str:

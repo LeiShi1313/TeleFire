@@ -10,6 +10,9 @@ from telefire.memory_benchmark.backends import (
     read_tencent_memories,
 )
 from telefire.memory_benchmark.evaluation import (
+    RecallCase,
+    Evidence,
+    filter_validated_cases,
     parse_json_object,
     sample_memory_records,
     validate_recall_case,
@@ -338,3 +341,32 @@ def test_quality_summary_keeps_recall_extraction_and_latency_separate():
     assert summary["hindsight"]["latency_p50_ms"] == 100
     assert summary["tencent"]["recall_success_rate"] == 0.0
     assert summary["tencent"]["source_link_rate"] == 0.5
+
+
+def test_semantic_case_filter_requires_one_valid_review_per_case():
+    cases = (
+        RecallCase(
+            case_id="case-a",
+            category="direct",
+            question="Alice 改了什么？",
+            answer="会议时间。",
+            evidence=(Evidence(document_id="doc-1", quote="改会议时间"),),
+        ),
+        RecallCase(
+            case_id="case-b",
+            category="direct",
+            question="Bob 改了什么？",
+            answer="会议地点。",
+            evidence=(Evidence(document_id="doc-2", quote="改会议地点"),),
+        ),
+    )
+
+    accepted = filter_validated_cases(
+        cases,
+        [
+            {"case_id": "case-a", "valid": True, "reason": "supported"},
+            {"case_id": "case-b", "valid": False, "reason": "wrong actor"},
+        ],
+    )
+
+    assert accepted == (cases[0],)

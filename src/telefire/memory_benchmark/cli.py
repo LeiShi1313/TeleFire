@@ -223,6 +223,7 @@ async def _run_quality(
     tencent_records = read_tencent_memories(
         args.tencent_db,
         records_directory=args.tencent_records,
+        corpus=corpus,
     )
     records_by_backend = {
         "hindsight": hindsight_records,

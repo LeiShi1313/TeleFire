@@ -126,17 +126,17 @@ def test_tencent_search_and_store_are_normalized_to_common_records(tmp_path):
     connection.execute(
         """
         CREATE TABLE l0_conversations (
-            record_id TEXT PRIMARY KEY, message_text TEXT NOT NULL
+            record_id TEXT PRIMARY KEY, message_text TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
         )
         """
     )
     connection.execute(
-        "INSERT INTO l0_conversations VALUES (?, ?)",
+        "INSERT INTO l0_conversations VALUES (?, ?, ?)",
         (
             "source-message-1",
-            "[Source document: telegram:thread:1:11]\n"
-            "[2026-07-15T08:30:00Z] [Telegram actor: Alice | telegram:user:7] "
-            "下周二改为线上会议",
+            "[Telegram actor: Alice | telegram:user:7] 下周二改为线上会议",
+            int(datetime(2026, 7, 15, 8, 30, tzinfo=UTC).timestamp() * 1_000),
         ),
     )
     connection.commit()
@@ -157,7 +157,41 @@ def test_tencent_search_and_store_are_normalized_to_common_records(tmp_path):
         encoding="utf-8",
     )
 
-    stored = read_tencent_memories(database, records_directory=records_directory)
+    source_document = parse_source_document(
+        {
+            "id": "telegram:thread:1:11",
+            "original_text": json.dumps(
+                {
+                    "schema": "telefire.memory.episode.v1",
+                    "events": [
+                        {
+                            "source_id": "telegram:message:1:11",
+                            "actor": {
+                                "id": "telegram:user:7",
+                                "display_name": "Alice",
+                            },
+                            "text": "下周二改为线上会议",
+                            "occurred_at": "2026-07-15T08:30:00Z",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            "retain_params": {"event_date": "2026-07-15T08:30:00Z"},
+            "document_metadata": {},
+        }
+    )
+    corpus = SourceCorpus(
+        bank_id="telegram:chat:1",
+        bank_name="Test Chat",
+        exported_at="2026-07-15T09:00:00Z",
+        documents=(source_document,),
+    )
+    stored = read_tencent_memories(
+        database,
+        records_directory=records_directory,
+        corpus=corpus,
+    )
     assert stored[0].source_document_ids == ("telegram:thread:1:11",)
     assert stored[0].scene_name == "发布计划"
 

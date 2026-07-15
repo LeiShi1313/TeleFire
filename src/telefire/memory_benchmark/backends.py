@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from pathlib import Path
 import re
@@ -12,7 +13,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from telefire.memory_benchmark.source import SourceCorpus
+from telefire.memory_benchmark.source import SourceCorpus, SourceDocument
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +376,7 @@ def read_tencent_memories(
     database: Path,
     *,
     records_directory: Path | None = None,
+    corpus: SourceCorpus | None = None,
 ) -> tuple[MemoryRecord, ...]:
     uri = f"file:{database.resolve()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True)
@@ -387,7 +389,11 @@ def read_tencent_memories(
             ORDER BY created_time, record_id
             """
         ).fetchall()
-        source_documents = _tencent_source_documents(connection, records_directory)
+        source_documents = _tencent_source_documents(
+            connection,
+            records_directory,
+            corpus,
+        )
     finally:
         connection.close()
     return tuple(
@@ -408,6 +414,7 @@ def read_tencent_memories(
 def _tencent_source_documents(
     connection: sqlite3.Connection,
     records_directory: Path | None,
+    corpus: SourceCorpus | None,
 ) -> dict[str, tuple[str, ...]]:
     if records_directory is None or not records_directory.exists():
         return {}
@@ -426,13 +433,27 @@ def _tencent_source_documents(
                 memory_sources[memory_id] = tuple(source_ids)
 
     source_rows = connection.execute(
-        "SELECT record_id, message_text FROM l0_conversations"
+        "SELECT record_id, message_text, timestamp FROM l0_conversations"
     ).fetchall()
     source_pattern = re.compile(r"^\[Source document: ([^]]+)]$", re.MULTILINE)
-    documents_by_source = {
-        source_id: tuple(dict.fromkeys(source_pattern.findall(message_text)))
-        for source_id, message_text in source_rows
-    }
+    expected_documents: dict[tuple[int, str], list[str]] = {}
+    if corpus is not None:
+        for document in corpus.documents:
+            parsed = datetime.fromisoformat(document.timestamp.replace("Z", "+00:00"))
+            timestamp_ms = int(parsed.timestamp() * 1_000)
+            expected_documents.setdefault(
+                (timestamp_ms, _tencent_l0_content(document)), []
+            ).append(document.document_id)
+
+    documents_by_source = {}
+    for source_id, message_text, timestamp in source_rows:
+        embedded = tuple(dict.fromkeys(source_pattern.findall(message_text)))
+        if embedded:
+            documents_by_source[source_id] = embedded
+        elif isinstance(timestamp, int):
+            documents_by_source[source_id] = tuple(
+                expected_documents.get((timestamp, message_text), ())
+            )
     return {
         memory_id: tuple(
             dict.fromkeys(
@@ -443,6 +464,13 @@ def _tencent_source_documents(
         )
         for memory_id, source_ids in memory_sources.items()
     }
+
+
+def _tencent_l0_content(document: SourceDocument) -> str:
+    return "\n".join(
+        f"[Telegram actor: {event.actor_name} | {event.actor_id}] {event.text}"
+        for event in document.events
+    )
 
 
 async def _json_request(

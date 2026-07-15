@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 
 import pytest
@@ -43,6 +44,20 @@ class FakeGateway:
         if isinstance(self.description, Exception):
             raise self.description
         return self.description
+
+
+class BlockingDownloadMessage(FakeMessage):
+    def __init__(self, file: FakeFile):
+        super().__init__(None, file)
+        self.cancelled = asyncio.Event()
+
+    async def download_media(self, *, file):
+        assert file is bytes
+        self.downloads += 1
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
 
 
 def image_bytes() -> bytes:
@@ -182,6 +197,23 @@ async def test_unsupported_and_oversized_files_use_metadata_without_download() -
     assert "analysis limit" in oversized_result.context_text.lower()
     assert unsupported.downloads == 0
     assert oversized.downloads == 0
+    assert gateway.requests == []
+
+
+@pytest.mark.asyncio
+async def test_attachment_download_timeout_falls_back_to_metadata() -> None:
+    gateway = FakeGateway()
+    message = BlockingDownloadMessage(
+        FakeFile(name="stuck.txt", mime_type="text/plain", size=10)
+    )
+    describer = TelegramAttachmentDescriber(gateway, download_timeout=0.01)
+
+    result = await asyncio.wait_for(describer.describe(message), timeout=1)
+
+    assert result is not None
+    assert "description is unavailable" in result.context_text
+    assert message.downloads == 1
+    assert message.cancelled.is_set()
     assert gateway.requests == []
 
 

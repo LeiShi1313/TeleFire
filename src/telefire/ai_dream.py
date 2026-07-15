@@ -44,8 +44,6 @@ class DreamMessageSource(Protocol):
         since: datetime,
         until: datetime,
         limit: int,
-        after_message_id: int | None = None,
-        oldest_first: bool = False,
     ) -> tuple[ReplyTarget, ...]: ...
 
     async def fetch_message(
@@ -97,26 +95,8 @@ class TelegramHistorySource:
         since: datetime,
         until: datetime,
         limit: int,
-        after_message_id: int | None = None,
-        oldest_first: bool = False,
     ) -> tuple[ReplyTarget, ...]:
         messages: list[ReplyTarget] = []
-        if oldest_first:
-            kwargs: dict[str, Any] = {
-                "limit": limit,
-                "reverse": True,
-            }
-            if after_message_id is not None:
-                kwargs["min_id"] = after_message_id
-            else:
-                kwargs["offset_date"] = since
-            async for message in self._client.iter_messages(chat_id, **kwargs):
-                occurred_at = _message_datetime(message)
-                if occurred_at > until:
-                    break
-                if occurred_at >= since:
-                    messages.append(message)
-            return tuple(messages)
         async for message in self._client.iter_messages(
             chat_id,
             offset_date=until,
@@ -578,57 +558,26 @@ class TelegramDreamScanner:
             checkpoint_scanned_at = scanned_until_at
 
         try:
-            overlap_messages: tuple[ReplyTarget, ...] = ()
-            if (
-                state.scanned_until_at is not None
-                and state.cursor_message_id is not None
-            ):
-                overlap_messages = await self._retry_telegram(
-                    lambda: self._source.fetch_window(
-                        chat_id,
-                        since=since,
-                        until=until,
-                        limit=min(50, self._settings.max_messages),
-                    )
-                )
-            new_messages = await self._retry_telegram(
+            messages = await self._retry_telegram(
                 lambda: self._source.fetch_window(
                     chat_id,
-                    since=(
-                        datetime.fromtimestamp(state.scanned_until_at, UTC)
-                        if state.scanned_until_at is not None
-                        else since
-                    ),
+                    since=since,
                     until=until,
-                    limit=self._settings.max_messages + 1,
-                    after_message_id=state.cursor_message_id,
-                    oldest_first=True,
+                    limit=self._settings.max_messages,
                 )
             )
-            more_messages = len(new_messages) > self._settings.max_messages
-            selected_new_messages = new_messages[: self._settings.max_messages]
-            messages = tuple(
-                sorted(
-                    {
-                        message.id: message
-                        for message in (*overlap_messages, *selected_new_messages)
-                    }.values(),
-                    key=lambda message: (_message_datetime(message), message.id),
-                )
-            )
-            result, cursor, complete = await self._retain_threads(
+            result, _, _ = await self._retain_threads(
                 chat_id,
                 messages,
                 deadline=deadline,
                 checkpoint=checkpoint,
             )
-            if complete and not more_messages:
-                await self._store.record_memory_dream_success(
-                    scope_id,
-                    cursor_message_id=cursor,
-                    scanned_until_at=until.timestamp(),
-                    succeeded_at=self._clock(),
-                )
+            await self._store.record_memory_dream_success(
+                scope_id,
+                cursor_message_id=messages[-1].id if messages else None,
+                scanned_until_at=until.timestamp(),
+                succeeded_at=self._clock(),
+            )
             return result
         except Exception as exc:
             await self._store.record_memory_dream_failure(

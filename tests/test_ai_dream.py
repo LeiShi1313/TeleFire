@@ -70,8 +70,6 @@ class FakeSource:
         since,
         until,
         limit,
-        after_message_id=None,
-        oldest_first=False,
     ):
         self.window_calls.append(
             {
@@ -85,9 +83,8 @@ class FakeSource:
             message
             for message in self.window
             if since <= message.date <= until
-            and (after_message_id is None or message.id > after_message_id)
         )
-        return eligible[:limit] if oldest_first else eligible[-limit:]
+        return eligible[-limit:]
 
     async def fetch_message(self, chat_id, message_id):
         self.message_calls.append((chat_id, message_id))
@@ -783,7 +780,7 @@ async def test_temporal_sessions_preserve_existing_thread_document_receipts(tmp_
 
 
 @pytest.mark.asyncio
-async def test_budgeted_dream_checkpoints_completed_prefix_and_resumes(tmp_path):
+async def test_budgeted_dream_advances_window_after_dropping_unprocessed_tail(tmp_path):
     class MutableMonotonic:
         value = 0.0
 
@@ -833,8 +830,8 @@ async def test_budgeted_dream_checkpoints_completed_prefix_and_resumes(tmp_path)
         assert first.messages_retained == 1
         assert first.documents_created == 1
         state = await store.get_memory_dream_state("telegram:chat:-1001")
-        assert state.cursor_message_id == 2_000
-        assert state.scanned_until_at == messages[0].date.timestamp()
+        assert state.cursor_message_id == 2_002
+        assert state.scanned_until_at == NOW.timestamp()
 
         resumed = TelegramDreamScanner(
             source=source,
@@ -1141,7 +1138,7 @@ async def test_thread_limit_refuses_to_advance_without_a_stable_complete_root(tm
 
 
 @pytest.mark.asyncio
-async def test_window_over_limit_advances_in_bounded_oldest_first_scans(tmp_path):
+async def test_window_over_limit_keeps_newest_messages_and_advances_watermark(tmp_path):
     messages = [
         FakeMessage(
             80 + index,
@@ -1164,26 +1161,30 @@ async def test_window_over_limit_advances_in_bounded_oldest_first_scans(tmp_path
 
         assert first.messages_seen == 2
         assert first.messages_retained == 2
-        assert first_state.cursor_message_id == 81
-        assert first_state.scanned_until_at == messages[1].date.timestamp()
+        assert first_state.cursor_message_id == 82
+        assert first_state.scanned_until_at == NOW.timestamp()
         assert first_state.last_error is None
         assert [
             call["episode"].events[0].source_id for call in memory.retain_calls
         ] == [
-            "telegram:message:-1001:80",
             "telegram:message:-1001:81",
+            "telegram:message:-1001:82",
         ]
 
         second = await scanner.run_scope(-1001)
         completed = await store.get_memory_dream_state("telegram:chat:-1001")
 
-        assert second.documents_created == 1
-        assert second.documents_unchanged == 1
+        assert second.documents_created == 0
+        assert second.documents_unchanged == 2
         assert completed.cursor_message_id == 82
         assert completed.scanned_until_at == NOW.timestamp()
-        assert [call["episode"].events[0].source_id for call in memory.retain_calls][
-            -1
-        ] == "telegram:message:-1001:82"
+        assert all(call["limit"] == 2 for call in source.window_calls)
+        assert [
+            call["episode"].events[0].source_id for call in memory.retain_calls
+        ] == [
+            "telegram:message:-1001:81",
+            "telegram:message:-1001:82",
+        ]
     finally:
         await store.close()
 

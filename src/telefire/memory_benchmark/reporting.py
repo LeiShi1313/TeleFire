@@ -6,6 +6,7 @@ from html import escape
 import json
 import math
 from pathlib import Path
+import random
 from statistics import mean
 from typing import Any
 
@@ -143,6 +144,7 @@ code {{ overflow-wrap:anywhere; }}
     <tbody>{backend_rows}</tbody>
   </table></div>
   <p class="meta">Recall wins: Hindsight {comparison['hindsight_wins']}, Tencent {comparison['tencent_wins']}, ties {comparison['ties']}.</p>
+  <p class="note">Hindsight’s paired recall-coverage advantage is <strong>{comparison['coverage_difference']:.2f}/4</strong> (95% bootstrap interval {comparison['coverage_ci_low']:.2f} to {comparison['coverage_ci_high']:.2f}). Its success-rate advantage is <strong>{_percent(comparison['success_difference'])}</strong> (95% interval {_percent(comparison['success_ci_low'])} to {_percent(comparison['success_ci_high'])}).</p>
 </section>
 <section>
   <h2>Recall by question type</h2>
@@ -185,6 +187,9 @@ code {{ overflow-wrap:anywhere; }}
   <h2>Method and limits</h2>
   <p>Both fresh stores received the same 376 exported Episode documents, preserving message text, timestamps, actor display names, canonical actor IDs, reply metadata, and source boundaries. Hindsight received one retain item per Episode. Tencent received one session with one conversation round per Episode so its configured five-round extraction window produced roughly one extraction call per five source documents.</p>
   <p>The 60 Chinese questions were generated from raw source messages, not from either memory backend. Every evidence quote was programmatically verified as a verbatim substring of its cited message. The judge saw the reference answer, source evidence, and anonymized retrieved contexts.</p>
+  <p>A separate gpt-5.6-sol audit rejected 9 ambiguous or misattributed questions, leaving 51 scored cases. Confidence intervals use 20,000 deterministic paired bootstrap samples over those cases.</p>
+  <p>Tencent attempted all 376 rounds but recorded 363 L0 rows. The 13 dropped episodes are exactly the second episode in each of 13 same-millisecond timestamp pairs, exposing strict incremental-cursor behavior. Because 376 is not divisible by the configured five-round extraction window, the official seed runtime also spent two bounded five-minute waits on a one-round tail before its idle timer processed that tail. Both effects are included in measured throughput and are left unpatched.</p>
+  <p>Tencent seed does not formally await all L2/L3 completion before destroying its temporary pipeline. Eight scene blocks and a persona were present at completion and are reported as artifacts, but only provenance-linked L1 records are scored as extracted memories.</p>
   <p>Extraction quality uses a deterministic, type-balanced sample of source-linked memories. Unlinked memories affect provenance coverage but are not assigned an unsupported score without evidence. Results describe one Telegram group and one model/configuration snapshot; they are comparative evidence, not a universal ranking.</p>
 </section>
 </main>
@@ -210,9 +215,13 @@ def _category_summary(quality: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def _recall_comparison(quality: dict[str, Any]) -> dict[str, Any]:
     hindsight_wins = tencent_wins = ties = 0
+    coverage_differences = []
+    success_differences = []
     for row in quality.get("recall", []):
         hindsight = row["grades"]["hindsight"]["answer_coverage"]
         tencent = row["grades"]["tencent"]["answer_coverage"]
+        coverage_differences.append(hindsight - tencent)
+        success_differences.append(int(hindsight >= 3) - int(tencent >= 3))
         if hindsight > tencent:
             hindsight_wins += 1
         elif tencent > hindsight:
@@ -226,11 +235,19 @@ def _recall_comparison(quality: dict[str, Any]) -> dict[str, Any]:
         if tencent_wins > hindsight_wins
         else "Tie"
     )
+    coverage_ci = _bootstrap_mean_interval(coverage_differences)
+    success_ci = _bootstrap_mean_interval(success_differences)
     return {
         "hindsight_wins": hindsight_wins,
         "tencent_wins": tencent_wins,
         "ties": ties,
         "winner": winner,
+        "coverage_difference": mean(coverage_differences) if coverage_differences else 0.0,
+        "coverage_ci_low": coverage_ci[0],
+        "coverage_ci_high": coverage_ci[1],
+        "success_difference": mean(success_differences) if success_differences else 0.0,
+        "success_ci_low": success_ci[0],
+        "success_ci_high": success_ci[1],
     }
 
 
@@ -309,7 +326,7 @@ def _failure_section(backend: str, quality: dict[str, Any]) -> str:
 
 
 def _tencent_layers(seed: dict[str, Any]) -> dict[str, int]:
-    output_path = seed.get("outputPath") or seed.get("output_path")
+    output_path = seed.get("outputDir") or seed.get("output_dir") or seed.get("output_path")
     if not isinstance(output_path, str):
         return {"scene_blocks": 0, "persona_chars": 0}
     root = Path(output_path)
@@ -321,13 +338,16 @@ def _tencent_layers(seed: dict[str, Any]) -> dict[str, int]:
 
 
 def _tencent_rounds(seed: dict[str, Any]) -> int:
+    rounds_processed = seed.get("rounds_processed")
+    if isinstance(rounds_processed, int):
+        return rounds_processed
     summary = seed.get("summary") or seed.get("seed") or {}
     if isinstance(summary, dict):
         for key in ("rounds", "conversations"):
             value = summary.get(key)
             if isinstance(value, int):
                 return value
-    output_path = seed.get("outputPath") or seed.get("output_path")
+    output_path = seed.get("outputDir") or seed.get("output_dir") or seed.get("output_path")
     if isinstance(output_path, str):
         manifest = Path(output_path) / ".metadata" / "manifest.json"
         if manifest.exists():
@@ -352,6 +372,20 @@ def _percentile(values: list[float], quantile: float) -> float:
     ordered = sorted(values)
     index = max(0, math.ceil(quantile * len(ordered)) - 1)
     return float(ordered[index])
+
+
+def _bootstrap_mean_interval(
+    values: list[float],
+    *,
+    samples: int = 20_000,
+) -> tuple[float, float]:
+    if not values:
+        return (0.0, 0.0)
+    generator = random.Random(20260715)
+    estimates = sorted(
+        mean(generator.choices(values, k=len(values))) for _ in range(samples)
+    )
+    return estimates[int(samples * 0.025)], estimates[int(samples * 0.975)]
 
 
 def _number(value: float) -> str:

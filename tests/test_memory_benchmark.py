@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 import json
 import sqlite3
 
+import pytest
+
 from telefire.memory_benchmark.backends import (
     MemoryRecord,
     parse_tencent_search,
@@ -13,11 +15,13 @@ from telefire.memory_benchmark.evaluation import (
     RecallCase,
     Evidence,
     filter_validated_cases,
+    grade_extraction_resilient,
+    grade_recall,
     parse_json_object,
     sample_memory_records,
     validate_recall_case,
 )
-from telefire.memory_benchmark.reporting import summarize_quality
+from telefire.memory_benchmark.reporting import _tencent_rounds, summarize_quality
 from telefire.memory_benchmark.source import (
     SourceCorpus,
     parse_source_document,
@@ -385,6 +389,7 @@ def test_quality_summary_keeps_recall_extraction_and_latency_separate():
     assert summary["hindsight"]["average_context_characters"] == 17
     assert summary["tencent"]["recall_success_rate"] == 0.0
     assert summary["tencent"]["source_link_rate"] == 0.5
+    assert _tencent_rounds({"rounds_processed": 376}) == 376
 
 
 def test_semantic_case_filter_requires_one_valid_review_per_case():
@@ -414,3 +419,74 @@ def test_semantic_case_filter_requires_one_valid_review_per_case():
     )
 
     assert accepted == (cases[0],)
+
+
+@pytest.mark.asyncio
+async def test_extraction_grading_splits_batches_when_judge_omits_an_item():
+    class IncompleteBatchJudge:
+        async def complete_json(self, **kwargs):
+            supplied = json.loads(kwargs["prompt"].split("\n\n", 1)[1])["items"]
+            selected = supplied[:1] if len(supplied) > 1 else supplied
+            return {
+                "grades": [
+                    {
+                        "memory_id": item["memory_id"],
+                        "faithfulness": 4,
+                        "attribution": 4,
+                        "specificity": 4,
+                        "usefulness": 4,
+                        "temporal": None,
+                        "unsupported_claim": False,
+                        "overcombined": False,
+                        "reason": "supported",
+                    }
+                    for item in selected
+                ]
+            }
+
+    grades = await grade_extraction_resilient(
+        IncompleteBatchJudge(),
+        [
+            {"memory_id": "memory-a", "extracted_memory": "A"},
+            {"memory_id": "memory-b", "extracted_memory": "B"},
+        ],
+    )
+
+    assert {grade["memory_id"] for grade in grades} == {"memory-a", "memory-b"}
+
+
+@pytest.mark.asyncio
+async def test_recall_grading_falls_back_to_one_backend_at_a_time():
+    class IncompleteComparisonJudge:
+        async def complete_json(self, **kwargs):
+            supplied = json.loads(kwargs["prompt"].split("\n\n", 1)[1])
+            labels = list(supplied["retrieved_contexts"])
+            selected = labels[:1]
+            return {
+                "grades": [
+                    {
+                        "label": label,
+                        "answer_coverage": 3,
+                        "attribution": 4,
+                        "temporal": None,
+                        "contradiction": False,
+                        "reason": "supported",
+                    }
+                    for label in selected
+                ]
+            }
+
+    case = RecallCase(
+        case_id="case-a",
+        category="direct",
+        question="谁改了会议？",
+        answer="Alice。",
+        evidence=(Evidence(document_id="doc-1", quote="Alice 改了会议"),),
+    )
+    grades = await grade_recall(
+        IncompleteComparisonJudge(),
+        case,
+        {"hindsight": "Alice 改了会议", "tencent": "Alice 改了会议"},
+    )
+
+    assert set(grades) == {"hindsight", "tencent"}

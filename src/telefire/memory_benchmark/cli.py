@@ -24,7 +24,7 @@ from telefire.memory_benchmark.backends import (
 from telefire.memory_benchmark.evaluation import (
     OpenAIJSONClient,
     generate_recall_cases,
-    grade_extraction_batch,
+    grade_extraction_resilient,
     grade_recall,
     read_cases,
     render_document,
@@ -264,7 +264,8 @@ async def _run_quality(
     _write_json(args.output, result)
 
     for backend, records in records_by_backend.items():
-        if backend in result.get("extraction", {}):
+        existing_extraction = result.get("extraction", {}).get(backend)
+        if existing_extraction and existing_extraction.get("complete") is True:
             print(f"using checkpointed {backend} extraction grades", flush=True)
             continue
         linked = tuple(
@@ -276,23 +277,41 @@ async def _run_quality(
         sample = sample_memory_records(linked, limit=args.extraction_sample)
         items = [_extraction_item(record, documents) for record in sample]
         batches = _item_batches(items, max_items=4, max_characters=28_000)
-        semaphore = asyncio.Semaphore(args.judge_concurrency)
-
-        async def grade(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            async with semaphore:
-                return await grade_extraction_batch(client, batch)
-
-        print(
-            f"judging {backend} extraction: {len(sample)} memories in {len(batches)} batches",
-            flush=True,
-        )
-        groups = await asyncio.gather(*(grade(batch) for batch in batches))
-        grades = [item for group in groups for item in group]
-        result["extraction"][backend] = {
+        extraction = existing_extraction or {
             "sample_size": len(sample),
             "source_linked_population": len(linked),
-            "grades": grades,
+            "complete": False,
+            "grades": [],
         }
+        result["extraction"][backend] = extraction
+        completed_memory_ids = {
+            grade["memory_id"] for grade in extraction.get("grades", [])
+        }
+        pending_batches = [
+            [item for item in batch if item["memory_id"] not in completed_memory_ids]
+            for batch in batches
+        ]
+        pending_batches = [batch for batch in pending_batches if batch]
+        print(
+            f"judging {backend} extraction: {len(sample)} memories, "
+            f"{len(pending_batches)} pending batches",
+            flush=True,
+        )
+        for start in range(0, len(pending_batches), args.judge_concurrency):
+            wave = pending_batches[start : start + args.judge_concurrency]
+            groups = await asyncio.gather(
+                *(grade_extraction_resilient(client, batch) for batch in wave)
+            )
+            extraction["grades"].extend(
+                grade for group in groups for grade in group
+            )
+            _write_json(args.output, result)
+            print(
+                f"{backend} extraction batches "
+                f"{min(start + len(wave), len(pending_batches))}/{len(pending_batches)}",
+                flush=True,
+            )
+        extraction["complete"] = True
         _write_json(args.output, result)
 
     completed_case_ids = {

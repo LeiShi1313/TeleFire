@@ -242,6 +242,33 @@ async def grade_recall(
     case: RecallCase,
     contexts: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
+    try:
+        return await _grade_recall_once(client, case, contexts)
+    except ValueError:
+        await asyncio.sleep(1)
+        try:
+            return await _grade_recall_once(client, case, contexts)
+        except ValueError:
+            if len(contexts) == 1:
+                raise
+            groups = await asyncio.gather(
+                *(
+                    _grade_recall_once(client, case, {backend: context})
+                    for backend, context in contexts.items()
+                )
+            )
+            return {
+                backend: grade
+                for group in groups
+                for backend, grade in group.items()
+            }
+
+
+async def _grade_recall_once(
+    client: OpenAIJSONClient,
+    case: RecallCase,
+    contexts: dict[str, str],
+) -> dict[str, dict[str, Any]]:
     backends = sorted(contexts)
     if int(case.case_id[-1], 16) % 2:
         backends.reverse()
@@ -409,6 +436,24 @@ async def grade_extraction_batch(
     if {grade["memory_id"] for grade in grades} != expected:
         raise ValueError("Extraction judge omitted a memory")
     return grades
+
+
+async def grade_extraction_resilient(
+    client: OpenAIJSONClient,
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    try:
+        return await grade_extraction_batch(client, items)
+    except ValueError:
+        if len(items) == 1:
+            await asyncio.sleep(1)
+            return await grade_extraction_batch(client, items)
+        midpoint = len(items) // 2
+        left, right = await asyncio.gather(
+            grade_extraction_resilient(client, items[:midpoint]),
+            grade_extraction_resilient(client, items[midpoint:]),
+        )
+        return left + right
 
 
 def sample_memory_records(

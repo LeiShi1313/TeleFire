@@ -22,6 +22,13 @@ def summarize_quality(quality: dict[str, Any]) -> dict[str, dict[str, Any]]:
         ]
         recall_grades = [row["grades"][backend] for row in recall_rows]
         latency = [row["measurements"][backend]["elapsed_ms"] for row in recall_rows]
+        recalled_records = [
+            len(row["measurements"][backend].get("records", [])) for row in recall_rows
+        ]
+        context_characters = [
+            len(row["measurements"][backend].get("raw_context", ""))
+            for row in recall_rows
+        ]
         total = inventory.get("total", 0)
         summary[backend] = {
             "memories": total,
@@ -46,6 +53,8 @@ def summarize_quality(quality: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "contradiction_rate": _boolean_rate(recall_grades, "contradiction"),
             "latency_p50_ms": _percentile(latency, 0.50),
             "latency_p95_ms": _percentile(latency, 0.95),
+            "average_recalled_records": mean(recalled_records) if recalled_records else 0.0,
+            "average_context_characters": mean(context_characters) if context_characters else 0.0,
         }
     return summary
 
@@ -151,6 +160,14 @@ code {{ overflow-wrap:anywhere; }}
   <p class="note"><strong>Tencent higher layers are reported separately:</strong> {tencent_layers['scene_blocks']} scene blocks and persona size {tencent_layers['persona_chars']} characters. They are not mixed into L1 fact scores because they do not preserve equivalent per-memory provenance.</p>
 </section>
 <section>
+  <h2>Retrieval footprint and latency</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Backend</th><th>Average recalled records</th><th>Average context characters</th><th>P50 latency</th><th>P95 latency</th></tr></thead>
+    <tbody>{''.join(_footprint_row(k,v) for k,v in summary.items())}</tbody>
+  </table></div>
+  <p class="meta">Context size is reported alongside recall quality because a backend returning more evidence has a larger opportunity to contain the answer.</p>
+</section>
+<section>
   <h2>Ingestion throughput</h2>
   <div class="table-wrap"><table>
     <thead><tr><th>Backend</th><th>Input episodes</th><th>Wall time</th><th>Episodes / minute</th><th>Notes</th></tr></thead>
@@ -249,6 +266,16 @@ def _inventory_row(backend: str, values: dict[str, Any]) -> str:
         f"<td>{values['extraction_sample']}</td><td>{_number(values['specificity'])}</td>"
         f"<td>{_number(values['usefulness'])}</td><td>{_percent(values['overcombined_rate'])}</td>"
         f"<td>{types}</td></tr>"
+    )
+
+
+def _footprint_row(backend: str, values: dict[str, Any]) -> str:
+    return (
+        f"<tr><td><strong>{escape(backend.title())}</strong></td>"
+        f"<td>{values['average_recalled_records']:.1f}</td>"
+        f"<td>{values['average_context_characters']:.0f}</td>"
+        f"<td>{values['latency_p50_ms']:.0f} ms</td>"
+        f"<td>{values['latency_p95_ms']:.0f} ms</td></tr>"
     )
 
 

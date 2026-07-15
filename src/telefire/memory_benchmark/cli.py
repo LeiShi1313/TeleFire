@@ -191,24 +191,44 @@ async def _run_quality(
         "hindsight": hindsight_records,
         "tencent": tencent_records,
     }
-    result: dict[str, Any] = {
-        "schema": "telefire.memory-benchmark.quality.v1",
-        "generated_at": datetime.now(UTC).isoformat(),
-        "judge_model": client.model,
-        "source": {
-            "bank_id": corpus.bank_id,
-            "documents": len(corpus.documents),
-            "events": len(corpus.events),
-        },
-        "inventories": {
+    if args.output.exists():
+        result = _read_json(args.output)
+        if (
+            result.get("schema") != "telefire.memory-benchmark.quality.v1"
+            or result.get("judge_model") != client.model
+            or result.get("source", {}).get("bank_id") != corpus.bank_id
+        ):
+            raise ValueError("Existing quality checkpoint does not match this run")
+        result["inventories"] = {
             backend: _inventory(records) for backend, records in records_by_backend.items()
-        },
-        "extraction": {},
-        "recall": [],
-    }
+        }
+        print(
+            f"resuming quality checkpoint with {len(result.get('recall', []))} recall cases",
+            flush=True,
+        )
+    else:
+        result = {
+            "schema": "telefire.memory-benchmark.quality.v1",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "judge_model": client.model,
+            "source": {
+                "bank_id": corpus.bank_id,
+                "documents": len(corpus.documents),
+                "events": len(corpus.events),
+            },
+            "inventories": {
+                backend: _inventory(records)
+                for backend, records in records_by_backend.items()
+            },
+            "extraction": {},
+            "recall": [],
+        }
     _write_json(args.output, result)
 
     for backend, records in records_by_backend.items():
+        if backend in result.get("extraction", {}):
+            print(f"using checkpointed {backend} extraction grades", flush=True)
+            continue
         linked = tuple(
             record
             for record in records
@@ -237,16 +257,20 @@ async def _run_quality(
         }
         _write_json(args.output, result)
 
-    if cases:
+    completed_case_ids = {
+        row["case"]["case_id"] for row in result.get("recall", [])
+    }
+    remaining_cases = [case for case in cases if case.case_id not in completed_case_ids]
+    if remaining_cases:
         await recall_hindsight(
             args.hindsight_url,
             args.hindsight_bank,
-            cases[0].question,
+            remaining_cases[0].question,
             backend="hindsight",
         )
-        await recall_tencent(args.tencent_url, cases[0].question)
+        await recall_tencent(args.tencent_url, remaining_cases[0].question)
 
-    for index, case in enumerate(cases, start=1):
+    for index, case in enumerate(remaining_cases, start=1):
         hindsight = await recall_hindsight(
             args.hindsight_url,
             args.hindsight_bank,
@@ -275,7 +299,10 @@ async def _run_quality(
         )
         result["elapsed_seconds"] = perf_counter() - started
         _write_json(args.output, result)
-        print(f"recall cases {index}/{len(cases)}", flush=True)
+        print(
+            f"recall cases {len(completed_case_ids) + index}/{len(cases)}",
+            flush=True,
+        )
 
     result["elapsed_seconds"] = perf_counter() - started
     _write_json(args.output, result)
@@ -373,6 +400,13 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return value
 
 
 if __name__ == "__main__":

@@ -314,8 +314,16 @@ def test_quality_summary_keeps_recall_extraction_and_latency_separate():
             {
                 "case": {"category": "direct"},
                 "measurements": {
-                    "hindsight": {"elapsed_ms": 100},
-                    "tencent": {"elapsed_ms": 20},
+                    "hindsight": {
+                        "elapsed_ms": 100,
+                        "raw_context": "four useful words",
+                        "records": [{}, {}],
+                    },
+                    "tencent": {
+                        "elapsed_ms": 20,
+                        "raw_context": "short",
+                        "records": [{}],
+                    },
                 },
                 "grades": {
                     "hindsight": {
@@ -339,6 +347,8 @@ def test_quality_summary_keeps_recall_extraction_and_latency_separate():
     assert summary["hindsight"]["faithfulness"] == 3.0
     assert summary["hindsight"]["unsupported_rate"] == 0.5
     assert summary["hindsight"]["latency_p50_ms"] == 100
+    assert summary["hindsight"]["average_recalled_records"] == 2
+    assert summary["hindsight"]["average_context_characters"] == 17
     assert summary["tencent"]["recall_success_rate"] == 0.0
     assert summary["tencent"]["source_link_rate"] == 0.5
 

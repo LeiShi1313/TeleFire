@@ -62,11 +62,15 @@ def test_episode_export_preserves_actor_time_and_source_boundaries():
     payload = tencent_seed_payload(corpus)
 
     session = payload["sessions"][0]
-    assert session["sessionId"] == document.document_id
+    assert session["sessionId"] == "benchmark:telegram:chat:1"
     message = session["conversations"][0][0]
     assert message == {
         "role": "user",
-        "content": "[Telegram actor: Alice | telegram:user:7]\n下周二改为线上会议",
+        "content": (
+            "[Source document: telegram:thread:1:11]\n"
+            "[2026-07-15T08:30:00Z] [Telegram actor: Alice | "
+            "telegram:user:7] 下周二改为线上会议"
+        ),
         "timestamp": "2026-07-15T08:30:00Z",
     }
 

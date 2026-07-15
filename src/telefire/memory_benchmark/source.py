@@ -199,30 +199,32 @@ def read_corpus(path: Path) -> SourceCorpus:
 
 
 def tencent_seed_payload(corpus: SourceCorpus) -> dict[str, Any]:
-    sessions = []
+    conversations = []
     for document in corpus.documents:
-        conversations = []
-        for event in document.events:
-            conversations.append(
-                [
-                    {
-                        "role": "user",
-                        "content": (
-                            f"[Telegram actor: {event.actor_name} | {event.actor_id}]\n"
-                            f"{event.text}"
-                        ),
-                        "timestamp": event.occurred_at,
-                    }
-                ]
-            )
-        sessions.append(
+        lines = [f"[Source document: {document.document_id}]"]
+        lines.extend(
+            f"[{event.occurred_at}] [Telegram actor: {event.actor_name} | "
+            f"{event.actor_id}] {event.text}"
+            for event in document.events
+        )
+        conversations.append(
+            [
+                {
+                    "role": "user",
+                    "content": "\n".join(lines),
+                    "timestamp": document.timestamp,
+                }
+            ]
+        )
+    return {
+        "sessions": [
             {
                 "sessionKey": corpus.bank_id,
-                "sessionId": document.document_id,
+                "sessionId": f"benchmark:{corpus.bank_id}",
                 "conversations": conversations,
             }
-        )
-    return {"sessions": sessions}
+        ]
+    }
 
 
 async def _json_request(

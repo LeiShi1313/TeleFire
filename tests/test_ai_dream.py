@@ -1486,6 +1486,64 @@ async def test_timed_out_scope_does_not_block_other_scopes_or_later_runs(tmp_pat
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_scope_timeout_includes_waiting_for_an_existing_operation(tmp_path):
+    backfill_started = asyncio.Event()
+    release_backfill = asyncio.Event()
+
+    class BlockingBackfillSource(FakeSource):
+        async def fetch_window(self, chat_id, **kwargs):
+            if chat_id == -1001:
+                backfill_started.set()
+                await release_backfill.wait()
+            return ()
+
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    for chat_id in (-1001, -1002):
+        await store.set_memory_enabled(f"telegram:chat:{chat_id}", True)
+    scanner = TelegramDreamScanner(
+        source=BlockingBackfillSource([]),
+        store=store,
+        memory=FakeMemory(),
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            settlement_delay=timedelta(0),
+            scope_timeout_seconds=0.03,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    backfill = asyncio.create_task(
+        scanner.run_backfill(
+            -1001,
+            MemoryBackfillRequest(mode="messages", value=1),
+        )
+    )
+    try:
+        await asyncio.wait_for(backfill_started.wait(), timeout=1)
+
+        result = await asyncio.wait_for(
+            DreamScheduler(
+                scanner=scanner,
+                store=store,
+                settings=DreamSchedulerSettings(cron=None, concurrency=2),
+            ).run_once(),
+            timeout=1,
+        )
+
+        assert result == DreamScheduleResult(
+            scopes_seen=2,
+            scopes_succeeded=1,
+            scopes_failed=1,
+            scopes_busy=0,
+        )
+        state = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert "DreamCycleTimeoutError" in (state.last_error or "")
+    finally:
+        release_backfill.set()
+        await asyncio.gather(backfill, return_exceptions=True)
+        await store.close()
+
+
 class FakeScheduledScanner:
     def __init__(self):
         self.calls = []

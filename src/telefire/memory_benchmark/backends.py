@@ -272,7 +272,6 @@ async def recall_hindsight(
                 "budget": "mid",
                 "max_tokens": max_tokens,
                 "types": ["world", "experience", "observation"],
-                "prefer_observations": True,
                 "include": {
                     "entities": {"max_tokens": 500},
                     "source_facts": {"max_tokens": 750},

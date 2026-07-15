@@ -142,7 +142,7 @@ async def wait_for_hindsight_idle(
     base_url: str,
     bank_id: str,
     *,
-    timeout_seconds: float = 900,
+    timeout_seconds: float = 7_200,
 ) -> dict[str, Any]:
     encoded_bank = quote(bank_id, safe="")
     deadline = asyncio.get_running_loop().time() + timeout_seconds

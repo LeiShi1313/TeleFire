@@ -9,6 +9,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import aiohttp
+
 from telefire.memory_benchmark.backends import (
     MemoryRecord,
     ingest_hindsight,
@@ -17,6 +19,7 @@ from telefire.memory_benchmark.backends import (
     recall_hindsight,
     recall_tencent,
     seed_tencent,
+    wait_for_hindsight_idle,
 )
 from telefire.memory_benchmark.evaluation import (
     OpenAIJSONClient,
@@ -45,6 +48,15 @@ def main() -> None:
     hindsight.add_argument("--output", type=Path, required=True)
     hindsight.add_argument("--batch-size", type=int, default=1)
     hindsight.add_argument("--concurrency", type=int, default=4)
+
+    wait_hindsight = subparsers.add_parser("wait-hindsight")
+    wait_hindsight.add_argument("--url", required=True)
+    wait_hindsight.add_argument("--bank", required=True)
+    wait_hindsight.add_argument("--started-at", required=True)
+    wait_hindsight.add_argument("--documents", type=int, required=True)
+    wait_hindsight.add_argument("--batch-size", type=int, required=True)
+    wait_hindsight.add_argument("--concurrency", type=int, required=True)
+    wait_hindsight.add_argument("--output", type=Path, required=True)
 
     tencent = subparsers.add_parser("seed-tencent")
     tencent.add_argument("--source", type=Path, required=True)
@@ -110,6 +122,31 @@ async def _dispatch(args: argparse.Namespace) -> None:
     if args.command == "seed-tencent":
         corpus = read_corpus(args.source)
         result = await seed_tencent(args.url, tencent_seed_payload(corpus))
+        _write_json(args.output, result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "wait-hindsight":
+        started_at = datetime.fromisoformat(args.started_at.replace("Z", "+00:00"))
+        if started_at.tzinfo is None:
+            raise ValueError("--started-at must include a timezone")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=7_300)) as session:
+            stats = await wait_for_hindsight_idle(
+                session,
+                args.url,
+                args.bank,
+                timeout_seconds=7_200,
+            )
+        result = {
+            "backend": "hindsight-fresh",
+            "elapsed_seconds": (datetime.now(UTC) - started_at.astimezone(UTC)).total_seconds(),
+            "documents": args.documents,
+            "batch_size": args.batch_size,
+            "concurrency": args.concurrency,
+            "operations": (args.documents + args.batch_size - 1) // args.batch_size,
+            "stats": stats,
+            "recovered_after_client_timeout": True,
+        }
         _write_json(args.output, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return

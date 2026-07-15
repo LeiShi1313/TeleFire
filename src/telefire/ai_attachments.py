@@ -80,6 +80,7 @@ def message_has_attachment(message: Any) -> bool:
 
 class TelegramAttachmentDescriber:
     MAX_FILE_BYTES = 5 * 1024 * 1024
+    DEFAULT_DOWNLOAD_TIMEOUT = 30.0
     MAX_TEXT_CHARS = 50_000
     MAX_DESCRIPTION_CHARS = 4_000
     MAX_PDF_PAGES = 12
@@ -89,9 +90,13 @@ class TelegramAttachmentDescriber:
         self,
         gateway: AttachmentAnalysisGateway,
         *,
+        download_timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
         logger: Any | None = None,
     ):
+        if download_timeout <= 0:
+            raise ValueError("Attachment download timeout must be positive")
         self._gateway = gateway
+        self._download_timeout = download_timeout
         self._logger = logger
 
     async def describe(self, message: Any) -> AttachmentDescription | None:
@@ -115,7 +120,10 @@ class TelegramAttachmentDescriber:
             return _metadata_only(metadata, "this file type is not analyzed")
 
         try:
-            raw = await message.download_media(file=bytes)
+            raw = await asyncio.wait_for(
+                message.download_media(file=bytes),
+                timeout=self._download_timeout,
+            )
             if not isinstance(raw, bytes) or not raw:
                 raise ValueError("Telegram returned no attachment bytes")
             if len(raw) > self.MAX_FILE_BYTES:

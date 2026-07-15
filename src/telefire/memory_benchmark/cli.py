@@ -29,6 +29,7 @@ from telefire.memory_benchmark.evaluation import (
     write_cases,
 )
 from telefire.memory_benchmark.source import read_corpus, tencent_seed_payload
+from telefire.memory_benchmark.reporting import write_html_report
 
 
 def main() -> None:
@@ -68,6 +69,12 @@ def main() -> None:
     quality.add_argument("--judge-concurrency", type=int, default=2)
     quality.add_argument("--output", type=Path, required=True)
 
+    report = subparsers.add_parser("report")
+    report.add_argument("--quality", type=Path, required=True)
+    report.add_argument("--hindsight-ingest", type=Path, required=True)
+    report.add_argument("--tencent-seed", type=Path, required=True)
+    report.add_argument("--output", type=Path, required=True)
+
     args = parser.parse_args()
     asyncio.run(_dispatch(args))
 
@@ -94,6 +101,16 @@ async def _dispatch(args: argparse.Namespace) -> None:
         result = await seed_tencent(args.url, tencent_seed_payload(corpus))
         _write_json(args.output, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.command == "report":
+        write_html_report(
+            args.quality,
+            args.hindsight_ingest,
+            args.tencent_seed,
+            args.output,
+        )
+        print(f"wrote report to {args.output}")
         return
 
     settings = _llm_settings(args.env_file, args.model, args.reasoning_effort)

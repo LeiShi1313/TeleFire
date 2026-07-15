@@ -14,6 +14,7 @@ from telefire.memory_benchmark.evaluation import (
     sample_memory_records,
     validate_recall_case,
 )
+from telefire.memory_benchmark.reporting import summarize_quality
 from telefire.memory_benchmark.source import (
     SourceCorpus,
     parse_source_document,
@@ -272,3 +273,68 @@ def test_json_parser_and_memory_sampling_are_deterministic():
         record.memory_id for record in second
     ]
     assert {record.memory_type for record in first} == {"world", "observation"}
+
+
+def test_quality_summary_keeps_recall_extraction_and_latency_separate():
+    quality = {
+        "inventories": {
+            "hindsight": {"total": 4, "source_linked": 4, "types": {"world": 4}},
+            "tencent": {"total": 2, "source_linked": 1, "types": {"episodic": 2}},
+        },
+        "extraction": {
+            "hindsight": {
+                "sample_size": 2,
+                "grades": [
+                    {
+                        "faithfulness": 4,
+                        "attribution": 4,
+                        "specificity": 3,
+                        "usefulness": 3,
+                        "temporal": None,
+                        "unsupported_claim": False,
+                        "overcombined": False,
+                    },
+                    {
+                        "faithfulness": 2,
+                        "attribution": 1,
+                        "specificity": 2,
+                        "usefulness": 2,
+                        "temporal": 3,
+                        "unsupported_claim": True,
+                        "overcombined": True,
+                    },
+                ],
+            },
+            "tencent": {"sample_size": 0, "grades": []},
+        },
+        "recall": [
+            {
+                "case": {"category": "direct"},
+                "measurements": {
+                    "hindsight": {"elapsed_ms": 100},
+                    "tencent": {"elapsed_ms": 20},
+                },
+                "grades": {
+                    "hindsight": {
+                        "answer_coverage": 4,
+                        "attribution": 4,
+                        "contradiction": False,
+                    },
+                    "tencent": {
+                        "answer_coverage": 2,
+                        "attribution": 3,
+                        "contradiction": True,
+                    },
+                },
+            }
+        ],
+    }
+
+    summary = summarize_quality(quality)
+
+    assert summary["hindsight"]["recall_success_rate"] == 1.0
+    assert summary["hindsight"]["faithfulness"] == 3.0
+    assert summary["hindsight"]["unsupported_rate"] == 0.5
+    assert summary["hindsight"]["latency_p50_ms"] == 100
+    assert summary["tencent"]["recall_success_rate"] == 0.0
+    assert summary["tencent"]["source_link_rate"] == 0.5

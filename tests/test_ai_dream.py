@@ -1425,6 +1425,67 @@ async def test_running_dream_renews_lease_until_work_finishes(tmp_path):
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_timed_out_scope_does_not_block_other_scopes_or_later_runs(tmp_path):
+    class PartiallyBlockingSource(FakeSource):
+        def __init__(self):
+            super().__init__([])
+            self.blocked_calls = 0
+            self.healthy_calls = 0
+            self.cancelled_calls = 0
+
+        async def fetch_window(self, chat_id, **kwargs):
+            if chat_id != -1001:
+                self.healthy_calls += 1
+                return ()
+            self.blocked_calls += 1
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled_calls += 1
+
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    for chat_id in (-1001, -1002):
+        await store.set_memory_enabled(f"telegram:chat:{chat_id}", True)
+    source = PartiallyBlockingSource()
+    scanner = TelegramDreamScanner(
+        source=source,
+        store=store,
+        memory=FakeMemory(),
+        prompt_builder=PromptBuilder(identity_resolver=FakeIdentityResolver()),
+        settings=DreamSettings(
+            settlement_delay=timedelta(0),
+            scope_timeout_seconds=0.03,
+        ),
+        clock=lambda: NOW.timestamp(),
+    )
+    scheduler = DreamScheduler(
+        scanner=scanner,
+        store=store,
+        settings=DreamSchedulerSettings(cron=None, concurrency=2),
+    )
+    try:
+        first = await asyncio.wait_for(scheduler.run_once(), timeout=1)
+        second = await asyncio.wait_for(scheduler.run_once(), timeout=1)
+
+        assert first == DreamScheduleResult(
+            scopes_seen=2,
+            scopes_succeeded=1,
+            scopes_failed=1,
+            scopes_busy=0,
+        )
+        assert second == first
+        assert source.blocked_calls == 2
+        assert source.healthy_calls == 2
+        assert source.cancelled_calls == 2
+        state = await store.get_memory_dream_state("telegram:chat:-1001")
+        assert state.lease_owner is None
+        assert state.lease_expires_at is None
+        assert "DreamCycleTimeoutError" in (state.last_error or "")
+    finally:
+        await store.close()
+
+
 class FakeScheduledScanner:
     def __init__(self):
         self.calls = []
@@ -1485,6 +1546,7 @@ def test_dream_settings_load_temporal_session_limits(monkeypatch):
     monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_SPAN_SECONDS", "600")
     monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_EVENTS", "12")
     monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_CHARS", "2048")
+    monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SCOPE_TIMEOUT_SECONDS", "180")
 
     settings = DreamSettings.from_env()
 
@@ -1492,6 +1554,7 @@ def test_dream_settings_load_temporal_session_limits(monkeypatch):
     assert settings.session_max_span == timedelta(minutes=10)
     assert settings.session_max_events == 12
     assert settings.session_max_chars == 2_048
+    assert settings.scope_timeout_seconds == 180
 
 
 @pytest.mark.asyncio

@@ -155,6 +155,7 @@ class DreamSettings:
     retain_concurrency: int = 4
     preprocess_concurrency: int = 12
     cycle_budget_seconds: float = 50
+    scope_timeout_seconds: float = 300
     lease_seconds: float = 3_600
     retry_attempts: int = 3
     max_retry_delay: float = 30
@@ -179,6 +180,8 @@ class DreamSettings:
             raise ValueError("Dream message limits must be positive")
         if self.cycle_budget_seconds <= 0:
             raise ValueError("Dream cycle budget must be positive")
+        if self.scope_timeout_seconds <= 0:
+            raise ValueError("Dream scope timeout must be positive")
         if self.lease_seconds <= 0:
             raise ValueError("Dream lease duration must be positive")
         if self.retry_attempts < 1 or self.max_retry_delay < 0:
@@ -245,6 +248,9 @@ class DreamSettings:
             cycle_budget_seconds=float(
                 os.environ.get("TELEFIRE_MEMORY_DREAM_CYCLE_BUDGET_SECONDS", "50")
             ),
+            scope_timeout_seconds=float(
+                os.environ.get("TELEFIRE_MEMORY_DREAM_SCOPE_TIMEOUT_SECONDS", "300")
+            ),
             lease_seconds=float(
                 os.environ.get("TELEFIRE_MEMORY_DREAM_LEASE_SECONDS", "3600")
             ),
@@ -298,6 +304,10 @@ class _DreamDocument:
 
 
 class DreamCycleBusyError(RuntimeError):
+    pass
+
+
+class DreamCycleTimeoutError(TimeoutError):
     pass
 
 
@@ -395,7 +405,19 @@ class TelegramDreamScanner:
         self._lease_owner = uuid4().hex
 
     async def run_scope(self, chat_id: int) -> MemoryDreamResult:
-        return await self._run_exclusive(chat_id, lambda: self._run_scope(chat_id))
+        try:
+            return await self._run_exclusive(
+                chat_id,
+                lambda: self._run_scope(chat_id),
+                timeout_seconds=self._settings.scope_timeout_seconds,
+            )
+        except DreamCycleTimeoutError as exc:
+            await self._store.record_memory_dream_failure(
+                _telegram_scope_id(chat_id),
+                failed_at=self._clock(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
 
     async def run_backfill(
         self,
@@ -411,6 +433,8 @@ class TelegramDreamScanner:
         self,
         chat_id: int,
         operation: Callable[[], Awaitable[MemoryDreamResult]],
+        *,
+        timeout_seconds: float | None = None,
     ) -> MemoryDreamResult:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
@@ -426,22 +450,35 @@ class TelegramDreamScanner:
                 raise DreamCycleBusyError(
                     "Another Dream operation is already running for this chat"
                 )
+            work = asyncio.create_task(operation())
+            heartbeat = asyncio.create_task(self._renew_lease(scope_id))
+            timeout = (
+                asyncio.create_task(asyncio.sleep(timeout_seconds))
+                if timeout_seconds is not None
+                else None
+            )
+            tasks: set[asyncio.Task[Any]] = {work, heartbeat}
+            if timeout is not None:
+                tasks.add(timeout)
             try:
-                work = asyncio.create_task(operation())
-                heartbeat = asyncio.create_task(self._renew_lease(scope_id))
                 done, _ = await asyncio.wait(
-                    {work, heartbeat},
+                    tasks,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if heartbeat in done:
-                    work.cancel()
-                    await asyncio.gather(work, return_exceptions=True)
                     await heartbeat
                     raise AssertionError("Dream lease heartbeat stopped unexpectedly")
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
-                return await work
+                if work in done:
+                    return await work
+                assert timeout_seconds is not None
+                raise DreamCycleTimeoutError(
+                    f"Dream Cycle exceeded its {timeout_seconds:g}-second scope timeout"
+                )
             finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
                 await self._store.release_memory_dream_lease(
                     scope_id,
                     owner=self._lease_owner,

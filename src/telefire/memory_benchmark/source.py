@@ -64,8 +64,12 @@ class SourceCorpus:
             raise ValueError("Unsupported benchmark source schema")
         documents = []
         for supplied in value.get("documents", []):
-            events = tuple(EpisodeEvent(**event) for event in supplied.pop("events"))
-            documents.append(SourceDocument(events=events, **supplied))
+            document = dict(supplied)
+            supplied_events = document.pop("events", None)
+            if not isinstance(supplied_events, list):
+                raise ValueError("Benchmark source document has invalid events")
+            events = tuple(EpisodeEvent(**event) for event in supplied_events)
+            documents.append(SourceDocument(events=events, **document))
         return cls(
             bank_id=value["bank_id"],
             bank_name=value["bank_name"],

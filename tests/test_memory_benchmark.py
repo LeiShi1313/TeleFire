@@ -5,8 +5,14 @@ import json
 import sqlite3
 
 from telefire.memory_benchmark.backends import (
+    MemoryRecord,
     parse_tencent_search,
     read_tencent_memories,
+)
+from telefire.memory_benchmark.evaluation import (
+    parse_json_object,
+    sample_memory_records,
+    validate_recall_case,
 )
 from telefire.memory_benchmark.source import (
     SourceCorpus,
@@ -113,9 +119,156 @@ def test_tencent_search_and_store_are_normalized_to_common_records(tmp_path):
             "2026-07-15T09:00:00Z",
         ),
     )
+    connection.execute(
+        """
+        CREATE TABLE l0_conversations (
+            record_id TEXT PRIMARY KEY, message_text TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO l0_conversations VALUES (?, ?)",
+        (
+            "source-message-1",
+            "[Source document: telegram:thread:1:11]\n"
+            "[2026-07-15T08:30:00Z] [Telegram actor: Alice | telegram:user:7] "
+            "下周二改为线上会议",
+        ),
+    )
     connection.commit()
     connection.close()
 
-    stored = read_tencent_memories(database)
-    assert stored[0].document_id == "telegram:thread:1:11"
+    records_directory = tmp_path / "records"
+    records_directory.mkdir()
+    (records_directory / "2026-07-15.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "memory-1",
+                "content": "Alice 将发布时间改到了周二。",
+                "source_message_ids": ["source-message-1"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    stored = read_tencent_memories(database, records_directory=records_directory)
+    assert stored[0].source_document_ids == ("telegram:thread:1:11",)
     assert stored[0].scene_name == "发布计划"
+
+
+def test_source_corpus_loading_does_not_mutate_payload():
+    payload = {
+        "schema": "telefire.memory-benchmark.source.v1",
+        "bank_id": "telegram:chat:1",
+        "bank_name": "Test Chat",
+        "exported_at": "2026-07-15T09:00:00+00:00",
+        "documents": [
+            {
+                "document_id": "telegram:thread:1:11",
+                "content": "{}",
+                "context": "test",
+                "timestamp": "2026-07-15T08:30:00Z",
+                "content_hash": "hash",
+                "events": [
+                    {
+                        "source_id": "telegram:message:1:11",
+                        "actor_id": "telegram:user:7",
+                        "actor_name": "Alice",
+                        "text": "下周二改为线上会议",
+                        "occurred_at": "2026-07-15T08:30:00Z",
+                        "mentioned_at": "2026-07-15T08:30:00Z",
+                        "reply_to_source_id": None,
+                    }
+                ],
+            }
+        ],
+    }
+
+    first = SourceCorpus.from_dict(payload)
+    second = SourceCorpus.from_dict(payload)
+
+    assert first == second
+    assert payload["documents"][0]["events"][0]["actor_name"] == "Alice"
+
+
+def test_recall_case_requires_verbatim_source_evidence():
+    document = parse_source_document(
+        {
+            "id": "telegram:thread:1:11",
+            "original_text": json.dumps(
+                {
+                    "schema": "telefire.memory.episode.v1",
+                    "events": [
+                        {
+                            "source_id": "telegram:message:1:11",
+                            "actor": {
+                                "id": "telegram:user:7",
+                                "display_name": "Alice",
+                            },
+                            "text": "下周二改为线上会议",
+                            "occurred_at": "2026-07-15T08:30:00Z",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            "retain_params": {},
+            "document_metadata": {},
+        }
+    )
+
+    valid = validate_recall_case(
+        {
+            "category": "temporal",
+            "question": "Alice 把会议改到了什么时候？",
+            "answer": "下周二。",
+            "evidence": [
+                {
+                    "document_id": "telegram:thread:1:11",
+                    "quote": "下周二改为线上会议",
+                }
+            ],
+        },
+        {document.document_id: document},
+    )
+    invalid = validate_recall_case(
+        {
+            "category": "temporal",
+            "question": "Alice 把会议改到了什么时候？",
+            "answer": "下周三。",
+            "evidence": [
+                {
+                    "document_id": "telegram:thread:1:11",
+                    "quote": "下周三改为线上会议",
+                }
+            ],
+        },
+        {document.document_id: document},
+    )
+
+    assert valid is not None
+    assert valid.evidence[0].quote == "下周二改为线上会议"
+    assert invalid is None
+
+
+def test_json_parser_and_memory_sampling_are_deterministic():
+    assert parse_json_object('```json\n{"score": 4}\n```') == {"score": 4}
+    records = tuple(
+        MemoryRecord(
+            backend="test",
+            memory_id=f"memory-{index}",
+            text=str(index),
+            memory_type="world" if index % 2 else "observation",
+        )
+        for index in range(10)
+    )
+
+    first = sample_memory_records(records, limit=5)
+    second = sample_memory_records(tuple(reversed(records)), limit=5)
+
+    assert [record.memory_id for record in first] == [
+        record.memory_id for record in second
+    ]
+    assert {record.memory_type for record in first} == {"world", "observation"}

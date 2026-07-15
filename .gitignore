@@ -140,6 +140,7 @@ dmypy.json
 
 # Local runtime state
 .telefire/
+.benchmark-data/
 *.db
 *.db-journal
 *.db-shm

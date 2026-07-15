@@ -155,7 +155,7 @@ code {{ overflow-wrap:anywhere; }}
   <div class="table-wrap"><table>
     <thead><tr><th>Backend</th><th>Input episodes</th><th>Wall time</th><th>Episodes / minute</th><th>Notes</th></tr></thead>
     <tbody>
-      {_ingest_row('Hindsight', hindsight_ingest.get('documents', 0), hindsight_ingest.get('elapsed_seconds', 0), 'Synchronous retain, batch size 4')}
+      {_ingest_row('Hindsight', hindsight_ingest.get('documents', 0), hindsight_ingest.get('elapsed_seconds', 0), f"Synchronous retain, batch size {hindsight_ingest.get('batch_size', 'unknown')}")}
       {_ingest_row('Tencent', _tencent_rounds(tencent_seed), tencent_seed.get('elapsed_seconds_client', 0), 'One round per source episode; L1 every 5 rounds')}
     </tbody>
   </table></div>

@@ -113,6 +113,7 @@ async def ingest_hindsight(
         "backend": "hindsight-fresh",
         "elapsed_seconds": perf_counter() - started,
         "documents": len(corpus.documents),
+        "batch_size": batch_size,
         "operations": len(operations),
         "stats": stats,
     }

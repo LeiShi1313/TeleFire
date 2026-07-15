@@ -56,9 +56,12 @@ async def ingest_hindsight(
     bank_name: str,
     corpus: SourceCorpus,
     *,
-    batch_size: int = 4,
+    batch_size: int = 1,
+    concurrency: int = 4,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
+    if batch_size < 1 or concurrency < 1:
+        raise ValueError("batch_size and concurrency must be positive")
     timeout = aiohttp.ClientTimeout(total=900)
     encoded_bank = quote(bank_id, safe="")
     started = perf_counter()
@@ -70,8 +73,13 @@ async def ingest_hindsight(
             f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}",
             json={"name": bank_name},
         )
-        for index in range(0, len(corpus.documents), batch_size):
-            documents = corpus.documents[index : index + batch_size]
+        batches = [
+            corpus.documents[index : index + batch_size]
+            for index in range(0, len(corpus.documents), batch_size)
+        ]
+
+        async def retain_batch(index: int) -> dict[str, Any]:
+            documents = batches[index]
             payload = await _json_request(
                 session,
                 "POST",
@@ -103,10 +111,19 @@ async def ingest_hindsight(
                 },
             )
             if payload.get("success") is not True:
-                raise RuntimeError(f"Hindsight rejected batch at document {index}")
-            operations.append(payload.get("operation_id"))
+                raise RuntimeError(f"Hindsight rejected batch {index}")
+            return payload
+
+        completed_documents = 0
+        for start in range(0, len(batches), concurrency):
+            wave = batches[start : start + concurrency]
+            payloads = await asyncio.gather(
+                *(retain_batch(index) for index in range(start, start + len(wave)))
+            )
+            operations.extend(payload.get("operation_id") for payload in payloads)
+            completed_documents += sum(len(documents) for documents in wave)
             if progress is not None:
-                progress(min(index + len(documents), len(corpus.documents)), len(corpus.documents))
+                progress(completed_documents, len(corpus.documents))
 
         stats = await wait_for_hindsight_idle(session, base_url, bank_id)
     return {
@@ -114,6 +131,7 @@ async def ingest_hindsight(
         "elapsed_seconds": perf_counter() - started,
         "documents": len(corpus.documents),
         "batch_size": batch_size,
+        "concurrency": concurrency,
         "operations": len(operations),
         "stats": stats,
     }

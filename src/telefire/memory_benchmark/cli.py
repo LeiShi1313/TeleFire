@@ -42,7 +42,8 @@ def main() -> None:
     hindsight.add_argument("--bank", required=True)
     hindsight.add_argument("--name", required=True)
     hindsight.add_argument("--output", type=Path, required=True)
-    hindsight.add_argument("--batch-size", type=int, default=4)
+    hindsight.add_argument("--batch-size", type=int, default=1)
+    hindsight.add_argument("--concurrency", type=int, default=4)
 
     tencent = subparsers.add_parser("seed-tencent")
     tencent.add_argument("--source", type=Path, required=True)
@@ -88,6 +89,7 @@ async def _dispatch(args: argparse.Namespace) -> None:
             args.name,
             corpus,
             batch_size=args.batch_size,
+            concurrency=args.concurrency,
             progress=lambda completed, total: print(
                 f"hindsight documents {completed}/{total}", flush=True
             ),

@@ -9,14 +9,16 @@ from telefire.ai import (
     AIConversationHandler,
     AIResponder,
     AISettings,
-    AITrigger,
     AgentEvent,
     AgentRunRequest,
-    MemoryBackfillRequest,
     PromptBuilder,
-    parse_ai_trigger,
-    parse_memory_backfill,
-    parse_memory_revision,
+)
+from telefire.chat.commands import (
+    AIAskCommand,
+    InvalidCommand,
+    MemoryBackfillCommand,
+    MemoryRememberCommand,
+    parse_chat_command,
 )
 from telefire.plugins.base import command_registry
 from telefire.telegram.ai_transport import (
@@ -172,37 +174,46 @@ def make_request(prompt: str) -> AgentRunRequest:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/ai hello", AITrigger(prompt="hello")),
-        ("/ai\nhello", AITrigger(prompt="hello")),
-        ("/ai", AITrigger(prompt="")),
-        ("/ai10 hello", AITrigger(prompt="hello", recent_messages=10)),
+        ("/ai hello", AIAskCommand(prompt="hello")),
+        ("/ai\nhello", AIAskCommand(prompt="hello")),
+        ("/ai", AIAskCommand(prompt="")),
+        ("/ai10 hello", AIAskCommand(prompt="hello", recent_messages=10)),
         (
             "/ai10@TelefireBot summarize this",
-            AITrigger(prompt="summarize this", recent_messages=10),
+            AIAskCommand(prompt="summarize this", recent_messages=10),
         ),
-        ("/ai0 invalid", AITrigger(prompt="invalid", recent_messages=0)),
+        ("/ai0 invalid", AIAskCommand(prompt="invalid", recent_messages=0)),
         (" /ai hello", None),
         ("/air hello", None),
         ("/ai10x hello", None),
-        ("/ai_memory hello", None),
+        (
+            "/ai_memory hello",
+            MemoryRememberCommand(instruction="hello"),
+        ),
         ("hello /ai", None),
     ],
 )
 def test_parse_ai_trigger_has_an_exact_command_boundary(text, expected):
-    assert parse_ai_trigger(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/ai_memory remember this", "remember this"),
-        ("/ai_memory\nforget that", "forget that"),
-        ("/ai_memory", ""),
+        (
+            "/ai_memory remember this",
+            MemoryRememberCommand(instruction="remember this"),
+        ),
+        (
+            "/ai_memory\nforget that",
+            MemoryRememberCommand(instruction="forget that"),
+        ),
+        ("/ai_memory", MemoryRememberCommand(instruction="")),
         ("/ai_memoryx no", None),
     ],
 )
 def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
-    assert parse_memory_revision(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -210,22 +221,37 @@ def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
     [
         (
             "/ai_memory_backfill days 7",
-            MemoryBackfillRequest(mode="days", value=7),
+            MemoryBackfillCommand(mode="days", value=7),
         ),
         (
             "/ai_memory_backfill\nmessages\t500",
-            MemoryBackfillRequest(mode="messages", value=500),
+            MemoryBackfillCommand(mode="messages", value=500),
         ),
-        ("/ai_memory_backfill days 0", None),
-        ("/ai_memory_backfill days 31", None),
-        ("/ai_memory_backfill messages 5001", None),
-        ("/ai_memory_backfill weeks 2", None),
-        ("/ai_memory_backfill days 7 extra", None),
+        (
+            "/ai_memory_backfill days 0",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill days 31",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill messages 5001",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill weeks 2",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill days 7 extra",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
         ("/ai_memory_backfillx days 7", None),
     ],
 )
 def test_parse_memory_backfill_has_bounded_exact_syntax(text, expected):
-    assert parse_memory_backfill(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatch):

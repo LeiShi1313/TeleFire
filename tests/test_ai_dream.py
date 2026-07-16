@@ -9,7 +9,6 @@ from telethon.errors import FloodWaitError
 from telefire.ai import (
     AIAnswerMarker,
     AIStateRepository,
-    MemoryBackfillRequest,
     MessageIdentity,
     PromptBuilder,
 )
@@ -29,6 +28,7 @@ from telefire.ai_dream import (
 )
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import MemoryClientError, MemoryRetainResult
+from telefire.chat.commands import MemoryBackfillCommand
 
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
@@ -1046,7 +1046,7 @@ async def test_days_backfill_uses_rolling_window_without_moving_dream_watermark(
     try:
         result = await scanner.run_backfill(
             -1001,
-            MemoryBackfillRequest(mode="days", value=7),
+            MemoryBackfillCommand(mode="days", value=7),
         )
 
         assert result.messages_seen == 1
@@ -1076,7 +1076,7 @@ async def test_message_backfill_works_while_disabled_and_is_idempotent(tmp_path)
     memory = FakeMemory()
     store, scanner = await make_scanner(tmp_path, source, memory)
     await store.set_dream_memory_enabled("telegram:chat:-1001", False)
-    request = MemoryBackfillRequest(mode="messages", value=2)
+    request = MemoryBackfillCommand(mode="messages", value=2)
     try:
         first_result = await scanner.run_backfill(-1001, request)
         second_result = await scanner.run_backfill(-1001, request)
@@ -1244,7 +1244,7 @@ async def test_days_backfill_rejects_a_window_above_its_separate_limit(tmp_path)
         with pytest.raises(DreamBackfillLimitError, match="5,000"):
             await scanner.run_backfill(
                 -1001,
-                MemoryBackfillRequest(mode="days", value=1),
+                MemoryBackfillCommand(mode="days", value=1),
             )
 
         assert memory.retain_calls == []
@@ -1871,7 +1871,7 @@ async def test_scope_timeout_includes_waiting_for_an_existing_operation(tmp_path
     backfill = asyncio.create_task(
         scanner.run_backfill(
             -1001,
-            MemoryBackfillRequest(mode="messages", value=1),
+            MemoryBackfillCommand(mode="messages", value=1),
         )
     )
     try:

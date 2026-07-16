@@ -15,8 +15,6 @@ from telethon.errors import FloodWaitError
 from telefire.ai import (
     AIStateRepository,
     HumanObservation,
-    MAX_MEMORY_BACKFILL_MESSAGES,
-    MemoryBackfillRequest,
     MemoryDreamResult,
     PromptBuilder,
     ReplyTarget,
@@ -28,6 +26,10 @@ from telefire.ai import (
     _telegram_scope_id,
 )
 from telefire.ai_attachments import attachment_metadata_only, message_has_attachment
+from telefire.chat.commands import (
+    MAX_MEMORY_BACKFILL_MESSAGES,
+    MemoryBackfillCommand,
+)
 from telefire.ai_memory import (
     MemoryClient,
     MemoryClientError,
@@ -517,7 +519,7 @@ class TelegramDreamScanner:
     async def run_backfill(
         self,
         chat_id: int,
-        request: MemoryBackfillRequest,
+        request: MemoryBackfillCommand,
     ) -> MemoryDreamResult:
         return await self._run_exclusive(
             chat_id,
@@ -649,7 +651,7 @@ class TelegramDreamScanner:
     async def _run_backfill(
         self,
         chat_id: int,
-        request: MemoryBackfillRequest,
+        request: MemoryBackfillCommand,
     ) -> MemoryDreamResult:
         until = (
             datetime.fromtimestamp(self._clock(), UTC) - self._settings.settlement_delay

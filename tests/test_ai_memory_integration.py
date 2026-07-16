@@ -17,7 +17,6 @@ from telefire.ai import (
     AgentRunRequest,
     MessageIdentity,
     MentionedUser,
-    MemoryBackfillRequest,
     MemoryDreamResult,
     MemoryDreamState,
     MemoryScopeState,
@@ -37,6 +36,7 @@ from telefire.ai_memory import (
     MemoryRevisionResult,
     RecalledMemory,
 )
+from telefire.chat.commands import MemoryBackfillCommand
 
 
 class FakeAnswer:
@@ -1276,7 +1276,7 @@ async def test_owner_can_enable_continuous_memory_for_remote_channel():
     store = FakeStore()
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
                 latest_message_id=33392,
@@ -1298,7 +1298,7 @@ async def test_owner_can_enable_continuous_memory_for_remote_channel():
     assert await handler.handle(command) is True
 
     scope_id = "telegram:chat:-1002064685671"
-    assert resolver.calls == [(-1002064685671, True)]
+    assert resolver.calls == [("-1002064685671", True)]
     assert scope_id in store.memory_continuous
     assert store.memory_continuous_cursors[scope_id] == 33392
     assert store.memory_scope_display_names[scope_id] == "Seele Leaks"
@@ -1316,7 +1316,7 @@ async def test_owner_can_disable_continuous_memory_for_remote_channel():
     store.memory_continuous.add(scope_id)
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
             )
@@ -1336,7 +1336,7 @@ async def test_owner_can_disable_continuous_memory_for_remote_channel():
 
     assert await handler.handle(command) is True
 
-    assert resolver.calls == [(-1002064685671, False)]
+    assert resolver.calls == [("-1002064685671", False)]
     assert scope_id not in store.memory_continuous
     assert command.deleted is True
     assert command.replies[0].text == (
@@ -1358,7 +1358,7 @@ async def test_owner_can_control_dream_for_remote_channel(command_text, enabled)
     store.memory_dream.add(scope_id)
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
             )
@@ -1374,42 +1374,58 @@ async def test_owner_can_control_dream_for_remote_channel(command_text, enabled)
 
     assert await handler.handle(command) is True
 
-    assert resolver.calls == [(-1002064685671, False)]
+    assert resolver.calls == [("-1002064685671", False)]
     assert (scope_id in store.memory_dream) is enabled
     assert command.deleted is True
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("command_text", "expected"),
-    [
-        (
-            "/ai_memory_enable not-an-id",
-            "Usage: /ai_memory_enable [numeric group/channel ID]",
-        ),
-        (
-            "/ai_dream_enable -1001 extra",
-            "Usage: /ai_dream_enable [numeric group/channel ID]",
-        ),
-    ],
-)
-async def test_remote_memory_commands_reject_invalid_target_syntax(
-    command_text,
-    expected,
-):
+async def test_remote_memory_commands_reject_extra_arguments():
     resolver = FakeMemoryScopeResolver()
     handler = make_handler(
         FakeGateway(["unused"]),
         FakeMemory(),
         memory_scope_resolver=resolver,
     )
-    command = FakeMessage(command_text, sender_id=10)
+    command = FakeMessage("/ai_dream_enable -1001 extra", sender_id=10)
 
     assert await handler.handle(command) is True
 
     assert resolver.calls == []
     assert command.deleted is False
-    assert command.replies[0].text == expected
+    assert command.replies[0].text == (
+        "Usage: /ai_dream_enable [chat target]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_memory_command_passes_opaque_target_to_adapter():
+    resolver = FakeMemoryScopeResolver(
+        {
+            "seele-leaks": MemoryScopeTarget(
+                chat_id=-1002064685671,
+                display_name="Seele Leaks",
+                latest_message_id=33392,
+            )
+        }
+    )
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        memory_scope_resolver=resolver,
+    )
+    command = FakeMessage(
+        "/ai_memory_enable seele-leaks",
+        sender_id=10,
+        chat_id=10,
+    )
+
+    assert await handler.handle(command) is True
+
+    assert resolver.calls == [("seele-leaks", True)]
+    assert command.replies[0].text.startswith(
+        "Continuous memory enabled for Seele Leaks"
+    )
 
 
 @pytest.mark.asyncio
@@ -1430,8 +1446,8 @@ async def test_remote_memory_command_reports_inaccessible_target():
 
     assert command.deleted is False
     assert command.replies[0].text == (
-        "Unable to access that Telegram group/channel. "
-        "Check the numeric chat ID and this account's access."
+        "Unable to access that chat target. "
+        "Check its identifier and this account's access."
     )
 
 
@@ -1862,12 +1878,12 @@ async def test_failed_manual_dream_deletes_command_but_keeps_error_visible():
     [
         (
             "/ai_memory_backfill days 7",
-            MemoryBackfillRequest(mode="days", value=7),
+            MemoryBackfillCommand(mode="days", value=7),
             "Backfilling the last 7 days...",
         ),
         (
             "/ai_memory_backfill messages 500",
-            MemoryBackfillRequest(mode="messages", value=500),
+            MemoryBackfillCommand(mode="messages", value=500),
             "Backfilling the latest 500 messages...",
         ),
     ],

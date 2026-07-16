@@ -23,6 +23,10 @@ class AICancelCommand:
 class AccessCommand:
     allowed: bool
 
+    @property
+    def name(self) -> str:
+        return "/ai_allow" if self.allowed else "/ai_deny"
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryRememberCommand:
@@ -34,12 +38,27 @@ class MemoryBackfillCommand:
     mode: Literal["days", "messages"]
     value: int
 
+    def __post_init__(self) -> None:
+        maximum = (
+            MAX_MEMORY_BACKFILL_DAYS
+            if self.mode == "days"
+            else MAX_MEMORY_BACKFILL_MESSAGES
+        )
+        if self.mode not in {"days", "messages"} or not 1 <= self.value <= maximum:
+            raise ValueError("Memory backfill request is outside supported bounds")
+
 
 @dataclass(frozen=True, slots=True)
 class MemoryModeCommand:
     mode: Literal["continuous", "dream"]
     enabled: bool
     target: str | None = None
+
+    @property
+    def name(self) -> str:
+        prefix = "/ai_memory" if self.mode == "continuous" else "/ai_dream"
+        suffix = "enable" if self.enabled else "disable"
+        return f"{prefix}_{suffix}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,14 +103,19 @@ def parse_chat_command(text: str | None) -> ChatCommand | None:
     if ai is not None:
         return ai
 
-    if text == "/ai_cancel":
+    memory_revision = _parse_memory_revision(text)
+    if memory_revision is not None:
+        return memory_revision
+
+    control = text.strip()
+    if control == "/ai_cancel":
         return AICancelCommand()
-    if text == "/ai_allow":
+    if control == "/ai_allow":
         return AccessCommand(allowed=True)
-    if text == "/ai_deny":
+    if control == "/ai_deny":
         return AccessCommand(allowed=False)
 
-    memory = _parse_memory(text)
+    memory = _parse_memory_control(control)
     if memory is not None:
         return memory
     return None
@@ -124,14 +148,17 @@ def _parse_ai(text: str) -> AIAskCommand | None:
     )
 
 
-def _parse_memory(text: str) -> ChatCommand | None:
+def _parse_memory_revision(text: str) -> MemoryRememberCommand | None:
     if text == "/ai_memory":
         return MemoryRememberCommand(instruction="")
     if text.startswith(("/ai_memory ", "/ai_memory\n", "/ai_memory\t")):
         return MemoryRememberCommand(
             instruction=text[len("/ai_memory") :].strip()
         )
+    return None
 
+
+def _parse_memory_control(text: str) -> ChatCommand | None:
     parts = text.split()
     if not parts:
         return None

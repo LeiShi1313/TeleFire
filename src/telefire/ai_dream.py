@@ -523,8 +523,11 @@ class TelegramDreamScanner:
     async def _run_scope(self, chat_id: int) -> MemoryDreamResult:
         deadline = self._monotonic() + self._settings.cycle_budget_seconds
         scope_id = _telegram_scope_id(chat_id)
-        if not await self._store.is_memory_enabled(scope_id):
-            raise ValueError("Automatic memory is disabled for this chat")
+        scope = await self._store.get_memory_scope_state(scope_id)
+        if scope.continuous_enabled:
+            raise ValueError("Continuous memory overrides Dream for this chat")
+        if not scope.dream_enabled:
+            raise ValueError("Dream is disabled for this chat")
         attempted_at = self._clock()
         await self._store.record_memory_dream_attempt(scope_id, attempted_at)
         state = await self._store.get_memory_dream_state(scope_id)
@@ -1148,7 +1151,7 @@ class DreamScheduler:
         self._task = None
 
     async def run_once(self) -> DreamScheduleResult:
-        scopes = await self._store.list_memory_enabled_scopes()
+        scopes = await self._store.list_memory_dream_scopes()
         semaphore = asyncio.Semaphore(self._settings.concurrency)
         succeeded = 0
         failed = 0

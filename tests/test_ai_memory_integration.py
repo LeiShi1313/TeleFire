@@ -20,6 +20,7 @@ from telefire.ai import (
     MemoryBackfillRequest,
     MemoryDreamResult,
     MemoryDreamState,
+    MemoryScopeState,
     PromptBuilder,
     TelegramMessageIdentityResolver,
     TelegramMessageMentionResolver,
@@ -139,7 +140,9 @@ class FakeStore:
         self.markers = {}
         self.last_request = {}
         self.memory_documents = {}
-        self.memory_enabled = set()
+        self.memory_continuous = set()
+        self.memory_dream = set()
+        self.memory_continuous_cursors = {}
         self.memory_excluded = set()
         self.memory_dream_state = {}
         self.memory_labels = {}
@@ -216,14 +219,37 @@ class FakeStore:
             "actors": dict(actor_labels),
         }
 
-    async def is_memory_enabled(self, scope_id):
-        return scope_id in self.memory_enabled
+    async def get_memory_scope_state(self, scope_id):
+        return MemoryScopeState(
+            scope_id=scope_id,
+            continuous_enabled=scope_id in self.memory_continuous,
+            dream_enabled=scope_id in self.memory_dream,
+            continuous_cursor_message_id=self.memory_continuous_cursors.get(scope_id),
+        )
 
-    async def set_memory_enabled(self, scope_id, enabled, display_name=None):
+    async def set_continuous_memory_enabled(
+        self,
+        scope_id,
+        enabled,
+        display_name=None,
+        cursor_message_id=None,
+    ):
         if enabled:
-            self.memory_enabled.add(scope_id)
+            self.memory_continuous.add(scope_id)
+            self.memory_continuous_cursors.setdefault(scope_id, cursor_message_id)
         else:
-            self.memory_enabled.discard(scope_id)
+            self.memory_continuous.discard(scope_id)
+
+    async def set_dream_memory_enabled(
+        self,
+        scope_id,
+        enabled,
+        display_name=None,
+    ):
+        if enabled:
+            self.memory_dream.add(scope_id)
+        else:
+            self.memory_dream.discard(scope_id)
 
     async def mark_memory_excluded_message(self, chat_id, message_id, kind):
         self.memory_excluded.add((chat_id, message_id, kind))
@@ -660,7 +686,7 @@ async def test_ai_request_delegates_scope_and_identity_anchors_to_agent():
         ("telegram:user:10", "User 10"),
         ("telegram:user:20", "User 20"),
     ]
-    assert memory.retain_calls == []
+    assert len(memory.retain_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -701,7 +727,6 @@ async def test_recent_only_context_is_not_automatically_retained():
             return (recent,)
 
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory()
     trigger = FakeMessage("/ai1 what does Alice prefer?", sender_id=10)
     handler = make_handler(
@@ -740,7 +765,6 @@ async def test_ai_request_bounds_identity_anchors_for_agent_contract():
 @pytest.mark.asyncio
 async def test_out_of_chain_exact_mention_enters_agent_anchors_and_episode_entities():
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory()
     trigger = FakeMessage("/ai what does @alice prefer?", sender_id=10)
     trigger.entities = (SimpleNamespace(user_id=40),)
@@ -1120,7 +1144,7 @@ async def test_telegram_handler_retains_through_hindsight_and_delegates_recall()
         assert await handler.handle(ask) is True
 
         assert received["profiles"] == [{"name": "Engineering Group"}]
-        assert len(received["retain"]) == 1
+        assert len(received["retain"]) == 2
         retained = received["retain"][0]["items"][0]
         assert retained["document_id"] == f"telegram:thread:-1001:{source.id}"
         assert retained["entities"] == [{"text": "telegram:user:20", "type": "PERSON"}]
@@ -1134,7 +1158,7 @@ async def test_telegram_handler_retains_through_hindsight_and_delegates_recall()
 
 
 @pytest.mark.asyncio
-async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabled():
+async def test_owner_controls_continuous_and_dream_memory_independently():
     store = FakeStore()
     memory = FakeMemory(recall_result=MemoryRecall("telegram:chat:-1001", ()))
     gateway = FakeGateway(["answer"])
@@ -1148,16 +1172,27 @@ async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabl
     enable = FakeMessage("/ai_memory_enable", sender_id=10)
     assert await handler.handle(enable) is True
     assert enable.deleted is True
-    assert enable.replies[0].text == "Automatic memory enabled for this chat."
+    assert enable.replies[0].text == (
+        "Continuous memory enabled for this chat. New messages will be remembered."
+    )
 
     status = FakeMessage("/ai_memory_status", sender_id=10)
     assert await handler.handle(status) is True
     assert status.deleted is True
     assert status.replies[0].text == (
-        "Automatic memory is enabled for this chat.\n"
+        "Continuous memory: enabled\n"
+        "Dream: disabled\n"
+        f"Continuous cursor: {enable.id}\n"
         "Last Dream attempt: never\n"
         "Last Dream success: never\n"
         "Last Dream error: none"
+    )
+
+    dream_enable = FakeMessage("/ai_dream_enable", sender_id=10)
+    assert await handler.handle(dream_enable) is True
+    assert dream_enable.deleted is True
+    assert dream_enable.replies[0].text == (
+        "Dream enabled for this chat, but continuous memory currently overrides it."
     )
 
     store.memory_dream_state["telegram:chat:-1001"] = MemoryDreamState(
@@ -1179,26 +1214,17 @@ async def test_owner_controls_scope_and_successful_ai_request_retains_when_enabl
         "Last Dream error: temporary backpressure"
     )
 
-    ancestor = FakeMessage("I use PostgreSQL", sender_id=20)
-    trigger = FakeMessage("/ai choose a database", sender_id=10, reply_to=ancestor)
-    assert await handler.handle(trigger) is True
-    assert len(memory.retain_calls) == 1
-    episode = memory.retain_calls[0]["episode"]
-    assert [(event.actor_id, event.text) for event in episode.events] == [
-        ("telegram:user:20", "I use PostgreSQL"),
-        ("telegram:user:10", "choose a database"),
-    ]
-
     disable = FakeMessage("/ai_memory_disable", sender_id=10)
     assert await handler.handle(disable) is True
     assert disable.deleted is True
-    assert disable.replies[0].text == "Automatic memory disabled for this chat."
+    assert disable.replies[0].text == (
+        "Continuous memory disabled for this chat. Dream remains enabled."
+    )
 
 
 @pytest.mark.asyncio
 async def test_enabled_continuation_retains_human_chain_across_ai_answer():
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory(recall_result=MemoryRecall("telegram:chat:-1001", ()))
     gateway = FakeGateway(["first answer", "follow-up answer"])
     handler = make_handler(
@@ -1239,22 +1265,43 @@ async def test_enabled_continuation_retains_human_chain_across_ai_answer():
 
 
 @pytest.mark.asyncio
-async def test_disabled_scope_still_delegates_memory_but_does_not_retain():
+async def test_ai_retains_reply_chain_without_scope_enablement():
     memory = FakeMemory()
     gateway = FakeGateway(["answer"])
     handler = make_handler(gateway, memory, store=FakeStore())
-    trigger = FakeMessage("/ai answer from memory", sender_id=10)
+    ancestor = FakeMessage("I use PostgreSQL", sender_id=20)
+    trigger = FakeMessage("/ai answer from memory", sender_id=10, reply_to=ancestor)
 
     assert await handler.handle(trigger) is True
     assert gateway.requests[0].memory is not None
     assert memory.recall_calls == []
+    assert len(memory.retain_calls) == 1
+    assert [(event.actor_id, event.text) for event in memory.retain_calls[0][
+        "episode"
+    ].events] == [
+        ("telegram:user:20", "I use PostgreSQL"),
+        ("telegram:user:10", "answer from memory"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_continuous_scope_skips_duplicate_ai_reply_chain_retain():
+    store = FakeStore()
+    store.memory_continuous.add("telegram:chat:-1001")
+    memory = FakeMemory()
+    gateway = FakeGateway(["answer"])
+    handler = make_handler(gateway, memory, store=store)
+    ancestor = FakeMessage("I use PostgreSQL", sender_id=20)
+    trigger = FakeMessage("/ai answer from memory", sender_id=10, reply_to=ancestor)
+
+    assert await handler.handle(trigger) is True
+    assert gateway.requests[0].memory is not None
     assert memory.retain_calls == []
 
 
 @pytest.mark.asyncio
 async def test_enabled_scope_does_not_retain_non_human_ai_request():
     store = FakeStore(allowed={20})
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory()
     handler = make_handler(
         FakeGateway(["answer"]),
@@ -1271,7 +1318,6 @@ async def test_enabled_scope_does_not_retain_non_human_ai_request():
 @pytest.mark.asyncio
 async def test_failed_agent_run_does_not_retain_enabled_scope():
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = FakeMemory()
     handler = make_handler(FailingGateway([]), memory, store=store)
     trigger = FakeMessage("/ai fail", sender_id=10)
@@ -1290,13 +1336,13 @@ async def test_non_owner_cannot_change_scope_memory_state():
     assert await handler.handle(command) is False
     assert command.replies == []
     assert command.deleted is False
-    assert store.memory_enabled == set()
+    assert store.memory_continuous == set()
+    assert store.memory_dream == set()
 
 
 @pytest.mark.asyncio
 async def test_post_answer_retain_does_not_hold_delegated_rate_lease():
     store = FakeStore(allowed={20})
-    store.memory_enabled.add("telegram:chat:-1001")
     memory = BlockingRetainMemory()
     gateway = FakeGateway(["first answer", "second answer"])
     handler = make_handler(gateway, memory, store=store, allowed={20})
@@ -1317,24 +1363,69 @@ async def test_post_answer_retain_does_not_hold_delegated_rate_lease():
 
 
 @pytest.mark.asyncio
-async def test_memory_scope_enablement_persists_across_repository_restart(tmp_path):
+async def test_memory_scope_modes_persist_across_repository_restart(tmp_path):
     state_path = tmp_path / "ai.db"
     first = await AIStateRepository(state_path).connect()
-    await first.set_memory_enabled(
+    await first.set_continuous_memory_enabled(
         "telegram:chat:-1001",
         True,
         "Engineering Group",
+        cursor_message_id=41,
     )
+    await first.set_dream_memory_enabled("telegram:chat:-1001", True)
     await first.close()
 
     second = await AIStateRepository(state_path).connect()
     try:
-        assert await second.is_memory_enabled("telegram:chat:-1001") is True
-        assert await second.is_memory_enabled("telegram:chat:-2002") is False
-        await second.set_memory_enabled("telegram:chat:-1001", False)
-        assert await second.is_memory_enabled("telegram:chat:-1001") is False
+        assert await second.get_memory_scope_state(
+            "telegram:chat:-1001"
+        ) == MemoryScopeState(
+            scope_id="telegram:chat:-1001",
+            continuous_enabled=True,
+            dream_enabled=True,
+            continuous_cursor_message_id=41,
+        )
+        assert await second.get_memory_scope_state(
+            "telegram:chat:-2002"
+        ) == MemoryScopeState(scope_id="telegram:chat:-2002")
     finally:
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_enabled_scope_migrates_to_dream_only(tmp_path):
+    import sqlite3
+
+    state_path = tmp_path / "ai.db"
+    connection = sqlite3.connect(state_path)
+    connection.execute(
+        """
+        CREATE TABLE ai_memory_scopes (
+            scope_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL,
+            display_name TEXT,
+            updated_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO ai_memory_scopes VALUES (?, ?, ?, ?)",
+        ("telegram:chat:-1001", 1, "Engineering Group", 1.0),
+    )
+    connection.commit()
+    connection.close()
+
+    store = await AIStateRepository(state_path).connect()
+    try:
+        assert await store.get_memory_scope_state(
+            "telegram:chat:-1001"
+        ) == MemoryScopeState(
+            scope_id="telegram:chat:-1001",
+            continuous_enabled=False,
+            dream_enabled=True,
+        )
+    finally:
+        await store.close()
 
 
 class FakeDreamRunner:
@@ -1367,7 +1458,7 @@ class FakeDreamRunner:
 
 
 @pytest.mark.asyncio
-async def test_owner_runs_manual_dream_only_for_enabled_scope():
+async def test_owner_runs_manual_dream_only_for_dream_scope():
     store = FakeStore()
     runner = FakeDreamRunner()
     handler = make_handler(
@@ -1379,11 +1470,11 @@ async def test_owner_runs_manual_dream_only_for_enabled_scope():
 
     disabled = FakeMessage("/ai_memory_dream", sender_id=10)
     assert await handler.handle(disabled) is True
-    assert disabled.replies[0].text == "Automatic memory is disabled for this chat."
+    assert disabled.replies[0].text == "Dream is disabled for this chat."
     assert disabled.deleted is True
     assert runner.calls == []
 
-    store.memory_enabled.add("telegram:chat:-1001")
+    store.memory_dream.add("telegram:chat:-1001")
     enabled = FakeMessage("/ai_memory_dream", sender_id=10)
     assert await handler.handle(enabled) is True
     assert enabled.replies[0].text == (
@@ -1396,7 +1487,7 @@ async def test_owner_runs_manual_dream_only_for_enabled_scope():
 @pytest.mark.asyncio
 async def test_failed_manual_dream_deletes_command_but_keeps_error_visible():
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
+    store.memory_dream.add("telegram:chat:-1001")
     runner = FakeDreamRunner(error=ConnectionError("memory unavailable"))
     handler = make_handler(
         FakeGateway(["unused"]),
@@ -1507,7 +1598,7 @@ async def test_memory_status_command_is_deleted_after_configured_delay():
 
     assert await handler.handle(command) is True
     assert command.deleted is False
-    assert command.replies[0].text.startswith("Automatic memory is disabled")
+    assert command.replies[0].text.startswith("Continuous memory: disabled")
 
     await asyncio.sleep(0.02)
 
@@ -1534,7 +1625,7 @@ async def test_memory_dream_command_deletes_while_scan_is_still_running():
             )
 
     store = FakeStore()
-    store.memory_enabled.add("telegram:chat:-1001")
+    store.memory_dream.add("telegram:chat:-1001")
     runner = BlockingDreamRunner()
     handler = make_handler(
         FakeGateway(["unused"]),

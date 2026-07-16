@@ -465,9 +465,20 @@ class ConversationStore(Protocol):
         actor_labels: dict[str, str],
     ) -> None: ...
 
-    async def is_memory_enabled(self, scope_id: str) -> bool: ...
+    async def get_memory_scope_state(
+        self,
+        scope_id: str,
+    ) -> MemoryScopeState: ...
 
-    async def set_memory_enabled(
+    async def set_continuous_memory_enabled(
+        self,
+        scope_id: str,
+        enabled: bool,
+        display_name: str | None = None,
+        cursor_message_id: int | None = None,
+    ) -> None: ...
+
+    async def set_dream_memory_enabled(
         self,
         scope_id: str,
         enabled: bool,
@@ -498,6 +509,17 @@ class MemoryDreamState:
     last_error: str | None = None
     lease_owner: str | None = None
     lease_expires_at: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryScopeState:
+    scope_id: str
+    continuous_enabled: bool = False
+    dream_enabled: bool = False
+    continuous_cursor_message_id: int | None = None
+    continuous_last_attempt_at: float | None = None
+    continuous_last_success_at: float | None = None
+    continuous_last_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1456,16 +1478,7 @@ class AIStateRepository:
                 "ALTER TABLE ai_memory_documents "
                 "ADD COLUMN event_versions TEXT NOT NULL DEFAULT '[]'"
             )
-        await self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_memory_scopes (
-                scope_id TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL,
-                display_name TEXT,
-                updated_at REAL NOT NULL
-            )
-            """
-        )
+        await self._ensure_memory_scope_schema()
         await self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_memory_dream_state (
@@ -1506,6 +1519,58 @@ class AIStateRepository:
         if self._connection is not None:
             await self._connection.close()
             self._connection = None
+
+    async def _ensure_memory_scope_schema(self) -> None:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'ai_memory_scopes'"
+        )
+        exists = await cursor.fetchone() is not None
+        if not exists:
+            await self._create_memory_scope_table()
+            return
+        columns = {
+            row["name"]
+            async for row in await connection.execute(
+                "PRAGMA table_info(ai_memory_scopes)"
+            )
+        }
+        if "enabled" not in columns:
+            return
+        await connection.execute(
+            "ALTER TABLE ai_memory_scopes RENAME TO ai_memory_scopes_legacy"
+        )
+        await self._create_memory_scope_table()
+        await connection.execute(
+            """
+            INSERT INTO ai_memory_scopes (
+                scope_id, continuous_enabled, dream_enabled, display_name,
+                updated_at
+            )
+            SELECT scope_id, 0, enabled, display_name, updated_at
+            FROM ai_memory_scopes_legacy
+            """
+        )
+        await connection.execute("DROP TABLE ai_memory_scopes_legacy")
+
+    async def _create_memory_scope_table(self) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            CREATE TABLE ai_memory_scopes (
+                scope_id TEXT PRIMARY KEY,
+                continuous_enabled INTEGER NOT NULL DEFAULT 0,
+                dream_enabled INTEGER NOT NULL DEFAULT 0,
+                display_name TEXT,
+                continuous_cursor_message_id INTEGER,
+                continuous_last_attempt_at REAL,
+                continuous_last_success_at REAL,
+                continuous_last_error TEXT,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
 
     async def get_answer(
         self, chat_id: int, answer_message_id: int
@@ -1790,14 +1855,24 @@ class AIStateRepository:
         row = await cursor.fetchone()
         return str(row["document_id"]) if row else None
 
-    async def is_memory_enabled(self, scope_id: str) -> bool:
+    async def get_memory_scope_state(self, scope_id: str) -> MemoryScopeState:
         connection = self._require_connection()
         cursor = await connection.execute(
-            "SELECT enabled FROM ai_memory_scopes WHERE scope_id = ?",
+            "SELECT * FROM ai_memory_scopes WHERE scope_id = ?",
             (scope_id,),
         )
         row = await cursor.fetchone()
-        return bool(row["enabled"]) if row else False
+        if row is None:
+            return MemoryScopeState(scope_id=scope_id)
+        return MemoryScopeState(
+            scope_id=scope_id,
+            continuous_enabled=bool(row["continuous_enabled"]),
+            dream_enabled=bool(row["dream_enabled"]),
+            continuous_cursor_message_id=row["continuous_cursor_message_id"],
+            continuous_last_attempt_at=row["continuous_last_attempt_at"],
+            continuous_last_success_at=row["continuous_last_success_at"],
+            continuous_last_error=row["continuous_last_error"],
+        )
 
     async def record_memory_labels(
         self,
@@ -1836,7 +1911,42 @@ class AIStateRepository:
         )
         await connection.commit()
 
-    async def set_memory_enabled(
+    async def set_continuous_memory_enabled(
+        self,
+        scope_id: str,
+        enabled: bool,
+        display_name: str | None = None,
+        cursor_message_id: int | None = None,
+    ) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            INSERT INTO ai_memory_scopes (
+                scope_id, continuous_enabled, dream_enabled, display_name,
+                continuous_cursor_message_id, updated_at
+            ) VALUES (?, ?, 0, ?, ?, ?)
+            ON CONFLICT(scope_id) DO UPDATE SET
+                continuous_cursor_message_id = CASE
+                    WHEN ai_memory_scopes.continuous_enabled = 0
+                         AND excluded.continuous_enabled = 1
+                    THEN excluded.continuous_cursor_message_id
+                    ELSE ai_memory_scopes.continuous_cursor_message_id
+                END,
+                continuous_enabled = excluded.continuous_enabled,
+                display_name = COALESCE(excluded.display_name, display_name),
+                updated_at = excluded.updated_at
+            """,
+            (
+                scope_id,
+                int(enabled),
+                display_name,
+                cursor_message_id,
+                time.time(),
+            ),
+        )
+        await connection.commit()
+
+    async def set_dream_memory_enabled(
         self,
         scope_id: str,
         enabled: bool,
@@ -1846,10 +1956,11 @@ class AIStateRepository:
         await connection.execute(
             """
             INSERT INTO ai_memory_scopes (
-                scope_id, enabled, display_name, updated_at
-            ) VALUES (?, ?, ?, ?)
+                scope_id, continuous_enabled, dream_enabled, display_name,
+                updated_at
+            ) VALUES (?, 0, ?, ?, ?)
             ON CONFLICT(scope_id) DO UPDATE SET
-                enabled = excluded.enabled,
+                dream_enabled = excluded.dream_enabled,
                 display_name = COALESCE(excluded.display_name, display_name),
                 updated_at = excluded.updated_at
             """,
@@ -1857,10 +1968,20 @@ class AIStateRepository:
         )
         await connection.commit()
 
-    async def list_memory_enabled_scopes(self) -> tuple[str, ...]:
+    async def list_memory_dream_scopes(self) -> tuple[str, ...]:
         connection = self._require_connection()
         cursor = await connection.execute(
-            "SELECT scope_id FROM ai_memory_scopes WHERE enabled = 1 ORDER BY scope_id"
+            "SELECT scope_id FROM ai_memory_scopes "
+            "WHERE dream_enabled = 1 AND continuous_enabled = 0 "
+            "ORDER BY scope_id"
+        )
+        return tuple([str(row["scope_id"]) async for row in cursor])
+
+    async def list_continuous_memory_scopes(self) -> tuple[str, ...]:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            "SELECT scope_id FROM ai_memory_scopes "
+            "WHERE continuous_enabled = 1 ORDER BY scope_id"
         )
         return tuple([str(row["scope_id"]) async for row in cursor])
 
@@ -2211,6 +2332,8 @@ class AIConversationHandler:
             "/ai_memory_disable",
             "/ai_memory_status",
             "/ai_memory_dream",
+            "/ai_dream_enable",
+            "/ai_dream_disable",
         }:
             if message.sender_id != self._owner_id:
                 return False
@@ -2412,7 +2535,7 @@ class AIConversationHandler:
                     is_owner=is_owner,
                 )
                 rate_released = True
-                if await self._automatic_memory_enabled(message.chat_id):
+                if not await self._continuous_memory_enabled(message.chat_id):
                     current_observation = self._prompt_builder.build_observation_text(
                         authored_prompt,
                         current_attachment,
@@ -2532,41 +2655,74 @@ class AIConversationHandler:
         assert message.chat_id is not None
         scope_id = _telegram_scope_id(message.chat_id)
         if command == "/ai_memory_status":
-            enabled = await self._store.is_memory_enabled(scope_id)
+            scope = await self._store.get_memory_scope_state(scope_id)
             state = await self._store.get_memory_dream_state(scope_id)
-            status = (
-                "Automatic memory is enabled for this chat."
-                if enabled
-                else "Automatic memory is disabled for this chat."
-            )
+            dream_status = "enabled" if scope.dream_enabled else "disabled"
+            if scope.continuous_enabled and scope.dream_enabled:
+                dream_status += " (overridden by continuous memory)"
             response = "\n".join(
                 (
-                    status,
+                    "Continuous memory: "
+                    + ("enabled" if scope.continuous_enabled else "disabled"),
+                    f"Dream: {dream_status}",
+                    "Continuous cursor: "
+                    + (
+                        str(scope.continuous_cursor_message_id)
+                        if scope.continuous_cursor_message_id is not None
+                        else "not started"
+                    ),
                     f"Last Dream attempt: {_format_memory_time(state.last_attempt_at)}",
                     f"Last Dream success: {_format_memory_time(state.last_success_at)}",
                     f"Last Dream error: {state.last_error or 'none'}",
                 )
             )
-        else:
+        elif command in {"/ai_memory_enable", "/ai_memory_disable"}:
             enabled = command == "/ai_memory_enable"
             identity = await self._prompt_builder.resolve_identity(message)
-            await self._store.set_memory_enabled(
+            await self._store.set_continuous_memory_enabled(
+                scope_id,
+                enabled,
+                identity.scope_display_name,
+                cursor_message_id=message.id if enabled else None,
+            )
+            scope = await self._store.get_memory_scope_state(scope_id)
+            if enabled:
+                response = (
+                    "Continuous memory enabled for this chat. "
+                    "New messages will be remembered."
+                )
+            elif scope.dream_enabled:
+                response = "Continuous memory disabled for this chat. Dream remains enabled."
+            else:
+                response = "Continuous memory disabled for this chat."
+        else:
+            enabled = command == "/ai_dream_enable"
+            identity = await self._prompt_builder.resolve_identity(message)
+            await self._store.set_dream_memory_enabled(
                 scope_id,
                 enabled,
                 identity.scope_display_name,
             )
-            response = (
-                "Automatic memory enabled for this chat."
-                if enabled
-                else "Automatic memory disabled for this chat."
-            )
+            scope = await self._store.get_memory_scope_state(scope_id)
+            if enabled and scope.continuous_enabled:
+                response = (
+                    "Dream enabled for this chat, but continuous memory "
+                    "currently overrides it."
+                )
+            elif enabled:
+                response = "Dream enabled for this chat."
+            else:
+                response = "Dream disabled for this chat."
         await self._schedule_memory_command_delete(message, command)
         await self._reply_memory_excluded(message, response, kind="memory-control")
         return True
 
-    async def _automatic_memory_enabled(self, chat_id: int) -> bool:
+    async def _continuous_memory_enabled(self, chat_id: int) -> bool:
         try:
-            return await self._store.is_memory_enabled(_telegram_scope_id(chat_id))
+            state = await self._store.get_memory_scope_state(
+                _telegram_scope_id(chat_id)
+            )
+            return state.continuous_enabled
         except Exception as exc:
             self._log_memory_failure("scope lookup", exc)
             return False
@@ -2574,10 +2730,20 @@ class AIConversationHandler:
     async def _handle_memory_dream(self, message: ReplyTarget) -> bool:
         assert message.chat_id is not None
         await self._schedule_memory_command_delete(message, "/ai_memory_dream")
-        if not await self._automatic_memory_enabled(message.chat_id):
+        scope = await self._store.get_memory_scope_state(
+            _telegram_scope_id(message.chat_id)
+        )
+        if scope.continuous_enabled:
             await self._reply_memory_excluded(
                 message,
-                "Automatic memory is disabled for this chat.",
+                "Continuous memory is enabled; Dream is currently overridden.",
+                kind="memory-control",
+            )
+            return True
+        if not scope.dream_enabled:
+            await self._reply_memory_excluded(
+                message,
+                "Dream is disabled for this chat.",
                 kind="memory-control",
             )
             return True

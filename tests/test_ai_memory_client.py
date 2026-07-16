@@ -353,9 +353,99 @@ async def test_hindsight_revision_invalidates_only_cited_target_memory():
 
 
 @pytest.mark.asyncio
-async def test_hindsight_revision_rejects_uncited_memory_selection():
+async def test_hindsight_revision_retries_uncited_selection_once():
+    received = {"reflect_calls": 0, "patch": []}
+
     async def reflect(request):
         await request.json()
+        received["reflect_calls"] += 1
+        if received["reflect_calls"] == 1:
+            return web.json_response(
+                {
+                    "text": "invalid",
+                    "structured_output": {
+                        "invalidate_memory_ids": ["invented-id"]
+                    },
+                    "based_on": {"memories": []},
+                }
+            )
+        return web.json_response(
+            {
+                "text": "The earlier tea preference conflicts.",
+                "structured_output": {
+                    "invalidate_memory_ids": ["memory-tea"]
+                },
+                "based_on": {
+                    "memories": [
+                        {
+                            "id": "memory-tea",
+                            "text": "Prefers tea",
+                            "type": "world",
+                        }
+                    ]
+                },
+            }
+        )
+
+    async def get_memory(request):
+        return web.json_response(
+            {
+                "id": request.match_info["memory_id"],
+                "type": "world",
+                "entities": ["telegram:user:20"],
+            }
+        )
+
+    async def patch_memory(request):
+        received["patch"].append(
+            (request.match_info["memory_id"], await request.json())
+        )
+        return web.json_response(
+            {"id": request.match_info["memory_id"], "state": "invalidated"}
+        )
+
+    def configure(app):
+        app.router.add_post("/v1/default/banks/{bank_id}/reflect", reflect)
+        app.router.add_get(
+            "/v1/default/banks/{bank_id}/memories/{memory_id}", get_memory
+        )
+        app.router.add_patch(
+            "/v1/default/banks/{bank_id}/memories/{memory_id}", patch_memory
+        )
+
+    runner, url = await start_server(configure)
+    client = HindsightMemoryClient(url)
+    try:
+        result = await client.revise(
+            scope_id="telegram:chat:-1001",
+            subject_id="telegram:user:20",
+            instruction="Correct the preference to coffee",
+        )
+
+        assert result == MemoryRevisionResult(invalidated_count=1)
+        assert received["reflect_calls"] == 2
+        assert received["patch"] == [
+            (
+                "memory-tea",
+                {
+                    "state": "invalidated",
+                    "reason": "Owner revision: Correct the preference to coffee",
+                },
+            )
+        ]
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_hindsight_revision_rejects_uncited_memory_selection():
+    reflect_calls = 0
+
+    async def reflect(request):
+        nonlocal reflect_calls
+        await request.json()
+        reflect_calls += 1
         return web.json_response(
             {
                 "text": "invalid",
@@ -376,6 +466,7 @@ async def test_hindsight_revision_rejects_uncited_memory_selection():
                 subject_id="telegram:user:20",
                 instruction="Forget tea",
             )
+        assert reflect_calls == 2
     finally:
         await client.close()
         await runner.cleanup()

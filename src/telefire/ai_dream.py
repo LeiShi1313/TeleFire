@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import aiohttp
 from croniter import croniter
-from telethon.errors import FloodWaitError
 
 from telefire.ai import (
     AIStateRepository,
@@ -28,10 +27,7 @@ from telefire.chat.commands import (
     MAX_MEMORY_BACKFILL_MESSAGES,
     MemoryBackfillCommand,
 )
-from telefire.telegram.ai_identity import (
-    TELEGRAM_IDENTITY_CODEC,
-    telegram_memory_event_metadata,
-)
+from telefire.chat.identity import IdentityCodec
 from telefire.ai_memory import (
     MemoryClient,
     MemoryClientError,
@@ -65,94 +61,6 @@ class DreamMessageSource(Protocol):
         until: datetime,
         limit: int,
     ) -> tuple[ReplyTarget, ...]: ...
-
-
-class TelegramHistorySource:
-    def __init__(self, client: Any):
-        self._client = client
-
-    async def fetch_recent(
-        self,
-        trigger: ReplyTarget,
-        *,
-        limit: int,
-    ) -> tuple[ReplyTarget, ...]:
-        if trigger.chat_id is None:
-            return ()
-        kwargs: dict[str, Any] = {
-            "limit": limit,
-            "max_id": trigger.id,
-        }
-        reply_header = getattr(trigger, "reply_to", None)
-        if bool(getattr(reply_header, "forum_topic", False)):
-            topic_id = getattr(reply_header, "reply_to_top_id", None) or getattr(
-                reply_header,
-                "reply_to_msg_id",
-                None,
-            )
-            if isinstance(topic_id, int) and topic_id > 0:
-                kwargs["reply_to"] = topic_id
-        messages = [
-            message
-            async for message in self._client.iter_messages(
-                trigger.chat_id,
-                **kwargs,
-            )
-        ]
-        messages.reverse()
-        return tuple(messages)
-
-    async def fetch_window(
-        self,
-        chat_id: int,
-        *,
-        since: datetime,
-        until: datetime,
-        limit: int,
-    ) -> tuple[ReplyTarget, ...]:
-        messages: list[ReplyTarget] = []
-        async for message in self._client.iter_messages(
-            chat_id,
-            offset_date=until,
-            limit=limit,
-        ):
-            occurred_at = _message_datetime(message)
-            if occurred_at < since:
-                break
-            if occurred_at <= until:
-                messages.append(message)
-        messages.reverse()
-        return tuple(messages)
-
-    async def fetch_message(
-        self,
-        chat_id: int,
-        message_id: int,
-    ) -> ReplyTarget | None:
-        message = await self._client.get_messages(chat_id, ids=message_id)
-        if isinstance(message, list):
-            return message[0] if message else None
-        return message
-
-    async def fetch_after(
-        self,
-        chat_id: int,
-        *,
-        after_message_id: int,
-        until: datetime,
-        limit: int,
-    ) -> tuple[ReplyTarget, ...]:
-        messages: list[ReplyTarget] = []
-        async for message in self._client.iter_messages(
-            chat_id,
-            min_id=after_message_id,
-            reverse=True,
-            limit=limit,
-        ):
-            if _message_datetime(message) > until:
-                break
-            messages.append(message)
-        return tuple(messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +291,7 @@ class DreamThreadLimitError(RuntimeError):
 
 
 def _dream_session_document_id(
+    identity_codec: IdentityCodec,
     chat_id: int,
     root_message_id: int,
     started_at: datetime,
@@ -390,16 +299,25 @@ def _dream_session_document_id(
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=UTC)
     stamp = started_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"telegram:dream-session:{chat_id}:{stamp}:{root_message_id}"
+    return (
+        f"{identity_codec.source}:dream-session:"
+        f"{chat_id}:{stamp}:{root_message_id}"
+    )
 
 
-def _channel_album_document_id(chat_id: int, message: ReplyTarget) -> str | None:
-    if not bool(getattr(message, "post", False)):
-        return None
-    grouped_id = getattr(message, "grouped_id", None)
-    if isinstance(grouped_id, int):
-        return f"telegram:channel-album:{chat_id}:{grouped_id}"
-    return None
+def _dream_session_prefix(
+    identity_codec: IdentityCodec,
+    chat_id: int,
+) -> str:
+    return f"{identity_codec.source}:dream-session:{chat_id}:"
+
+
+def _message_source_prefix(
+    identity_codec: IdentityCodec,
+    chat_id: int,
+) -> str:
+    sample = identity_codec.message_source_id(chat_id, 1)
+    return f"{sample.rsplit(':', 1)[0]}:"
 
 
 def _session_accepts(
@@ -450,7 +368,7 @@ def _completed_message_prefix(
     return tuple(completed)
 
 
-class TelegramDreamScanner:
+class ChatDreamScanner:
     def __init__(
         self,
         *,
@@ -459,6 +377,11 @@ class TelegramDreamScanner:
         memory: MemoryClient,
         prompt_builder: PromptBuilder,
         settings: DreamSettings = DreamSettings(),
+        identity_codec: IdentityCodec | None = None,
+        source_retry_delay: Callable[[Exception], float | None] | None = None,
+        album_document_id: (
+            Callable[[int, ReplyTarget], str | None] | None
+        ) = None,
         clock: Any = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -469,12 +392,19 @@ class TelegramDreamScanner:
         self._memory = memory
         self._prompt_builder = prompt_builder
         self._settings = settings
+        self._identity_codec = identity_codec or prompt_builder.identity_codec
+        self._source_retry_delay = source_retry_delay
+        self._album_document_id = album_document_id
         self._clock = clock
         self._sleep = sleep
         self._monotonic = monotonic
         self._logger = logger
         self._locks: dict[int, asyncio.Lock] = {}
         self._lease_owner = uuid4().hex
+
+    @property
+    def identity_codec(self) -> IdentityCodec:
+        return self._identity_codec
 
     async def run_scope(self, chat_id: int) -> MemoryDreamResult:
         try:
@@ -487,7 +417,7 @@ class TelegramDreamScanner:
             )
         except DreamCycleTimeoutError as exc:
             await self._store.record_memory_dream_failure(
-                TELEGRAM_IDENTITY_CODEC.scope_id(chat_id),
+                self._identity_codec.scope_id(chat_id),
                 failed_at=self._clock(),
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -541,7 +471,7 @@ class TelegramDreamScanner:
     ) -> Any:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
-            scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
+            scope_id = self._identity_codec.scope_id(chat_id)
             acquired_at = self._clock()
             acquired = await self._store.acquire_memory_dream_lease(
                 scope_id,
@@ -579,7 +509,7 @@ class TelegramDreamScanner:
         self,
         chat_id: int,
     ) -> ContinuousMemoryResult:
-        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
+        scope_id = self._identity_codec.scope_id(chat_id)
         scope = await self._store.get_memory_scope_state(scope_id)
         if not scope.continuous_enabled:
             raise ValueError("Continuous memory is disabled for this chat")
@@ -603,7 +533,7 @@ class TelegramDreamScanner:
             )
 
         try:
-            messages = await self._retry_telegram(
+            messages = await self._retry_source(
                 lambda: self._source.fetch_after(
                     chat_id,
                     after_message_id=scope.continuous_cursor_message_id,
@@ -664,7 +594,7 @@ class TelegramDreamScanner:
         else:
             since = datetime.min.replace(tzinfo=UTC)
             limit = request.value
-        messages = await self._retry_telegram(
+        messages = await self._retry_source(
             lambda: self._source.fetch_window(
                 chat_id,
                 since=since,
@@ -682,7 +612,7 @@ class TelegramDreamScanner:
 
     async def _run_scope(self, chat_id: int) -> MemoryDreamResult:
         deadline = self._monotonic() + self._settings.cycle_budget_seconds
-        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
+        scope_id = self._identity_codec.scope_id(chat_id)
         scope = await self._store.get_memory_scope_state(scope_id)
         if scope.continuous_enabled:
             raise ValueError("Continuous memory overrides Dream for this chat")
@@ -721,7 +651,7 @@ class TelegramDreamScanner:
             checkpoint_scanned_at = scanned_until_at
 
         try:
-            messages = await self._retry_telegram(
+            messages = await self._retry_source(
                 lambda: self._source.fetch_window(
                     chat_id,
                     since=since,
@@ -860,8 +790,8 @@ class TelegramDreamScanner:
             if not chain:
                 continue
             channel_document_id = (
-                _channel_album_document_id(chat_id, message)
-                if len(chain) == 1
+                self._album_document_id(chat_id, message)
+                if len(chain) == 1 and self._album_document_id is not None
                 else None
             )
             grouped_id = getattr(message, "grouped_id", None)
@@ -875,9 +805,9 @@ class TelegramDreamScanner:
             for item in chain:
                 group[item.id] = item
 
-        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
+        scope_id = self._identity_codec.scope_id(chat_id)
         source_ids = tuple(
-            f"telegram:message:{chat_id}:{message_id}"
+            self._identity_codec.message_source_id(chat_id, message_id)
             for grouped in root_groups.values()
             for message_id in grouped
         )
@@ -888,11 +818,17 @@ class TelegramDreamScanner:
 
         assigned_documents: dict[int, str] = {}
         for root_id, grouped in root_groups.items():
-            root_source_id = f"telegram:message:{chat_id}:{root_id}"
+            root_source_id = self._identity_codec.message_source_id(
+                chat_id,
+                root_id,
+            )
             document_id = source_documents.get(root_source_id)
             if document_id is None:
                 for message_id in grouped:
-                    source_id = f"telegram:message:{chat_id}:{message_id}"
+                    source_id = self._identity_codec.message_source_id(
+                        chat_id,
+                        message_id,
+                    )
                     document_id = source_documents.get(source_id)
                     if document_id is not None:
                         break
@@ -926,7 +862,7 @@ class TelegramDreamScanner:
         if unassigned_root_ids:
             latest = await self._store.get_latest_memory_document_receipt(
                 scope_id,
-                f"telegram:dream-session:{chat_id}:",
+                _dream_session_prefix(self._identity_codec, chat_id),
             )
             if latest is not None:
                 open_document_id, receipt = latest
@@ -1006,6 +942,7 @@ class TelegramDreamScanner:
                 )
             else:
                 document_id = _dream_session_document_id(
+                    self._identity_codec,
                     chat_id,
                     root_id,
                     observations[0].occurred_at,
@@ -1031,7 +968,9 @@ class TelegramDreamScanner:
                 key=lambda message: (_message_datetime(message), message.id),
             )
             if (
-                document_id.startswith("telegram:thread:")
+                document_id.startswith(
+                    f"{self._identity_codec.source}:thread:"
+                )
                 and len(ordered) > self._settings.max_thread_messages
             ):
                 raise DreamThreadLimitError(
@@ -1045,7 +984,7 @@ class TelegramDreamScanner:
             if not observations:
                 continue
             episode = _chat_memory_episode(
-                TELEGRAM_IDENTITY_CODEC,
+                self._identity_codec,
                 chat_id,
                 observations,
                 document_id=document_id,
@@ -1082,7 +1021,7 @@ class TelegramDreamScanner:
         receipts: dict[str, MemoryDocumentReceipt],
         known: dict[int, ReplyTarget],
     ) -> None:
-        prefix = f"telegram:message:{chat_id}:"
+        prefix = _message_source_prefix(self._identity_codec, chat_id)
         previous_by_document: dict[str, tuple[int, ...]] = {}
         missing_ids: set[int] = set()
         for document_id, grouped in document_groups.items():
@@ -1101,9 +1040,13 @@ class TelegramDreamScanner:
                     previous_ids.append(message_id)
                     if message_id not in known:
                         missing_ids.add(message_id)
-            if document_id.startswith("telegram:thread:"):
+            if document_id.startswith(
+                f"{self._identity_codec.source}:thread:"
+            ):
                 limit = self._settings.max_thread_messages
-            elif document_id.startswith("telegram:dream-session:"):
+            elif document_id.startswith(
+                f"{self._identity_codec.source}:dream-session:"
+            ):
                 limit = max(
                     self._settings.max_thread_messages,
                     self._settings.session_max_events,
@@ -1124,7 +1067,7 @@ class TelegramDreamScanner:
 
         async def fetch(message_id: int) -> ReplyTarget | None:
             async with semaphore:
-                return await self._retry_telegram(
+                return await self._retry_source(
                     lambda: self._source.fetch_message(chat_id, message_id)
                 )
 
@@ -1149,7 +1092,7 @@ class TelegramDreamScanner:
         messages: tuple[ReplyTarget, ...],
     ) -> dict[int, HumanObservation]:
         message_ids = tuple(message.id for message in messages)
-        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
+        scope_id = self._identity_codec.scope_id(chat_id)
         excluded_ids, answer_ids = await asyncio.gather(
             self._store.get_memory_excluded_message_ids(scope_id, message_ids),
             self._store.get_ai_answer_message_ids(scope_id, message_ids),
@@ -1210,11 +1153,7 @@ class TelegramDreamScanner:
                 identity = await identity_for(message)
                 if not identity.is_memory_source:
                     return None
-                mentioned_users = (
-                    await self._prompt_builder.resolve_mentions(message)
-                    if getattr(message, "entities", None)
-                    else ()
-                )
+                mentioned_users = await self._prompt_builder.resolve_mentions(message)
                 return HumanObservation(
                     message_id=message.id,
                     sender_id=message.sender_id,
@@ -1224,7 +1163,7 @@ class TelegramDreamScanner:
                     identity=identity,
                     reply_to_message_id=message.reply_to_msg_id,
                     mentioned_users=mentioned_users,
-                    metadata=telegram_memory_event_metadata(message),
+                    metadata=self._prompt_builder.resolve_metadata(message),
                 )
 
         observations = await asyncio.gather(*(build(message) for message in messages))
@@ -1257,7 +1196,7 @@ class TelegramDreamScanner:
                 break
             parent = known.get(parent_id)
             if parent is None:
-                parent = await self._retry_telegram(
+                parent = await self._retry_source(
                     lambda: self._source.fetch_message(chat_id, parent_id)
                 )
                 if parent is not None:
@@ -1265,20 +1204,25 @@ class TelegramDreamScanner:
             current = parent
         return tuple(reversed(newest_first))
 
-    async def _retry_telegram(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+    async def _retry_source(self, operation: Callable[[], Awaitable[Any]]) -> Any:
         for attempt in range(1, self._settings.retry_attempts + 1):
             try:
                 return await operation()
-            except FloodWaitError as exc:
-                if attempt >= self._settings.retry_attempts:
+            except Exception as exc:
+                delay = (
+                    self._source_retry_delay(exc)
+                    if self._source_retry_delay is not None
+                    else None
+                )
+                if delay is None or attempt >= self._settings.retry_attempts:
                     raise
                 delay = min(
-                    max(0.0, float(exc.seconds)),
+                    max(0.0, delay),
                     self._settings.max_retry_delay,
                 )
                 if self._logger is not None:
                     self._logger.warning(
-                        "Dream Telegram request rate limited; retrying in %.1fs",
+                        "Dream source request backpressured; retrying in %.1fs",
                         delay,
                     )
                 await self._sleep(delay)
@@ -1315,8 +1259,9 @@ class DreamScheduler:
     def __init__(
         self,
         *,
-        scanner: TelegramDreamScanner,
+        scanner: ChatDreamScanner,
         store: AIStateRepository,
+        identity_codec: IdentityCodec,
         settings: DreamSchedulerSettings = DreamSchedulerSettings(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -1324,6 +1269,7 @@ class DreamScheduler:
     ):
         self._scanner = scanner
         self._store = store
+        self._identity_codec = identity_codec
         self._settings = settings
         self._clock = clock
         self._sleep = sleep
@@ -1349,20 +1295,20 @@ class DreamScheduler:
         self._task = None
 
     async def run_once(self) -> DreamScheduleResult:
-        scopes = await self._store.list_memory_dream_scopes()
+        scopes = tuple(
+            (scope_id, chat_id)
+            for scope_id in await self._store.list_memory_dream_scopes()
+            if isinstance(
+                chat_id := self._identity_codec.parse_scope_id(scope_id),
+                int,
+            )
+        )
         semaphore = asyncio.Semaphore(self._settings.concurrency)
         succeeded = 0
         failed = 0
         busy = 0
 
-        async def run(scope_id: str) -> str:
-            prefix = "telegram:chat:"
-            if not scope_id.startswith(prefix):
-                return "failed"
-            try:
-                chat_id = int(scope_id[len(prefix) :])
-            except ValueError:
-                return "failed"
+        async def run(scope_id: str, chat_id: int) -> str:
             async with semaphore:
                 try:
                     await self._scanner.run_scope(chat_id)
@@ -1382,8 +1328,8 @@ class DreamScheduler:
         for start in range(0, len(scopes), self._settings.scope_batch_size):
             results = await asyncio.gather(
                 *(
-                    run(scope_id)
-                    for scope_id in scopes[
+                    run(scope_id, chat_id)
+                    for scope_id, chat_id in scopes[
                         start : start + self._settings.scope_batch_size
                     ]
                 )
@@ -1434,6 +1380,7 @@ class ContinuousMemoryScheduler:
         *,
         scanner: Any,
         store: AIStateRepository,
+        identity_codec: IdentityCodec,
         settings: ContinuousMemorySchedulerSettings = (
             ContinuousMemorySchedulerSettings()
         ),
@@ -1442,6 +1389,7 @@ class ContinuousMemoryScheduler:
     ):
         self._scanner = scanner
         self._store = store
+        self._identity_codec = identity_codec
         self._settings = settings
         self._sleep = sleep
         self._logger = logger
@@ -1466,7 +1414,14 @@ class ContinuousMemoryScheduler:
         self._task = None
 
     async def run_once(self) -> ContinuousMemoryScheduleResult:
-        scopes = await self._store.list_continuous_memory_scopes()
+        scopes = tuple(
+            (scope_id, chat_id)
+            for scope_id in await self._store.list_continuous_memory_scopes()
+            if isinstance(
+                chat_id := self._identity_codec.parse_scope_id(scope_id),
+                int,
+            )
+        )
         semaphore = asyncio.Semaphore(self._settings.concurrency)
         succeeded = 0
         failed = 0
@@ -1475,14 +1430,10 @@ class ContinuousMemoryScheduler:
         messages_seen = 0
         messages_retained = 0
 
-        async def run(scope_id: str) -> tuple[str, Any | None]:
-            prefix = "telegram:chat:"
-            if not scope_id.startswith(prefix):
-                return "failed", None
-            try:
-                chat_id = int(scope_id[len(prefix) :])
-            except ValueError:
-                return "failed", None
+        async def run(
+            scope_id: str,
+            chat_id: int,
+        ) -> tuple[str, Any | None]:
             async with semaphore:
                 try:
                     result = await self._scanner.run_continuous_scope(chat_id)
@@ -1503,8 +1454,8 @@ class ContinuousMemoryScheduler:
         for start in range(0, len(scopes), self._settings.scope_batch_size):
             results = await asyncio.gather(
                 *(
-                    run(scope_id)
-                    for scope_id in scopes[
+                    run(scope_id, chat_id)
+                    for scope_id, chat_id in scopes[
                         start : start + self._settings.scope_batch_size
                     ]
                 )

@@ -8,7 +8,7 @@ from PIL import Image
 
 from telefire.ai_attachments import (
     AttachmentAnalysisRequest,
-    TelegramAttachmentDescriber,
+    ChatAttachmentDescriber,
     message_has_attachment,
 )
 
@@ -111,7 +111,7 @@ async def test_image_is_normalized_and_only_description_is_returned() -> None:
         raw,
         FakeFile(name="camera.png", mime_type="image/jpeg", size=len(raw)),
     )
-    describer = TelegramAttachmentDescriber(gateway)
+    describer = ChatAttachmentDescriber(gateway)
 
     result = await describer.describe(message)
 
@@ -135,7 +135,7 @@ async def test_plain_text_is_summarized_without_returning_raw_content() -> None:
         raw,
         FakeFile(name="notes.txt", mime_type="text/plain", size=len(raw)),
     )
-    describer = TelegramAttachmentDescriber(gateway)
+    describer = ChatAttachmentDescriber(gateway)
 
     result = await describer.describe(message)
 
@@ -159,7 +159,7 @@ async def test_pdf_text_is_extracted_in_memory_then_summarized() -> None:
             size=len(raw),
         ),
     )
-    describer = TelegramAttachmentDescriber(gateway)
+    describer = ChatAttachmentDescriber(gateway)
 
     result = await describer.describe(message)
 
@@ -183,10 +183,10 @@ async def test_unsupported_and_oversized_files_use_metadata_without_download() -
         FakeFile(
             name="large.txt",
             mime_type="text/plain",
-            size=TelegramAttachmentDescriber.MAX_FILE_BYTES + 1,
+            size=ChatAttachmentDescriber.MAX_FILE_BYTES + 1,
         ),
     )
-    describer = TelegramAttachmentDescriber(gateway)
+    describer = ChatAttachmentDescriber(gateway)
 
     unsupported_result = await describer.describe(unsupported)
     oversized_result = await describer.describe(oversized)
@@ -206,7 +206,7 @@ async def test_attachment_download_timeout_falls_back_to_metadata() -> None:
     message = BlockingDownloadMessage(
         FakeFile(name="stuck.txt", mime_type="text/plain", size=10)
     )
-    describer = TelegramAttachmentDescriber(gateway, download_timeout=0.01)
+    describer = ChatAttachmentDescriber(gateway, download_timeout=0.01)
 
     result = await asyncio.wait_for(describer.describe(message), timeout=1)
 
@@ -244,7 +244,7 @@ async def test_untrusted_metadata_cannot_add_prompt_lines() -> None:
         ),
     )
 
-    result = await TelegramAttachmentDescriber(FakeGateway()).describe(message)
+    result = await ChatAttachmentDescriber(FakeGateway()).describe(message)
 
     assert result is not None
     assert "\n" not in result.context_text

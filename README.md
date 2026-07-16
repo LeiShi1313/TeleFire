@@ -1,12 +1,13 @@
 # TeleFire
 
-TeleFire is a CLI for Telegram and Matrix automation.
+TeleFire is a CLI for Telegram, QQ/OneBot, and Matrix automation.
 
 The current codebase is `uv`-first, Python 3.14+, and built around explicit runtime layers instead of protocol logic living directly in command classes.
 
 ## Highlights
 
 - Telegram runtime on Telethon
+- QQ runtime through an authenticated OneBot 11 reverse WebSocket
 - Matrix runtime on mautrix
 - optional native Matrix E2EE with Olm/Megolm and cross-signing
 - shared command runner for one-shot and long-running commands
@@ -193,8 +194,9 @@ The local deployment is split into four independently owned Compose projects:
   no Telefire or Telegram dependency.
 - `agent/compose.yml` runs the Pi service and Agent Playground. It depends only
   on the Memory Stack HTTP API.
-- `docker-compose.yml` runs the Telegram adapter. It calls Pi and Hindsight over
-  their private Docker networks.
+- `docker-compose.yml` runs the Telegram and QQ/OneBot adapters. They call Pi
+  and Hindsight over their private Docker networks and keep separate state
+  databases.
 - `proxy/compose.yml` provides one loopback dashboard ingress across the Memory
   and Agent networks using
   [`nginx-proxy`](https://github.com/nginx-proxy/nginx-proxy) virtual hosts.
@@ -252,13 +254,28 @@ and should not be treated as an authenticated public gateway.
 
 The playground can run a plain model session with all tools disabled, or a Pi
 session with the same constrained web, code, and bank-pinned memory tools used by
-the Telegram adapter. It exposes the exact prepared request, recalled evidence,
+the chat adapters. It exposes the exact prepared request, recalled evidence,
 and transient tool snapshots in the browser without exposing provider keys or the
 Pi token. Pi's HTTP API remains a private authenticated interface, not an
 OpenAI-compatible endpoint.
 
 `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` must be set in the root `.env`. The
 userbot container receives neither model-provider nor embedding credentials.
+
+The OneBot adapter is optional. Configure a separate random
+`TELEFIRE_ONEBOT_TOKEN`, set `TELEFIRE_ONEBOT_SELF_ID` to the logged-in QQ
+account, and bind `TELEFIRE_ONEBOT_PUBLISH_HOST` only to an address reachable by
+NapCat. Add an enabled NapCat reverse-WebSocket client with:
+
+- URL `ws://<telefire-host>:<TELEFIRE_ONEBOT_PUBLISH_PORT>/onebot`
+- the same bearer token
+- array message format
+- self-message reporting enabled
+- a bounded reconnect interval and heartbeat
+
+Do not expose this listener without the token or reuse another OneBot
+integration's token. The health endpoint at `/healthz` reports both process
+health and whether NapCat is currently connected.
 
 A Telegram API login/session still needs to be initialized once:
 
@@ -270,6 +287,13 @@ Then restart the AI service:
 
 ```bash
 docker compose restart ai
+```
+
+The QQ adapter starts with the rest of the root Compose project:
+
+```bash
+docker compose --env-file .env up -d --build onebot-ai
+curl http://127.0.0.1:${TELEFIRE_ONEBOT_PUBLISH_PORT:-18867}/healthz
 ```
 
 The standalone Ollama Compose stack joins the external `ollama-embedding` network.
@@ -285,11 +309,18 @@ For a host Ollama process instead, use
 Compose maps that hostname to the Linux host gateway. In Docker,
 `http://127.0.0.1:11434` is the Hindsight container itself and must not be used.
 
-The root `telefire-runtime` volume contains `ai.db` and Telegram sessions,
-`memory-hindsight-data` contains Hindsight, and Pi's private Agent Sessions live
-in `pi-agent-data`.
+The root `telefire-runtime` volume contains the separate Telegram `ai.db`, QQ
+`onebot-ai.db`, and Telegram sessions. `memory-hindsight-data` contains
+Hindsight, and Pi's private Agent Sessions live in `pi-agent-data`.
 
 Commands and reply behavior:
+
+The command set below is shared by Telegram and QQ unless a bullet explicitly
+describes a Telegram-only workflow. QQ uses plain-text answer formatting because
+its clients do not reliably render Telegram Markdown or HTML. NapCat does not
+provide message editing, so QQ receives one temporary `Thinking...` reply and
+one final reply; TeleFire then recalls the temporary message. Intermediate Pi
+tool and text snapshots stay internal.
 
 - `/ai <question>` starts a conversation. A replied message chain is reference
   context; only text after `/ai` is the current instruction. After a successful
@@ -321,9 +352,10 @@ Commands and reply behavior:
   the chain, retain a separate owner-attributed correction Episode, and apply a
   reversible Hindsight-native Revision to the directly replied user. AI-generated
   answers and AI control commands are not retained as human evidence.
-- Forward a message to the userbot account's Saved Messages to ingest the original
-  message and its bounded ancestor reply chain without posting a command in the
-  source chat. When Telegram hides the forward source, paste the original public
+- Telegram only: forward a message to the userbot account's Saved Messages to
+  ingest the original message and its bounded ancestor reply chain without
+  posting a command in the source chat. When Telegram hides the forward source,
+  paste the original public
   or private supergroup/channel message link as the entire Saved Messages message;
   Telefire resolves the linked message with the authenticated account and ingests
   the same bounded chain. Forum message links are supported, while channel-comment
@@ -339,13 +371,14 @@ Commands and reply behavior:
   current prompt. No chat-level memory switch is required. `/ai_memory_enable`
   instead enables continuous capture of all eligible settled messages arriving
   after the command; `/ai_memory_disable` stops that background capture. Both
-  commands accept an optional numeric Telegram group/channel ID, for example
-  `/ai_memory_enable -1002064685671`, so the owner can manage another accessible
-  chat from anywhere. Remote enable starts after that target's latest message.
+  commands accept an optional numeric chat target, so the owner can manage
+  another accessible chat from anywhere. Telegram accepts its signed
+  group/channel ID, for example `/ai_memory_enable -1002064685671`; QQ accepts
+  a positive group ID. Remote enable starts after that target's latest message.
 - `/ai_dream_enable` separately enables scheduled Dream scans and
   `/ai_dream_disable` disables them. These commands accept the same optional
-  numeric group/channel ID. Continuous capture overrides Dream while both settings
-  are enabled, so the same chat is never scanned by both workers.
+  numeric chat target. Continuous capture overrides Dream while both settings are
+  enabled, so the same chat is never scanned by both workers.
   `/ai_memory_dream` runs one bounded Dream scan immediately when Dream is enabled
   and continuous capture is disabled. `/ai_memory_status` reports both modes,
   their cursor, and the latest Dream attempt, success, and failure for the current
@@ -399,17 +432,17 @@ download URLs, and temporary paths are never written to Pi sessions, AI state, o
 memory. Only bounded generated descriptions, OCR text, captions, and safe metadata
 can enter conversation context and per-user memory.
 
-AI conversation-to-Pi mappings, access state, cooldown timestamps, capture labels,
-Dream state, and ingestion receipts are stored in `~/.telefire/ai.db`. Facts,
-observations, entities, source Episodes, and relationships live only in Hindsight.
-Pi's append-only Agent Sessions are stored in its own data volume. All locations
-contain private chat-derived data.
+AI conversation-to-Pi mappings, access state, cooldown timestamps, capture
+labels, Dream state, and ingestion receipts are stored in each adapter's
+configured SQLite state path. Facts, observations, entities, source Episodes,
+and relationships live only in Hindsight. Pi's append-only Agent Sessions are
+stored in its own data volume. All locations contain private chat-derived data.
 
 Back up the three active volumes while their writers are stopped, or through a
 storage-aware snapshot mechanism:
 
 ```bash
-docker compose --env-file .env stop ai
+docker compose --env-file .env stop ai onebot-ai
 docker compose --env-file agent/.env -f agent/compose.yml stop pi-agent
 docker compose --env-file memory/.env -f memory/compose.yml stop memory-api
 docker run --rm -v telefire_telefire-runtime:/source:ro \
@@ -427,8 +460,8 @@ Restore into empty volumes while the stack is stopped, then recreate the stack a
 check all four health endpoints before enabling Dream again. Accepted Episodes,
 receipts, cursors, and expired leases are restart-safe; an interrupted retain or
 Dream batch is retried from its stable document identity rather than rolled back.
-Do not restore `ai.db` or Hindsight independently from backups taken at unrelated
-times unless duplicate delivery is acceptable.
+Do not restore an adapter state database or Hindsight independently from backups
+taken at unrelated times unless duplicate delivery is acceptable.
 
 The retired Zvec source is preserved in the offline Docker volume
 `telefire-legacy-zvec` for 30 days after cutover and is not mounted by the running
@@ -465,10 +498,11 @@ Hindsight volume cannot be masked by surviving local receipts. Stores above 100,
 legacy records fail explicitly instead of producing a partial migration.
 
 First-version limits: banks never search one another automatically; identity is not
-merged across chats or platforms; Dream scans only Telegram and only a bounded
-window; deleted Telegram messages do not retract retained evidence; raw media is not
-stored; revisions preserve source history; and no hard-delete, dashboard editing,
-high-availability database, or disaster-recovery automation is provided.
+merged across chats or platforms; Dream scans only explicitly enabled,
+adapter-owned scopes and only a bounded window; deleted chat messages do not
+retract retained evidence; raw media is not stored; revisions preserve source
+history; and no hard-delete, dashboard editing, high-availability database, or
+disaster-recovery automation is provided.
 
 The loopback Hindsight API and inspection UIs trust other processes on the local
 host. They are not authenticated public services and must remain bound to loopback

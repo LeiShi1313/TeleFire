@@ -13,6 +13,7 @@ from telefire.ai import (
     PromptBuilder,
 )
 from telefire.ai_dream import (
+    ChatDreamScanner,
     ContinuousMemoryScheduler,
     ContinuousMemorySchedulerSettings,
     ContinuousMemoryScheduleResult,
@@ -23,8 +24,6 @@ from telefire.ai_dream import (
     DreamSchedulerSettings,
     DreamSettings,
     DreamThreadLimitError,
-    TelegramDreamScanner,
-    TelegramHistorySource,
 )
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import MemoryClientError, MemoryRetainResult
@@ -32,6 +31,11 @@ from telefire.chat.commands import MemoryBackfillCommand
 from telefire.telegram.ai_identity import (
     TELEGRAM_IDENTITY_CODEC,
     telegram_memory_event_metadata,
+)
+from telefire.telegram.ai_history import (
+    TelegramHistorySource,
+    telegram_channel_album_document_id,
+    telegram_source_retry_delay,
 )
 
 
@@ -320,7 +324,10 @@ async def make_scanner(
 ):
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -431,7 +438,10 @@ async def test_dream_segments_root_groups_by_message_time(tmp_path):
     memory = FakeMemory()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -491,7 +501,10 @@ async def test_dream_keeps_an_oversized_reply_tree_atomic(tmp_path):
     memory = FakeMemory()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -549,7 +562,10 @@ async def test_dream_closes_a_continuous_session_at_size_and_span_bounds(tmp_pat
     memory = FakeMemory()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -607,7 +623,10 @@ async def test_dream_appends_to_an_open_temporal_session_after_restart(tmp_path)
         True,
         "Dream Group",
     )
-    first_scanner = TelegramDreamScanner(
+    first_scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=first_store,
         memory=memory,
@@ -627,7 +646,10 @@ async def test_dream_appends_to_an_open_temporal_session_after_restart(tmp_path)
     source.by_id[second.id] = second
     clock.value = NOW.timestamp()
     second_store = await AIStateRepository(state_path).connect()
-    second_scanner = TelegramDreamScanner(
+    second_scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=second_store,
         memory=memory,
@@ -687,7 +709,10 @@ async def test_dream_bounds_a_continuous_session_and_retains_concurrently(
     identity_resolver = CountingIdentityResolver()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -752,7 +777,10 @@ async def test_temporal_session_keeps_sibling_context_for_a_late_reply(tmp_path)
     memory = FakeMemory()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -825,7 +853,10 @@ async def test_late_reply_preserves_a_legacy_packed_document(tmp_path):
             for message in (root, sibling, first_reply)
         ),
     )
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -870,7 +901,10 @@ async def test_temporal_sessions_preserve_existing_thread_document_receipts(tmp_
             ((f"telegram:message:-1001:{message.id}", "legacy-event"),),
         )
     try:
-        scanner = TelegramDreamScanner(
+        scanner = ChatDreamScanner(
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            source_retry_delay=telegram_source_retry_delay,
+            album_document_id=telegram_channel_album_document_id,
             source=source,
             store=store,
             memory=memory,
@@ -923,7 +957,10 @@ async def test_budgeted_dream_advances_window_after_dropping_unprocessed_tail(tm
     memory = TimedMemory()
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True, "Dream Group")
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -949,7 +986,10 @@ async def test_budgeted_dream_advances_window_after_dropping_unprocessed_tail(tm
         assert state.cursor_message_id == 2_002
         assert state.scanned_until_at == NOW.timestamp()
 
-        resumed = TelegramDreamScanner(
+        resumed = ChatDreamScanner(
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            source_retry_delay=telegram_source_retry_delay,
+            album_document_id=telegram_channel_album_document_id,
             source=source,
             store=store,
             memory=memory,
@@ -1624,7 +1664,10 @@ async def test_document_receipts_survive_scanner_restart(tmp_path):
     await first_store.close()
 
     second_store = await AIStateRepository(state_path).connect()
-    second_scanner = TelegramDreamScanner(
+    second_scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=second_store,
         memory=memory,
@@ -1659,7 +1702,10 @@ async def test_dream_uses_settlement_delay_and_bounds_flood_wait_retry(tmp_path)
     delays = []
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True)
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -1703,7 +1749,10 @@ async def test_dream_retries_hindsight_backpressure_with_bounded_delay(tmp_path)
     delays = []
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_dream_memory_enabled("telegram:chat:-1001", True)
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=memory,
@@ -1822,7 +1871,10 @@ async def test_timed_out_scope_does_not_block_other_scopes_or_later_runs(tmp_pat
     for chat_id in (-1001, -1002):
         await store.set_dream_memory_enabled(f"telegram:chat:{chat_id}", True)
     source = PartiallyBlockingSource()
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=source,
         store=store,
         memory=FakeMemory(),
@@ -1836,6 +1888,7 @@ async def test_timed_out_scope_does_not_block_other_scopes_or_later_runs(tmp_pat
     scheduler = DreamScheduler(
         scanner=scanner,
         store=store,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         settings=DreamSchedulerSettings(cron=None, concurrency=2),
     )
     try:
@@ -1875,7 +1928,10 @@ async def test_scope_timeout_includes_waiting_for_an_existing_operation(tmp_path
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     for chat_id in (-1001, -1002):
         await store.set_dream_memory_enabled(f"telegram:chat:{chat_id}", True)
-    scanner = TelegramDreamScanner(
+    scanner = ChatDreamScanner(
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
+        source_retry_delay=telegram_source_retry_delay,
+        album_document_id=telegram_channel_album_document_id,
         source=BlockingBackfillSource([]),
         store=store,
         memory=FakeMemory(),
@@ -1899,6 +1955,7 @@ async def test_scope_timeout_includes_waiting_for_an_existing_operation(tmp_path
             DreamScheduler(
                 scanner=scanner,
                 store=store,
+                identity_codec=TELEGRAM_IDENTITY_CODEC,
                 settings=DreamSchedulerSettings(cron=None, concurrency=2),
             ).run_once(),
             timeout=1,
@@ -1953,6 +2010,7 @@ async def test_scheduler_scans_enabled_scopes_with_bounded_concurrency(tmp_path)
     scheduler = DreamScheduler(
         scanner=scanner,
         store=store,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         settings=DreamSchedulerSettings(
             cron=None,
             concurrency=2,
@@ -2017,6 +2075,7 @@ async def test_continuous_scheduler_runs_only_continuous_scopes_and_reports_back
     scheduler = ContinuousMemoryScheduler(
         scanner=scanner,
         store=store,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         settings=ContinuousMemorySchedulerSettings(
             poll_interval_seconds=60,
             concurrency=2,
@@ -2070,6 +2129,7 @@ async def test_continuous_scheduler_immediately_drains_backlog(tmp_path):
     scheduler = ContinuousMemoryScheduler(
         scanner=scanner,
         store=store,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         settings=ContinuousMemorySchedulerSettings(
             poll_interval_seconds=3_600,
             concurrency=1,
@@ -2102,6 +2162,7 @@ async def test_continuous_scheduler_waits_between_idle_cycles(tmp_path):
     scheduler = ContinuousMemoryScheduler(
         scanner=FakeContinuousScanner(),
         store=store,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         settings=ContinuousMemorySchedulerSettings(
             poll_interval_seconds=10,
             concurrency=1,
@@ -2170,7 +2231,10 @@ async def test_partial_failure_keeps_cursor_and_retries_only_missing_document(tm
         assert "ConnectionError" in failed_state.last_error
 
         healthy = FakeMemory()
-        resumed = TelegramDreamScanner(
+        resumed = ChatDreamScanner(
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            source_retry_delay=telegram_source_retry_delay,
+            album_document_id=telegram_channel_album_document_id,
             source=source,
             store=store,
             memory=healthy,

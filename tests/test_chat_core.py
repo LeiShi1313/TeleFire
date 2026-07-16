@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 from collections.abc import AsyncIterator
 from dataclasses import fields
+from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 
@@ -91,6 +92,9 @@ def test_identity_codec_keeps_network_identities_disjoint():
     assert qq.message_source_id(7, 9) == "qq:message:7:9"
     assert qq.thread_document_id(7, 9) == "qq:thread:7:9"
     assert qq.revision_document_id(7, 9) == "qq:revision:7:9"
+    assert telegram.parse_scope_id("telegram:chat:7") == 7
+    assert qq.parse_scope_id("qq:group:7") == 7
+    assert qq.parse_scope_id("telegram:chat:7") is None
 
 
 def test_attachment_reference_contains_metadata_but_no_binary_payload():
@@ -296,6 +300,45 @@ async def test_attachment_detection_does_not_require_telegram_file_attributes():
 
     assert handled is True
     assert transport.updates[-1] == ("final", "agent", True)
+
+
+@pytest.mark.asyncio
+async def test_recent_history_does_not_assume_transport_message_ids_are_ordered():
+    class History:
+        async def fetch_recent(self, trigger, *, limit):
+            messages = (
+                MinimalMessage(
+                    "first",
+                    message_id=2_000_000_000,
+                    chat_id=trigger.chat_id,
+                    sender_id=10,
+                ),
+                MinimalMessage(
+                    "second",
+                    message_id=3,
+                    chat_id=trigger.chat_id,
+                    sender_id=20,
+                ),
+            )
+            occurred_at = datetime(2026, 7, 16, 12, tzinfo=UTC)
+            for message in messages:
+                message.date = occurred_at
+            return messages
+
+    builder = PromptBuilder(
+        history_source=History(),
+        transport=FakeTransport(),
+    )
+    trigger = MinimalMessage(
+        "/ai2 summarize",
+        message_id=100,
+        chat_id=7,
+        sender_id=42,
+    )
+
+    context = await builder.load_chat_context(trigger, recent_messages=2)
+
+    assert [message.content for message in context.messages] == ["first", "second"]
 
 
 def test_shared_ai_module_has_no_telegram_adapter_imports():

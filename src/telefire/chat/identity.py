@@ -15,6 +15,8 @@ class IdentityCodec(Protocol):
 
     def scope_id(self, scope_id: ExternalId) -> str: ...
 
+    def parse_scope_id(self, scope_id: str) -> ExternalId | None: ...
+
     def message_source_id(
         self,
         scope_id: ExternalId,
@@ -50,6 +52,19 @@ class NamespacedIdentityCodec:
 
     def scope_id(self, scope_id: ExternalId) -> str:
         return f"{self.source}:{self.scope_kind}:{_component(scope_id)}"
+
+    def parse_scope_id(self, scope_id: str) -> ExternalId | None:
+        prefix = f"{self.source}:{self.scope_kind}:"
+        if not scope_id.startswith(prefix):
+            return None
+        component = scope_id.removeprefix(prefix)
+        if not component:
+            return None
+        try:
+            parsed = int(component)
+        except ValueError:
+            return component
+        return parsed
 
     def message_source_id(
         self,

@@ -741,6 +741,7 @@ class _ChatContextCandidate:
     message: ReplyTarget
     in_reply_path: bool = False
     in_recent_chat: bool = False
+    order_hint: int = 0
 
 
 class PromptBuilder:
@@ -850,7 +851,7 @@ class PromptBuilder:
             recent = tuple(
                 message
                 for message in supplied[-recent_messages:]
-                if message.chat_id == trigger.chat_id and message.id < trigger.id
+                if message.chat_id == trigger.chat_id and message.id != trigger.id
             )
         return await self._build_chat_context(
             reply_path,
@@ -908,7 +909,18 @@ class PromptBuilder:
         for message in reversed(recent):
             select(message, reply=False, ambient=True)
 
+        chronological_keys: list[tuple[int | None, int]] = []
+        for message in (*reversed(reply_path), *recent):
+            key = (message.chat_id, message.id)
+            if key not in chronological_keys:
+                chronological_keys.append(key)
+        for order_hint, key in enumerate(chronological_keys):
+            candidate = candidates.get(key)
+            if candidate is not None:
+                candidate.order_hint = order_hint
+
         normalized: list[ChatContextMessage] = []
+        order_hints: dict[int, int] = {}
         used_chars = 0
         attachment_count = 0
         for key in priority:
@@ -963,8 +975,14 @@ class PromptBuilder:
                         in_recent_chat=candidate.in_recent_chat,
                     )
                 )
+                order_hints[message.id] = candidate.order_hint
                 used_chars += len(rendered_content) + 1
-        normalized.sort(key=lambda item: (item.occurred_at, item.message_id))
+        normalized.sort(
+            key=lambda item: (
+                item.occurred_at,
+                order_hints[item.message_id],
+            )
+        )
         return ChatContext(
             messages=tuple(normalized),
             current_reply_to_message_id=current_reply_to_message_id,

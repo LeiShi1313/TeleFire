@@ -5,7 +5,7 @@ import base64
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,12 +14,6 @@ from uuid import uuid4
 
 import aiosqlite
 import aiohttp
-from telethon import helpers as telegram_helpers
-from telethon import utils as telegram_utils
-from telethon.errors import FloodWaitError, MessageNotModifiedError
-from telethon.extensions import html as telegram_html
-from telethon.tl import functions as telegram_functions
-from telethon.tl import types as telegram_types
 
 from telefire.ai_memory import (
     MemoryClient,
@@ -31,51 +25,23 @@ from telefire.ai_memory import (
 )
 from telefire.ai_attachments import (
     AttachmentAnalysisRequest,
-    AttachmentDescriber,
-    AttachmentDescription,
-    message_has_attachment,
 )
-
-
-TelegramResponseFormat = Literal["regular_html", "rich_markdown"]
-TELEGRAM_REGULAR_HTML_FORMAT_GUIDE = """Response format: Telegram regular-message HTML.
-- Return only the answer. Do not wrap the whole response in a code block.
-- Use only these formatting tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>preformatted block</pre>, <blockquote>quoted text</blockquote>, and <a href="https://example.com">link text</a>.
-- Use a short <b>bold heading</b> on its own line instead of Markdown headings. Use plain hyphen or numbered lines for lists.
-- Telegram regular messages have no native table entity. Render a compact table as aligned text inside <pre>; render a wide table as labeled list rows.
-- Escape literal <, >, and & as &lt;, &gt;, and &amp;. Close every tag. Do not nest formatting inside <code> or <pre>.
-- Do not emit Markdown markers such as **, __, # headings, > quotes, backticks, or pipe-table syntax."""
-TELEGRAM_RICH_MARKDOWN_FORMAT_GUIDE = """Response format: Telegram Bot API rich-message Markdown.
-- Return only the answer. Use GitHub-Flavored Markdown where possible.
-- Use **bold**, *italic*, ~~strikethrough~~, `inline code`, fenced code blocks, # headings, > blockquotes, lists, and links.
-- Native tables use this structure:
-| Header 1 | Header 2 |
-|:---------|:---------|
-| Value 1  | Value 2  |
-- Keep tables compact, close every formatting delimiter and code fence, and do not wrap the whole response in a code block."""
-
-
-def select_telegram_response_format(
-    *,
-    is_bot_account: bool,
-    rich_messages_available: bool,
-) -> TelegramResponseFormat:
-    if is_bot_account and rich_messages_available:
-        return "rich_markdown"
-    return "regular_html"
-
-
-def _telegram_system_prompt(
-    base_prompt: str,
-    response_format: TelegramResponseFormat = "regular_html",
-) -> str:
-    if response_format == "regular_html":
-        guide = TELEGRAM_REGULAR_HTML_FORMAT_GUIDE
-    elif response_format == "rich_markdown":
-        guide = TELEGRAM_RICH_MARKDOWN_FORMAT_GUIDE
-    else:
-        raise ValueError(f"Unsupported Telegram response format: {response_format}")
-    return f"{base_prompt.rstrip()}\n\n{guide}".lstrip()
+from telefire.chat.attachments import AttachmentDescriber, AttachmentDescription
+from telefire.chat.commands import (
+    AIAskCommand,
+    AICancelCommand,
+    AccessCommand,
+    InvalidCommand,
+    MemoryBackfillCommand,
+    MemoryDreamCommand,
+    MemoryListCommand,
+    MemoryModeCommand,
+    MemoryRememberCommand,
+    MemoryStatusCommand,
+    parse_chat_command,
+)
+from telefire.chat.identity import IdentityCodec, NamespacedIdentityCodec
+from telefire.chat.transport import ChatTransport, ObjectChatTransport, SentMessage
 
 
 ToolPolicy = Literal["owner", "delegated", "none"]
@@ -87,8 +53,6 @@ AgentEventType = Literal[
     "run_failed",
 ]
 MAX_AGENT_MEMORY_ANCHORS = 64
-MAX_MEMORY_BACKFILL_DAYS = 30
-MAX_MEMORY_BACKFILL_MESSAGES = 5_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,13 +236,6 @@ class PiAgentGateway:
         return self._session
 
 
-class EditableMessage(Protocol):
-    id: int
-    text: str | None
-
-    async def edit(self, text: str, **kwargs: Any) -> Any: ...
-
-
 class ReplyTarget(Protocol):
     id: int
     chat_id: int | None
@@ -286,10 +243,6 @@ class ReplyTarget(Protocol):
     sender_id: int | None
     reply_to_msg_id: int | None
     date: datetime | None
-
-    async def reply(self, text: str, **kwargs: Any) -> EditableMessage: ...
-
-    async def get_reply_message(self) -> ReplyTarget | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,7 +281,7 @@ class MessageMentionResolver(Protocol):
 class MemoryScopeTargetResolver(Protocol):
     async def resolve(
         self,
-        chat_id: int,
+        target: str,
         *,
         include_latest_message: bool = False,
     ) -> MemoryScopeTarget: ...
@@ -343,158 +296,30 @@ class MessageHistorySource(Protocol):
     ) -> tuple[ReplyTarget, ...]: ...
 
 
-class TelegramMessageIdentityResolver:
-    def __init__(self, *, logger: Any | None = None):
-        self._logger = logger
-
-    async def resolve(self, message: ReplyTarget) -> MessageIdentity:
-        sender, chat = await asyncio.gather(
-            self._load_entity(message, "get_sender"),
-            self._load_entity(message, "get_chat"),
-        )
-        is_human = (
-            isinstance(sender, telegram_types.User)
-            and not bool(getattr(sender, "bot", False))
-        )
-        is_broadcast_channel_post = (
-            isinstance(sender, telegram_types.Channel)
-            and isinstance(chat, telegram_types.Channel)
-            and bool(getattr(chat, "broadcast", False))
-            and sender.id == chat.id
-        )
-        return MessageIdentity(
-            subject_id=(
-                _telegram_subject_id(sender.id)
-                if is_human
-                else _telegram_channel_subject_id(sender.id)
-                if is_broadcast_channel_post
-                else None
-            ),
-            subject_display_name=_telegram_display_name(sender),
-            scope_display_name=_telegram_display_name(chat),
-            is_human=is_human,
-        )
-
-    async def _load_entity(self, message: ReplyTarget, method_name: str) -> Any | None:
-        method = getattr(message, method_name, None)
-        if not callable(method):
-            return None
-        try:
-            return await method()
-        except Exception as exc:
-            if self._logger is not None:
-                self._logger.debug(
-                    "Telegram identity lookup failed (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
-            return None
-
-
-class TelegramMessageMentionResolver:
-    def __init__(self, client: Any, *, logger: Any | None = None):
-        self._client = client
-        self._logger = logger
-
-    async def resolve(self, message: ReplyTarget) -> tuple[MentionedUser, ...]:
-        text = message.raw_text or ""
-        surrogate_text = telegram_helpers.add_surrogate(text)
-        resolved: dict[int, MentionedUser] = {}
-        for entity in getattr(message, "entities", None) or ():
-            candidate: Any | None = None
-            if isinstance(entity, telegram_types.MessageEntityMentionName):
-                candidate = entity.user_id
-            elif isinstance(entity, telegram_types.MessageEntityMention):
-                mention = telegram_helpers.del_surrogate(
-                    surrogate_text[entity.offset : entity.offset + entity.length]
-                )
-                if not mention.startswith("@") or len(mention) < 2:
-                    continue
-                candidate = mention
-            else:
-                continue
-            try:
-                actor = await self._client.get_entity(candidate)
-            except Exception as exc:
-                if self._logger is not None:
-                    self._logger.debug(
-                        "Telegram mention lookup failed (%s): %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-                continue
-            user_id = getattr(actor, "id", None)
-            if not isinstance(user_id, int) or user_id <= 0:
-                continue
-            resolved[user_id] = MentionedUser(
-                user_id=user_id,
-                display_name=_telegram_display_name(actor),
-            )
-        return tuple(resolved.values())
-
-
-class TelegramMemoryScopeTargetResolver:
-    def __init__(self, client: Any, *, logger: Any | None = None):
-        self._client = client
-        self._logger = logger
-
-    async def resolve(
-        self,
-        chat_id: int,
-        *,
-        include_latest_message: bool = False,
-    ) -> MemoryScopeTarget:
-        try:
-            entity = await self._client.get_entity(chat_id)
-            if not isinstance(
-                entity,
-                (telegram_types.Chat, telegram_types.Channel),
-            ):
-                raise ValueError("Telegram target is not a group or channel")
-            latest_message_id = 0
-            if include_latest_message:
-                messages = await self._client.get_messages(entity, limit=1)
-                if messages:
-                    latest_message_id = int(messages[0].id)
-        except Exception as exc:
-            if self._logger is not None:
-                self._logger.warning(
-                    "Telegram memory scope lookup failed "
-                    "(chat_id=%s, error=%s): %s",
-                    chat_id,
-                    type(exc).__name__,
-                    exc,
-                )
-            raise ValueError(
-                "Telegram group or channel is inaccessible"
-            ) from exc
-        return MemoryScopeTarget(
-            chat_id=telegram_utils.get_peer_id(entity),
-            display_name=_telegram_display_name(entity),
-            latest_message_id=latest_message_id,
-        )
-
-
 class ConversationStore(Protocol):
     async def get_answer(
-        self, chat_id: int, answer_message_id: int
+        self, scope_id: str, answer_message_id: int
     ) -> AIAnswerMarker | None: ...
 
     async def get_turn_for_message(
-        self, chat_id: int, message_id: int
+        self, scope_id: str, message_id: int
     ) -> AIAnswerMarker | None: ...
 
     async def save_answer(self, marker: AIAnswerMarker) -> None: ...
 
-    async def is_allowed(self, user_id: int) -> bool: ...
+    async def is_allowed(self, actor_id: str) -> bool: ...
 
-    async def allow_user(self, user_id: int) -> None: ...
+    async def allow_user(self, actor_id: str) -> None: ...
 
-    async def deny_user(self, user_id: int) -> None: ...
+    async def deny_user(self, actor_id: str) -> None: ...
 
-    async def get_last_request_at(self, user_id: int) -> float | None: ...
+    async def get_last_request_at(self, actor_id: str) -> float | None: ...
 
-    async def set_last_request_at(self, user_id: int, timestamp: float) -> None: ...
+    async def set_last_request_at(
+        self,
+        actor_id: str,
+        timestamp: float,
+    ) -> None: ...
 
     async def get_memory_document_receipt(
         self,
@@ -549,14 +374,14 @@ class ConversationStore(Protocol):
 
     async def mark_memory_excluded_message(
         self,
-        chat_id: int,
+        scope_id: str,
         message_id: int,
         kind: str,
     ) -> None: ...
 
     async def is_memory_excluded_message(
         self,
-        chat_id: int,
+        scope_id: str,
         message_id: int,
     ) -> bool: ...
 
@@ -594,28 +419,13 @@ class MemoryDreamResult:
     documents_unchanged: int
 
 
-@dataclass(frozen=True, slots=True)
-class MemoryBackfillRequest:
-    mode: Literal["days", "messages"]
-    value: int
-
-    def __post_init__(self) -> None:
-        limit = (
-            MAX_MEMORY_BACKFILL_DAYS
-            if self.mode == "days"
-            else MAX_MEMORY_BACKFILL_MESSAGES
-        )
-        if self.mode not in {"days", "messages"} or not 1 <= self.value <= limit:
-            raise ValueError("Memory backfill request is outside its supported bounds")
-
-
 class MemoryDreamRunner(Protocol):
     async def run_scope(self, chat_id: int) -> MemoryDreamResult: ...
 
     async def run_backfill(
         self,
         chat_id: int,
-        request: MemoryBackfillRequest,
+        request: MemoryBackfillCommand,
     ) -> MemoryDreamResult: ...
 
 
@@ -691,10 +501,10 @@ class AISettings:
 
 @dataclass(frozen=True, slots=True)
 class AIAnswerMarker:
-    chat_id: int
+    scope_id: str
     answer_message_id: int
     trigger_message_id: int
-    requester_id: int
+    requester_id: str
     prompt: str
     answer_text: str
     parent_answer_message_id: int | None
@@ -705,71 +515,11 @@ class AIAnswerMarker:
 
 @dataclass(frozen=True, slots=True)
 class AnswerResult:
-    message: EditableMessage
+    message: SentMessage
     text: str
     succeeded: bool
     session_id: str | None = None
     entry_id: str | None = None
-
-
-class TelegramEditLimiter:
-    def __init__(
-        self,
-        minimum_interval: float,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], Awaitable[None]] | None = None,
-        logger: Any | None = None,
-    ):
-        self._minimum_interval = max(0.0, minimum_interval)
-        self._clock = clock
-        self._sleep = sleep or asyncio.sleep
-        self._logger = logger
-        self._lock = asyncio.Lock()
-        self._next_edit_at = 0.0
-
-    async def run(
-        self,
-        operation: Callable[[], Awaitable[Any]],
-        *,
-        wait: bool,
-    ) -> bool:
-        if not wait and self._lock.locked():
-            return False
-
-        async with self._lock:
-            while True:
-                now = self._clock()
-                delay = self._next_edit_at - now
-                if delay > 0:
-                    if not wait:
-                        return False
-                    await self._sleep(delay)
-                    now = self._next_edit_at
-                    self._next_edit_at = 0.0
-
-                try:
-                    await operation()
-                except FloodWaitError as exc:
-                    seconds = max(0.0, float(exc.seconds))
-                    self._next_edit_at = now + seconds
-                    if self._logger is not None:
-                        self._logger.warning(
-                            "Telegram edit rate limited; waiting %.0f seconds",
-                            seconds,
-                        )
-                    if not wait:
-                        return False
-                    continue
-                except MessageNotModifiedError:
-                    self._next_edit_at = now + self._minimum_interval
-                    return True
-                except Exception:
-                    self._next_edit_at = now + self._minimum_interval
-                    raise
-
-                self._next_edit_at = now + self._minimum_interval
-                return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -783,12 +533,6 @@ class HumanObservation:
     reply_to_message_id: int | None = None
     mentioned_users: tuple[MentionedUser, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class AITrigger:
-    prompt: str
-    recent_messages: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -817,98 +561,12 @@ class MemoryChainRetain:
     created: bool
 
 
-def parse_ai_trigger(text: str | None) -> AITrigger | None:
-    if text is None:
-        return None
-    if not text.casefold().startswith("/ai"):
-        return None
-    cursor = 3
-    digit_start = cursor
-    while cursor < len(text) and text[cursor].isascii() and text[cursor].isdigit():
-        cursor += 1
-    recent_messages = (
-        int(text[digit_start:cursor]) if cursor > digit_start else None
-    )
-    if cursor < len(text) and text[cursor] == "@":
-        cursor += 1
-        mention_start = cursor
-        while cursor < len(text) and text[cursor] not in {
-            " ",
-            "\n",
-            "\t",
-            "\r",
-        }:
-            cursor += 1
-        if cursor == mention_start:
-            return None
-    if cursor == len(text):
-        return AITrigger(prompt="", recent_messages=recent_messages)
-    if text[cursor] not in {" ", "\n", "\t", "\r"}:
-        return None
-    return AITrigger(
-        prompt=text[cursor:].strip(),
-        recent_messages=recent_messages,
-    )
-
-
-def parse_memory_revision(text: str | None) -> str | None:
-    if text is None:
-        return None
-    if text == "/ai_memory":
-        return ""
-    if text.startswith(("/ai_memory ", "/ai_memory\n", "/ai_memory\t")):
-        return text[len("/ai_memory") :].strip()
-    return None
-
-
-def parse_memory_backfill(text: str | None) -> MemoryBackfillRequest | None:
-    if text is None:
-        return None
-    parts = text.split()
-    if len(parts) != 3 or parts[0] != "/ai_memory_backfill":
-        return None
-    if parts[1] == "days":
-        mode: Literal["days", "messages"] = "days"
-    elif parts[1] == "messages":
-        mode = "messages"
-    else:
-        return None
-    try:
-        value = int(parts[2])
-        return MemoryBackfillRequest(mode=mode, value=value)
-    except ValueError:
-        return None
-
-
-def _parse_optional_memory_scope_target(
-    text: str,
-    command: str,
-) -> tuple[bool, int | None]:
-    parts = text.split()
-    if parts == [command]:
-        return True, None
-    if len(parts) != 2 or parts[0] != command:
-        return False, None
-    candidate = parts[1]
-    digits = candidate.removeprefix("-")
-    if not digits or not digits.isascii() or not digits.isdecimal():
-        return False, None
-    chat_id = int(candidate)
-    return (True, chat_id) if chat_id != 0 else (False, None)
-
-
 def _memory_message_text(text: str) -> str:
     text = text.strip()
-    if parse_memory_revision(text) is not None:
-        return ""
-    if text.startswith(("/ai_memory_", "/ai_dream_")) or text in {
-        "/ai_allow",
-        "/ai_deny",
-        "/ai_cancel",
-    }:
-        return ""
-    trigger = parse_ai_trigger(text)
-    return trigger.prompt if trigger is not None else text
+    command = parse_chat_command(text)
+    if isinstance(command, AIAskCommand):
+        return command.prompt
+    return text if command is None else ""
 
 
 class AIResponder:
@@ -916,27 +574,23 @@ class AIResponder:
         self,
         gateway: AgentGateway,
         *,
-        edit_cadence: float = 4.0,
         max_output_chars: int = 3_900,
-        response_format: TelegramResponseFormat = "regular_html",
-        clock: Callable[[], float] = time.monotonic,
-        edit_limiter: TelegramEditLimiter | None = None,
+        transport: ChatTransport | None = None,
         logger: Any | None = None,
     ):
         self._gateway = gateway
-        self._response_format = response_format
-        self._edit_limiter = edit_limiter or TelegramEditLimiter(
-            edit_cadence,
-            clock=clock,
-            logger=logger,
-        )
+        self._transport = transport or ObjectChatTransport()
         self._max_output_chars = max(4, max_output_chars)
         self._logger = logger
 
     async def answer(
         self, trigger: ReplyTarget, request: AgentRunRequest
     ) -> AnswerResult:
-        answer = await trigger.reply("Thinking...", parse_mode=None)
+        answer = await self._transport.reply(
+            trigger,
+            "Thinking...",
+            presentation="plain",
+        )
         text = ""
         last_edited_source: str | None = None
         session_id: str | None = None
@@ -952,7 +606,6 @@ class AIResponder:
                             answer,
                             event.summary,
                             wait=False,
-                            parse_mode=None,
                         )
                         if edited:
                             last_edited_source = None
@@ -971,7 +624,6 @@ class AIResponder:
                             answer,
                             cancelled,
                             wait=True,
-                            parse_mode=None,
                         )
                         return AnswerResult(
                             message=answer,
@@ -986,7 +638,6 @@ class AIResponder:
                             answer,
                             rate_limited,
                             wait=True,
-                            parse_mode=None,
                         )
                         return AnswerResult(
                             message=answer,
@@ -1009,7 +660,6 @@ class AIResponder:
                         answer,
                         final_text,
                         wait=True,
-                        parse_mode=None,
                     )
                     return AnswerResult(
                         message=answer,
@@ -1030,12 +680,15 @@ class AIResponder:
                 answer,
                 failure,
                 wait=True,
-                parse_mode=None,
             )
             return AnswerResult(message=answer, text=failure, succeeded=False)
 
     async def cancel(self, run_id: str) -> bool:
         return await self._gateway.cancel(run_id)
+
+    @property
+    def transport(self) -> ChatTransport:
+        return self._transport
 
     def _truncate(self, text: str) -> str:
         if len(text) <= self._max_output_chars:
@@ -1044,64 +697,31 @@ class AIResponder:
 
     async def _edit_formatted(
         self,
-        answer: EditableMessage,
+        answer: SentMessage,
         text: str,
         *,
         wait: bool,
     ) -> bool:
-        if self._response_format == "rich_markdown":
-            return await self._edit_rich_markdown(answer, text, wait=wait)
-        rendered, entities = telegram_html.parse(text)
-        if not rendered.strip():
-            return False
-        return await self._edit_message(
+        return await self._transport.update(
             answer,
-            rendered,
+            text,
+            presentation="agent",
             wait=wait,
-            parse_mode=None,
-            formatting_entities=entities,
         )
 
     async def _edit_message(
         self,
-        answer: EditableMessage,
+        answer: SentMessage,
         text: str,
         *,
         wait: bool,
-        **kwargs: Any,
     ) -> bool:
-        return await self._edit_limiter.run(
-            lambda: answer.edit(text, **kwargs),
+        return await self._transport.update(
+            answer,
+            text,
+            presentation="plain",
             wait=wait,
         )
-
-    async def _edit_rich_markdown(
-        self,
-        answer: EditableMessage,
-        text: str,
-        *,
-        wait: bool,
-    ) -> bool:
-        if not text.strip().strip("*_~`#>|:-"):
-            return False
-        client = getattr(answer, "client", None)
-        get_input_chat = getattr(answer, "get_input_chat", None)
-        if client is None or not callable(get_input_chat):
-            raise RuntimeError("Telegram rich-message editing is unavailable")
-        peer = await get_input_chat()
-        if peer is None:
-            raise RuntimeError("Telegram rich-message peer is unavailable")
-
-        async def edit() -> None:
-            await client(
-                telegram_functions.messages.EditMessageRequest(
-                    peer=peer,
-                    id=answer.id,
-                    rich_message=telegram_types.InputRichMessageMarkdown(markdown=text),
-                )
-            )
-
-        return await self._edit_limiter.run(edit, wait=wait)
 
     def _log_failure(self, exc: Exception) -> None:
         if self._logger is not None:
@@ -1130,18 +750,20 @@ class PromptBuilder:
         system_prompt: str = AISettings.DEFAULT_SYSTEM_PROMPT,
         max_context_messages: int = 20,
         max_context_chars: int = 12_000,
-        response_format: TelegramResponseFormat = "regular_html",
         attachment_describer: AttachmentDescriber | None = None,
         identity_resolver: MessageIdentityResolver | None = None,
         mention_resolver: MessageMentionResolver | None = None,
         history_source: MessageHistorySource | None = None,
         max_attachments: int = 3,
+        transport: ChatTransport | None = None,
+        identity_codec: IdentityCodec | None = None,
+        metadata_resolver: Callable[[ReplyTarget], dict[str, Any]] | None = None,
     ):
         if max_context_messages < 1 or max_context_chars < 1:
             raise ValueError("Context limits must be positive")
         if max_attachments < 0:
             raise ValueError("max_attachments cannot be negative")
-        self.system_prompt = _telegram_system_prompt(system_prompt, response_format)
+        self.system_prompt = system_prompt
         self.max_context_messages = max_context_messages
         self.max_context_chars = max_context_chars
         self.attachment_describer = attachment_describer
@@ -1149,12 +771,25 @@ class PromptBuilder:
         self.mention_resolver = mention_resolver
         self.history_source = history_source
         self.max_attachments = max_attachments
+        self._transport = transport or ObjectChatTransport()
+        self.identity_codec = identity_codec or NamespacedIdentityCodec(
+            source="chat",
+            actor_kind="actor",
+            scope_kind="scope",
+        )
+        self._metadata_resolver = metadata_resolver
+
+    def has_attachment(self, message: ReplyTarget) -> bool:
+        return (
+            self.attachment_describer is not None
+            and self.attachment_describer.has_attachment(message)
+        )
 
     async def describe_attachment(
         self,
         message: ReplyTarget,
     ) -> AttachmentDescription | None:
-        if self.attachment_describer is None or not message_has_attachment(message):
+        if not self.has_attachment(message):
             return None
         try:
             return await self.attachment_describer.describe(message)
@@ -1180,13 +815,23 @@ class PromptBuilder:
         except Exception:
             return ()
 
+    def resolve_metadata(self, message: ReplyTarget) -> dict[str, Any]:
+        if self._metadata_resolver is None:
+            return {}
+        try:
+            return self._metadata_resolver(message)
+        except Exception:
+            return {}
+
     async def load_chat_context(
         self,
         trigger: ReplyTarget,
         *,
         recent_messages: int | None = None,
     ) -> ChatContext:
-        reply_path = await self._load_reply_path(await trigger.get_reply_message())
+        reply_path = await self._load_reply_path(
+            await self._transport.get_reply(trigger)
+        )
         recent: tuple[ReplyTarget, ...] = ()
         if recent_messages is not None:
             if not 1 <= recent_messages <= self.max_context_messages:
@@ -1235,7 +880,7 @@ class PromptBuilder:
                 break
             seen.add(key)
             newest_first.append(current)
-            current = await current.get_reply_message()
+            current = await self._transport.get_reply(current)
         return tuple(newest_first)
 
     async def _build_chat_context(
@@ -1302,7 +947,7 @@ class PromptBuilder:
                         identity=message_identity,
                         reply_to_message_id=message.reply_to_msg_id,
                         mentioned_users=await self.resolve_mentions(message),
-                        metadata=_telegram_memory_event_metadata(message),
+                        metadata=self.resolve_metadata(message),
                     )
                 normalized.append(
                     ChatContextMessage(
@@ -1325,8 +970,8 @@ class PromptBuilder:
             current_reply_to_message_id=current_reply_to_message_id,
         )
 
-    @staticmethod
     def render_chat_context(
+        self,
         context: ChatContext,
         *,
         assistant_message_ids: frozenset[int] = frozenset(),
@@ -1372,7 +1017,7 @@ class PromptBuilder:
                     "actor_id="
                     + (
                         message.identity.subject_id
-                        or _telegram_subject_id(message.sender_id)
+                        or self.identity_codec.actor_id(message.sender_id)
                     )
                 )
             if message.identity.subject_display_name:
@@ -1440,29 +1085,7 @@ class AIStateRepository:
         self._connection = await aiosqlite.connect(self.path)
         self._connection.row_factory = aiosqlite.Row
         await self._connection.execute("PRAGMA journal_mode=WAL")
-        await self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_answers (
-                chat_id INTEGER NOT NULL,
-                answer_message_id INTEGER NOT NULL,
-                trigger_message_id INTEGER NOT NULL,
-                requester_id INTEGER NOT NULL,
-                prompt TEXT NOT NULL,
-                answer_text TEXT NOT NULL,
-                parent_answer_message_id INTEGER,
-                reference_context TEXT NOT NULL,
-                agent_session_id TEXT,
-                agent_entry_id TEXT,
-                PRIMARY KEY (chat_id, answer_message_id)
-            )
-            """
-        )
-        await self._connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS ai_answers_by_trigger
-            ON ai_answers (chat_id, trigger_message_id, answer_message_id DESC)
-            """
-        )
+        await self._ensure_conversation_state_schema()
         await self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS ai_memory_scope_labels (
@@ -1480,47 +1103,6 @@ class AIStateRepository:
                 display_name TEXT NOT NULL,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (scope_id, actor_id)
-            )
-            """
-        )
-        await self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_memory_excluded_messages (
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                PRIMARY KEY (chat_id, message_id)
-            )
-            """
-        )
-        columns = {
-            row["name"]
-            async for row in await self._connection.execute(
-                "PRAGMA table_info(ai_answers)"
-            )
-        }
-        if "agent_session_id" not in columns:
-            await self._connection.execute(
-                "ALTER TABLE ai_answers ADD COLUMN agent_session_id TEXT"
-            )
-        if "agent_entry_id" not in columns:
-            await self._connection.execute(
-                "ALTER TABLE ai_answers ADD COLUMN agent_entry_id TEXT"
-            )
-        await self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_whitelist (
-                user_id INTEGER PRIMARY KEY,
-                allowed_at REAL NOT NULL
-            )
-            """
-        )
-        await self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ai_usage (
-                user_id INTEGER PRIMARY KEY,
-                last_request_at REAL NOT NULL
             )
             """
         )
@@ -1601,6 +1183,202 @@ class AIStateRepository:
             await self._connection.close()
             self._connection = None
 
+    async def _ensure_conversation_state_schema(self) -> None:
+        # State written before identity namespacing could only come from Telegram.
+        # Rebuild those tables once; all runtime reads and writes use opaque IDs.
+        await self._ensure_ai_answers_schema()
+        await self._ensure_actor_state_table(
+            "ai_whitelist",
+            value_definition="allowed_at REAL NOT NULL",
+        )
+        await self._ensure_actor_state_table(
+            "ai_usage",
+            value_definition="last_request_at REAL NOT NULL",
+        )
+        await self._ensure_excluded_messages_schema()
+
+    async def _ensure_ai_answers_schema(self) -> None:
+        connection = self._require_connection()
+        columns = await self._table_columns("ai_answers")
+        if not columns:
+            await self._create_ai_answers_table()
+            return
+        if "scope_id" in columns:
+            if "agent_session_id" not in columns:
+                await connection.execute(
+                    "ALTER TABLE ai_answers ADD COLUMN agent_session_id TEXT"
+                )
+            if "agent_entry_id" not in columns:
+                await connection.execute(
+                    "ALTER TABLE ai_answers ADD COLUMN agent_entry_id TEXT"
+                )
+            await self._create_ai_answers_index()
+            return
+
+        session_value = (
+            "agent_session_id" if "agent_session_id" in columns else "NULL"
+        )
+        entry_value = "agent_entry_id" if "agent_entry_id" in columns else "NULL"
+        await connection.execute("DROP INDEX IF EXISTS ai_answers_by_trigger")
+        await connection.execute(
+            "ALTER TABLE ai_answers RENAME TO ai_answers_legacy"
+        )
+        await self._create_ai_answers_table()
+        await connection.execute(
+            f"""
+            INSERT INTO ai_answers (
+                scope_id, answer_message_id, trigger_message_id, requester_id,
+                prompt, answer_text, parent_answer_message_id, reference_context,
+                agent_session_id, agent_entry_id
+            )
+            SELECT
+                'telegram:chat:' || chat_id,
+                answer_message_id,
+                trigger_message_id,
+                'telegram:user:' || requester_id,
+                prompt,
+                answer_text,
+                parent_answer_message_id,
+                reference_context,
+                {session_value},
+                {entry_value}
+            FROM ai_answers_legacy
+            """  # nosec B608
+        )
+        await connection.execute("DROP TABLE ai_answers_legacy")
+
+    async def _create_ai_answers_table(self) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            CREATE TABLE ai_answers (
+                scope_id TEXT NOT NULL,
+                answer_message_id INTEGER NOT NULL,
+                trigger_message_id INTEGER NOT NULL,
+                requester_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                answer_text TEXT NOT NULL,
+                parent_answer_message_id INTEGER,
+                reference_context TEXT NOT NULL,
+                agent_session_id TEXT,
+                agent_entry_id TEXT,
+                PRIMARY KEY (scope_id, answer_message_id)
+            )
+            """
+        )
+        await self._create_ai_answers_index()
+
+    async def _create_ai_answers_index(self) -> None:
+        await self._require_connection().execute(
+            """
+            CREATE INDEX IF NOT EXISTS ai_answers_by_trigger
+            ON ai_answers (
+                scope_id,
+                trigger_message_id,
+                answer_message_id DESC
+            )
+            """
+        )
+
+    async def _ensure_actor_state_table(
+        self,
+        table: str,
+        *,
+        value_definition: str,
+    ) -> None:
+        connection = self._require_connection()
+        columns = await self._table_columns(table)
+        value_column = value_definition.split(maxsplit=1)[0]
+        if not columns:
+            await connection.execute(
+                f"""
+                CREATE TABLE {table} (
+                    actor_id TEXT PRIMARY KEY,
+                    {value_definition}
+                )
+                """  # nosec B608
+            )
+            return
+        if "actor_id" in columns:
+            return
+
+        legacy = f"{table}_legacy"
+        await connection.execute(f"ALTER TABLE {table} RENAME TO {legacy}")  # nosec B608
+        await connection.execute(
+            f"""
+            CREATE TABLE {table} (
+                actor_id TEXT PRIMARY KEY,
+                {value_definition}
+            )
+            """  # nosec B608
+        )
+        await connection.execute(
+            f"""
+            INSERT INTO {table} (actor_id, {value_column})
+            SELECT 'telegram:user:' || user_id, {value_column}
+            FROM {legacy}
+            """  # nosec B608
+        )
+        await connection.execute(f"DROP TABLE {legacy}")  # nosec B608
+
+    async def _ensure_excluded_messages_schema(self) -> None:
+        connection = self._require_connection()
+        columns = await self._table_columns("ai_memory_excluded_messages")
+        if not columns:
+            await self._create_excluded_messages_table()
+            return
+        if "scope_id" in columns:
+            return
+        await connection.execute(
+            "ALTER TABLE ai_memory_excluded_messages "
+            "RENAME TO ai_memory_excluded_messages_legacy"
+        )
+        await self._create_excluded_messages_table()
+        await connection.execute(
+            """
+            INSERT INTO ai_memory_excluded_messages (
+                scope_id, message_id, kind, created_at
+            )
+            SELECT
+                'telegram:chat:' || chat_id,
+                message_id,
+                kind,
+                created_at
+            FROM ai_memory_excluded_messages_legacy
+            """
+        )
+        await connection.execute(
+            "DROP TABLE ai_memory_excluded_messages_legacy"
+        )
+
+    async def _create_excluded_messages_table(self) -> None:
+        await self._require_connection().execute(
+            """
+            CREATE TABLE ai_memory_excluded_messages (
+                scope_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY (scope_id, message_id)
+            )
+            """
+        )
+
+    async def _table_columns(self, table: str) -> set[str]:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+        if await cursor.fetchone() is None:
+            return set()
+        return {
+            str(row["name"])
+            async for row in await connection.execute(
+                f"PRAGMA table_info({table})"  # nosec B608
+            )
+        }
+
     async def _ensure_memory_scope_schema(self) -> None:
         connection = self._require_connection()
         cursor = await connection.execute(
@@ -1654,29 +1432,29 @@ class AIStateRepository:
         )
 
     async def get_answer(
-        self, chat_id: int, answer_message_id: int
+        self, scope_id: str, answer_message_id: int
     ) -> AIAnswerMarker | None:
         connection = self._require_connection()
         cursor = await connection.execute(
-            "SELECT * FROM ai_answers WHERE chat_id = ? AND answer_message_id = ?",
-            (chat_id, answer_message_id),
+            "SELECT * FROM ai_answers WHERE scope_id = ? AND answer_message_id = ?",
+            (scope_id, answer_message_id),
         )
         row = await cursor.fetchone()
         return _marker_from_row(row) if row else None
 
     async def get_turn_for_message(
-        self, chat_id: int, message_id: int
+        self, scope_id: str, message_id: int
     ) -> AIAnswerMarker | None:
         connection = self._require_connection()
         cursor = await connection.execute(
             """
             SELECT * FROM ai_answers
-            WHERE chat_id = ?
+            WHERE scope_id = ?
               AND (answer_message_id = ? OR trigger_message_id = ?)
             ORDER BY answer_message_id = ? DESC, answer_message_id DESC
             LIMIT 1
             """,
-            (chat_id, message_id, message_id, message_id),
+            (scope_id, message_id, message_id, message_id),
         )
         row = await cursor.fetchone()
         return _marker_from_row(row) if row else None
@@ -1686,11 +1464,11 @@ class AIStateRepository:
         await connection.execute(
             """
             INSERT INTO ai_answers (
-                chat_id, answer_message_id, trigger_message_id, requester_id,
+                scope_id, answer_message_id, trigger_message_id, requester_id,
                 prompt, answer_text, parent_answer_message_id, reference_context,
                 agent_session_id, agent_entry_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(chat_id, answer_message_id) DO UPDATE SET
+            ON CONFLICT(scope_id, answer_message_id) DO UPDATE SET
                 trigger_message_id = excluded.trigger_message_id,
                 requester_id = excluded.requester_id,
                 prompt = excluded.prompt,
@@ -1701,7 +1479,7 @@ class AIStateRepository:
                 agent_entry_id = excluded.agent_entry_id
             """,
             (
-                marker.chat_id,
+                marker.scope_id,
                 marker.answer_message_id,
                 marker.trigger_message_id,
                 marker.requester_id,
@@ -1715,47 +1493,50 @@ class AIStateRepository:
         )
         await connection.commit()
 
-    async def is_allowed(self, user_id: int) -> bool:
+    async def is_allowed(self, actor_id: str) -> bool:
         connection = self._require_connection()
         cursor = await connection.execute(
-            "SELECT 1 FROM ai_whitelist WHERE user_id = ?",
-            (user_id,),
+            "SELECT 1 FROM ai_whitelist WHERE actor_id = ?",
+            (actor_id,),
         )
         return await cursor.fetchone() is not None
 
-    async def allow_user(self, user_id: int) -> None:
+    async def allow_user(self, actor_id: str) -> None:
         connection = self._require_connection()
         await connection.execute(
-            "INSERT INTO ai_whitelist (user_id, allowed_at) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET allowed_at = excluded.allowed_at",
-            (user_id, time.time()),
+            "INSERT INTO ai_whitelist (actor_id, allowed_at) VALUES (?, ?) "
+            "ON CONFLICT(actor_id) DO UPDATE SET allowed_at = excluded.allowed_at",
+            (actor_id, time.time()),
         )
         await connection.commit()
 
-    async def deny_user(self, user_id: int) -> None:
+    async def deny_user(self, actor_id: str) -> None:
         connection = self._require_connection()
         await connection.execute(
-            "DELETE FROM ai_whitelist WHERE user_id = ?", (user_id,)
+            "DELETE FROM ai_whitelist WHERE actor_id = ?", (actor_id,)
         )
-        await connection.execute("DELETE FROM ai_usage WHERE user_id = ?", (user_id,))
+        await connection.execute(
+            "DELETE FROM ai_usage WHERE actor_id = ?",
+            (actor_id,),
+        )
         await connection.commit()
 
-    async def get_last_request_at(self, user_id: int) -> float | None:
+    async def get_last_request_at(self, actor_id: str) -> float | None:
         connection = self._require_connection()
         cursor = await connection.execute(
-            "SELECT last_request_at FROM ai_usage WHERE user_id = ?",
-            (user_id,),
+            "SELECT last_request_at FROM ai_usage WHERE actor_id = ?",
+            (actor_id,),
         )
         row = await cursor.fetchone()
         return float(row["last_request_at"]) if row else None
 
-    async def set_last_request_at(self, user_id: int, timestamp: float) -> None:
+    async def set_last_request_at(self, actor_id: str, timestamp: float) -> None:
         connection = self._require_connection()
         await connection.execute(
-            "INSERT INTO ai_usage (user_id, last_request_at) VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET "
+            "INSERT INTO ai_usage (actor_id, last_request_at) VALUES (?, ?) "
+            "ON CONFLICT(actor_id) DO UPDATE SET "
             "last_request_at = excluded.last_request_at",
-            (user_id, timestamp),
+            (actor_id, timestamp),
         )
         await connection.commit()
 
@@ -2339,7 +2120,7 @@ class AIStateRepository:
 
     async def mark_memory_excluded_message(
         self,
-        chat_id: int,
+        scope_id: str,
         message_id: int,
         kind: str,
     ) -> None:
@@ -2347,29 +2128,29 @@ class AIStateRepository:
         await connection.execute(
             """
             INSERT OR REPLACE INTO ai_memory_excluded_messages (
-                chat_id, message_id, kind, created_at
+                scope_id, message_id, kind, created_at
             ) VALUES (?, ?, ?, ?)
             """,
-            (chat_id, message_id, kind, time.time()),
+            (scope_id, message_id, kind, time.time()),
         )
         await connection.commit()
 
     async def is_memory_excluded_message(
         self,
-        chat_id: int,
+        scope_id: str,
         message_id: int,
     ) -> bool:
         connection = self._require_connection()
         cursor = await connection.execute(
             "SELECT 1 FROM ai_memory_excluded_messages "
-            "WHERE chat_id = ? AND message_id = ?",
-            (chat_id, message_id),
+            "WHERE scope_id = ? AND message_id = ?",
+            (scope_id, message_id),
         )
         return await cursor.fetchone() is not None
 
     async def get_memory_excluded_message_ids(
         self,
-        chat_id: int,
+        scope_id: str,
         message_ids: tuple[int, ...],
     ) -> frozenset[int]:
         connection = self._require_connection()
@@ -2380,8 +2161,8 @@ class AIStateRepository:
             placeholders = ",".join("?" for _ in batch)
             cursor = await connection.execute(
                 "SELECT message_id FROM ai_memory_excluded_messages "  # nosec B608
-                f"WHERE chat_id = ? AND message_id IN ({placeholders})",
-                (chat_id, *batch),
+                f"WHERE scope_id = ? AND message_id IN ({placeholders})",
+                (scope_id, *batch),
             )
             async for row in cursor:
                 excluded.add(int(row["message_id"]))
@@ -2389,7 +2170,7 @@ class AIStateRepository:
 
     async def get_ai_answer_message_ids(
         self,
-        chat_id: int,
+        scope_id: str,
         message_ids: tuple[int, ...],
     ) -> frozenset[int]:
         connection = self._require_connection()
@@ -2400,8 +2181,8 @@ class AIStateRepository:
             placeholders = ",".join("?" for _ in batch)
             cursor = await connection.execute(
                 "SELECT answer_message_id FROM ai_answers "  # nosec B608
-                f"WHERE chat_id = ? AND answer_message_id IN ({placeholders})",
-                (chat_id, *batch),
+                f"WHERE scope_id = ? AND answer_message_id IN ({placeholders})",
+                (scope_id, *batch),
             )
             async for row in cursor:
                 answers.add(int(row["answer_message_id"]))
@@ -2426,32 +2207,32 @@ class AIRateLimiter:
         self._store = store
         self._cooldown_seconds = cooldown_seconds
         self._clock = clock
-        self._in_flight: set[int] = set()
+        self._in_flight: set[str] = set()
         self._lock = asyncio.Lock()
 
-    async def acquire(self, *, user_id: int, is_owner: bool) -> bool:
+    async def acquire(self, *, actor_id: str, is_owner: bool) -> bool:
         if is_owner:
             return True
         async with self._lock:
-            if user_id in self._in_flight:
+            if actor_id in self._in_flight:
                 return False
-            last_request_at = await self._store.get_last_request_at(user_id)
+            last_request_at = await self._store.get_last_request_at(actor_id)
             if (
                 last_request_at is not None
                 and self._clock() - last_request_at < self._cooldown_seconds
             ):
                 return False
-            self._in_flight.add(user_id)
+            self._in_flight.add(actor_id)
             return True
 
-    async def release(self, *, user_id: int, is_owner: bool) -> None:
+    async def release(self, *, actor_id: str, is_owner: bool) -> None:
         if is_owner:
             return
         async with self._lock:
             try:
-                await self._store.set_last_request_at(user_id, self._clock())
+                await self._store.set_last_request_at(actor_id, self._clock())
             finally:
-                self._in_flight.discard(user_id)
+                self._in_flight.discard(actor_id)
 
 
 class AIConversationHandler:
@@ -2466,6 +2247,8 @@ class AIConversationHandler:
         dream_runner: MemoryDreamRunner | None = None,
         memory_scope_resolver: MemoryScopeTargetResolver | None = None,
         memory_command_delete_delay: float = 3.0,
+        transport: ChatTransport | None = None,
+        identity_codec: IdentityCodec | None = None,
         logger: Any | None = None,
     ):
         if memory_command_delete_delay < 0:
@@ -2481,89 +2264,86 @@ class AIConversationHandler:
         self._memory_command_delete_delay = memory_command_delete_delay
         self._memory_command_delete_tasks: set[asyncio.Task[None]] = set()
         self._logger = logger
-        self._active_runs: dict[int, str] = {}
+        self._transport = (
+            transport
+            or responder.transport
+            or ObjectChatTransport()
+        )
+        self._identity_codec = identity_codec or prompt_builder.identity_codec
+        self._owner_actor_id = self._identity_codec.actor_id(owner_id)
+        self._active_runs: dict[str, str] = {}
 
     async def handle(self, message: ReplyTarget) -> bool:
         if message.sender_id is None or message.chat_id is None:
             return False
-        command = (message.raw_text or "").strip()
-        command_name = command.split(maxsplit=1)[0] if command else ""
-        is_owner_control = message.sender_id == self._owner_id or bool(
-            getattr(message, "out", False)
+        actor_id = self._identity_codec.actor_id(message.sender_id)
+        scope_id = self._identity_codec.scope_id(message.chat_id)
+        command = parse_chat_command(message.raw_text)
+        is_owner = actor_id == self._owner_actor_id
+        is_owner_control = (
+            is_owner or self._transport.is_outgoing(message)
         )
-        memory_instruction = parse_memory_revision(message.raw_text)
-        if memory_instruction is not None:
+        if isinstance(command, MemoryRememberCommand):
             if not is_owner_control:
                 return False
             return await self._handle_memory_command(
                 message,
-                memory_instruction,
+                command.instruction,
             )
-        if command_name == "/ai_memory_backfill":
+        if isinstance(command, InvalidCommand):
             if not is_owner_control:
                 return False
-            request = parse_memory_backfill(command)
-            if request is None:
+            if command.name == "/ai_memory_backfill":
                 await self._reply_memory_excluded(
                     message,
                     "Usage: /ai_memory_backfill days <1-30> or "
                     "/ai_memory_backfill messages <1-5000>",
                     kind="memory-control",
                 )
-                return True
-            return await self._handle_memory_backfill(message, request)
-        if command_name in {
-            "/ai_memory_enable",
-            "/ai_memory_disable",
-            "/ai_dream_enable",
-            "/ai_dream_disable",
-        }:
-            if not is_owner_control:
-                return False
-            valid_target, target_chat_id = _parse_optional_memory_scope_target(
-                command,
-                command_name,
-            )
-            if not valid_target:
+            else:
                 await self._reply_memory_excluded(
                     message,
-                    f"Usage: {command_name} [numeric group/channel ID]",
+                    f"Usage: {command.name} [chat target]",
                     kind="memory-control",
                 )
-                return True
-            return await self._handle_memory_scope_command(
-                message,
-                command_name,
-                target_chat_id=target_chat_id,
-            )
-        if command in {
-            "/ai_memory_status",
-            "/ai_memory_list",
-            "/ai_memory_dream",
-        }:
+            return True
+        if isinstance(command, MemoryBackfillCommand):
             if not is_owner_control:
                 return False
-            if command == "/ai_memory_dream":
-                return await self._handle_memory_dream(message)
-            if command == "/ai_memory_list":
-                return await self._handle_memory_scope_list(message)
+            return await self._handle_memory_backfill(message, command)
+        if isinstance(command, MemoryModeCommand):
+            if not is_owner_control:
+                return False
             return await self._handle_memory_scope_command(message, command)
-        if command in {"/ai_allow", "/ai_deny"}:
+        if isinstance(command, MemoryStatusCommand):
+            if not is_owner_control:
+                return False
+            return await self._handle_memory_scope_status(message)
+        if isinstance(command, MemoryListCommand):
+            if not is_owner_control:
+                return False
+            return await self._handle_memory_scope_list(message)
+        if isinstance(command, MemoryDreamCommand):
+            if not is_owner_control:
+                return False
+            return await self._handle_memory_dream(message)
+        if isinstance(command, AccessCommand):
             if not is_owner_control:
                 return False
             return await self._handle_access_command(message, command)
 
-        is_owner = message.sender_id == self._owner_id
-        if command == "/ai_cancel":
-            if not is_owner and not await self._store.is_allowed(message.sender_id):
+        if isinstance(command, AICancelCommand):
+            if not is_owner and not await self._store.is_allowed(actor_id):
                 return False
-            return await self._handle_cancel(message)
+            return await self._handle_cancel(message, actor_id)
 
-        ai_trigger = parse_ai_trigger(message.raw_text)
+        ai_trigger = command if isinstance(command, AIAskCommand) else None
+        if command is not None and ai_trigger is None:
+            return False
         if ai_trigger is None and message.reply_to_msg_id is None:
             return False
 
-        if not is_owner and not await self._store.is_allowed(message.sender_id):
+        if not is_owner and not await self._store.is_allowed(actor_id):
             return False
         if (
             ai_trigger is not None
@@ -2587,7 +2367,7 @@ class AIConversationHandler:
         reference_context = ""
         anchor_observations: list[HumanObservation] = []
         retained_observations: list[HumanObservation] = []
-        has_current_attachment = message_has_attachment(message)
+        has_current_attachment = self._prompt_builder.has_attachment(message)
         authored_prompt = ""
         if ai_trigger is not None:
             if not ai_trigger.prompt and not has_current_attachment:
@@ -2608,7 +2388,7 @@ class AIConversationHandler:
             parent_answer_id = message.reply_to_msg_id
             if parent_answer_id is None:
                 return False
-            parent = await self._store.get_answer(message.chat_id, parent_answer_id)
+            parent = await self._store.get_answer(scope_id, parent_answer_id)
             if parent is None:
                 return False
             if not parent.agent_session_id or not parent.agent_entry_id:
@@ -2626,7 +2406,7 @@ class AIConversationHandler:
             prompt = authored_prompt or "Describe the attached content."
 
         acquired = await self._rate_limiter.acquire(
-            user_id=message.sender_id,
+            actor_id=actor_id,
             is_owner=is_owner,
         )
         if not acquired:
@@ -2675,7 +2455,7 @@ class AIConversationHandler:
                     human_context,
                     human_reply_path,
                 ) = await self._classify_chat_context(
-                    message.chat_id,
+                    scope_id,
                     loaded_context,
                 )
                 if ai_trigger is not None:
@@ -2710,24 +2490,24 @@ class AIConversationHandler:
                 tool_policy="owner" if is_owner else "delegated",
                 memory=memory_target,
             )
-            self._active_runs[message.sender_id] = run_id
+            self._active_runs[actor_id] = run_id
             result = await self._responder.answer(message, request)
             await self._mark_memory_excluded(
-                message.chat_id,
+                scope_id,
                 result.message.id,
                 "ai-answer",
             )
-            if self._active_runs.get(message.sender_id) == run_id:
-                self._active_runs.pop(message.sender_id, None)
+            if self._active_runs.get(actor_id) == run_id:
+                self._active_runs.pop(actor_id, None)
             if result.succeeded:
                 assert result.session_id is not None
                 assert result.entry_id is not None
                 await self._store.save_answer(
                     AIAnswerMarker(
-                        chat_id=message.chat_id,
+                        scope_id=scope_id,
                         answer_message_id=result.message.id,
                         trigger_message_id=message.id,
-                        requester_id=message.sender_id,
+                        requester_id=actor_id,
                         prompt=prompt,
                         answer_text=result.text,
                         parent_answer_message_id=parent_answer_id,
@@ -2737,7 +2517,7 @@ class AIConversationHandler:
                     )
                 )
                 await self._rate_limiter.release(
-                    user_id=message.sender_id,
+                    actor_id=actor_id,
                     is_owner=is_owner,
                 )
                 rate_released = True
@@ -2757,7 +2537,9 @@ class AIConversationHandler:
                                 identity=current_identity,
                                 reply_to_message_id=message.reply_to_msg_id,
                                 mentioned_users=current_mentions,
-                                metadata=_telegram_memory_event_metadata(message),
+                                metadata=self._prompt_builder.resolve_metadata(
+                                    message
+                                ),
                             )
                         )
                     if retained_observations:
@@ -2770,12 +2552,12 @@ class AIConversationHandler:
             if (
                 message.sender_id is not None
                 and run_id is not None
-                and self._active_runs.get(message.sender_id) == run_id
+                and self._active_runs.get(actor_id) == run_id
             ):
-                self._active_runs.pop(message.sender_id, None)
+                self._active_runs.pop(actor_id, None)
             if not rate_released:
                 await self._rate_limiter.release(
-                    user_id=message.sender_id,
+                    actor_id=actor_id,
                     is_owner=is_owner,
                 )
 
@@ -2788,7 +2570,8 @@ class AIConversationHandler:
         message: ReplyTarget,
     ) -> AIAnswerMarker | None:
         assert message.chat_id is not None
-        current = await message.get_reply_message()
+        scope_id = self._identity_codec.scope_id(message.chat_id)
+        current = await self._transport.get_reply(message)
         seen: set[tuple[int | None, int]] = set()
         for _ in range(self._prompt_builder.max_context_messages):
             if current is None:
@@ -2797,15 +2580,18 @@ class AIConversationHandler:
             if identity in seen:
                 return None
             seen.add(identity)
-            turn = await self._store.get_turn_for_message(message.chat_id, current.id)
+            turn = await self._store.get_turn_for_message(scope_id, current.id)
             if turn is not None:
                 return turn
-            current = await current.get_reply_message()
+            current = await self._transport.get_reply(current)
         return None
 
-    async def _handle_cancel(self, message: ReplyTarget) -> bool:
-        assert message.sender_id is not None
-        run_id = self._active_runs.get(message.sender_id)
+    async def _handle_cancel(
+        self,
+        message: ReplyTarget,
+        actor_id: str,
+    ) -> bool:
+        run_id = self._active_runs.get(actor_id)
         if run_id is None:
             await self._reply_memory_excluded(
                 message,
@@ -2825,13 +2611,13 @@ class AIConversationHandler:
     async def _handle_access_command(
         self,
         message: ReplyTarget,
-        command: str,
+        command: AccessCommand,
     ) -> bool:
-        target = await message.get_reply_message()
+        target = await self._transport.get_reply(message)
         if target is None or target.sender_id is None:
             await self._reply_memory_excluded(
                 message,
-                f"Usage: reply to a user with {command}",
+                f"Usage: reply to a user with {command.name}",
                 kind="ai-control",
             )
             return True
@@ -2841,83 +2627,47 @@ class AIConversationHandler:
                 "Owner access is always enabled.",
                 kind="ai-control",
             )
-            await self._delete_command_message(message, command)
+            await self._delete_command_message(message, command.name)
             return True
-        if command == "/ai_allow":
-            await self._store.allow_user(target.sender_id)
+        target_actor_id = self._identity_codec.actor_id(target.sender_id)
+        if command.allowed:
+            await self._store.allow_user(target_actor_id)
             response = "AI access allowed."
         else:
-            await self._store.deny_user(target.sender_id)
+            await self._store.deny_user(target_actor_id)
             response = "AI access denied."
         await self._reply_memory_excluded(message, response, kind="ai-control")
-        await self._delete_command_message(message, command)
+        await self._delete_command_message(message, command.name)
         return True
 
     async def _handle_memory_scope_command(
         self,
         message: ReplyTarget,
-        command: str,
-        *,
-        target_chat_id: int | None = None,
+        command: MemoryModeCommand,
     ) -> bool:
         assert message.chat_id is not None
-        if command == "/ai_memory_status":
-            scope_id = _telegram_scope_id(message.chat_id)
-            scope = await self._store.get_memory_scope_state(scope_id)
-            state = await self._store.get_memory_dream_state(scope_id)
-            dream_status = "enabled" if scope.dream_enabled else "disabled"
-            if scope.continuous_enabled and scope.dream_enabled:
-                dream_status += " (overridden by continuous memory)"
-            response = "\n".join(
-                (
-                    "Continuous memory: "
-                    + ("enabled" if scope.continuous_enabled else "disabled"),
-                    f"Dream: {dream_status}",
-                    "Continuous cursor: "
-                    + (
-                        str(scope.continuous_cursor_message_id)
-                        if scope.continuous_cursor_message_id is not None
-                        else "not started"
-                    ),
-                    "Last continuous attempt: "
-                    f"{_format_memory_time(scope.continuous_last_attempt_at)}",
-                    "Last continuous success: "
-                    f"{_format_memory_time(scope.continuous_last_success_at)}",
-                    "Last continuous error: "
-                    f"{scope.continuous_last_error or 'none'}",
-                    f"Last Dream attempt: {_format_memory_time(state.last_attempt_at)}",
-                    f"Last Dream success: {_format_memory_time(state.last_success_at)}",
-                    f"Last Dream error: {state.last_error or 'none'}",
-                )
-            )
-            await self._schedule_memory_command_delete(message, command)
-            await self._reply_memory_excluded(
-                message,
-                response,
-                kind="memory-control",
-            )
-            return True
-
-        is_remote = target_chat_id is not None
+        is_remote = command.target is not None
         if is_remote:
             if self._memory_scope_resolver is None:
                 await self._reply_memory_excluded(
                     message,
-                    "Remote Telegram group/channel lookup is unavailable.",
+                    "Remote chat lookup is unavailable.",
                     kind="memory-control",
                 )
                 return True
             try:
                 target = await self._memory_scope_resolver.resolve(
-                    target_chat_id,
-                    include_latest_message=command == "/ai_memory_enable",
+                    command.target,
+                    include_latest_message=(
+                        command.mode == "continuous" and command.enabled
+                    ),
                 )
             except Exception as exc:
                 self._log_memory_failure("scope lookup", exc)
                 await self._reply_memory_excluded(
                     message,
-                    "Unable to access that Telegram group/channel. "
-                    "Check the numeric chat ID and this account's access.",
+                    "Unable to access that chat target. "
+                    "Check its identifier and this account's access.",
                     kind="memory-control",
                 )
                 return True
@@ -2929,19 +2679,20 @@ class AIConversationHandler:
                 latest_message_id=message.id,
             )
 
-        scope_id = _telegram_scope_id(target.chat_id)
+        scope_id = self._identity_codec.scope_id(target.chat_id)
         target_label = _memory_scope_target_label(target)
         destination = target_label if is_remote else "this chat"
-        if command in {"/ai_memory_enable", "/ai_memory_disable"}:
-            enabled = command == "/ai_memory_enable"
+        if command.mode == "continuous":
             await self._store.set_continuous_memory_enabled(
                 scope_id,
-                enabled,
+                command.enabled,
                 target.display_name,
-                cursor_message_id=target.latest_message_id if enabled else None,
+                cursor_message_id=(
+                    target.latest_message_id if command.enabled else None
+                ),
             )
             scope = await self._store.get_memory_scope_state(scope_id)
-            if enabled:
+            if command.enabled:
                 response = (
                     f"Continuous memory enabled for {destination}. "
                     "New messages will be remembered."
@@ -2954,24 +2705,64 @@ class AIConversationHandler:
             else:
                 response = f"Continuous memory disabled for {destination}."
         else:
-            enabled = command == "/ai_dream_enable"
             await self._store.set_dream_memory_enabled(
                 scope_id,
-                enabled,
+                command.enabled,
                 target.display_name,
             )
             scope = await self._store.get_memory_scope_state(scope_id)
-            if enabled and scope.continuous_enabled:
+            if command.enabled and scope.continuous_enabled:
                 response = (
                     f"Dream enabled for {destination}, but continuous memory "
                     "currently overrides it."
                 )
-            elif enabled:
+            elif command.enabled:
                 response = f"Dream enabled for {destination}."
             else:
                 response = f"Dream disabled for {destination}."
-        await self._schedule_memory_command_delete(message, command)
+        await self._schedule_memory_command_delete(message, command.name)
         await self._reply_memory_excluded(message, response, kind="memory-control")
+        return True
+
+    async def _handle_memory_scope_status(self, message: ReplyTarget) -> bool:
+        assert message.chat_id is not None
+        scope_id = self._identity_codec.scope_id(message.chat_id)
+        scope = await self._store.get_memory_scope_state(scope_id)
+        state = await self._store.get_memory_dream_state(scope_id)
+        dream_status = "enabled" if scope.dream_enabled else "disabled"
+        if scope.continuous_enabled and scope.dream_enabled:
+            dream_status += " (overridden by continuous memory)"
+        response = "\n".join(
+            (
+                "Continuous memory: "
+                + ("enabled" if scope.continuous_enabled else "disabled"),
+                f"Dream: {dream_status}",
+                "Continuous cursor: "
+                + (
+                    str(scope.continuous_cursor_message_id)
+                    if scope.continuous_cursor_message_id is not None
+                    else "not started"
+                ),
+                "Last continuous attempt: "
+                f"{_format_memory_time(scope.continuous_last_attempt_at)}",
+                "Last continuous success: "
+                f"{_format_memory_time(scope.continuous_last_success_at)}",
+                "Last continuous error: "
+                f"{scope.continuous_last_error or 'none'}",
+                f"Last Dream attempt: {_format_memory_time(state.last_attempt_at)}",
+                f"Last Dream success: {_format_memory_time(state.last_success_at)}",
+                f"Last Dream error: {state.last_error or 'none'}",
+            )
+        )
+        await self._schedule_memory_command_delete(
+            message,
+            "/ai_memory_status",
+        )
+        await self._reply_memory_excluded(
+            message,
+            response,
+            kind="memory-control",
+        )
         return True
 
     async def _handle_memory_scope_list(self, message: ReplyTarget) -> bool:
@@ -3001,7 +2792,7 @@ class AIConversationHandler:
     async def _continuous_memory_enabled(self, chat_id: int) -> bool:
         try:
             state = await self._store.get_memory_scope_state(
-                _telegram_scope_id(chat_id)
+                self._identity_codec.scope_id(chat_id)
             )
             return state.continuous_enabled
         except Exception as exc:
@@ -3012,7 +2803,7 @@ class AIConversationHandler:
         assert message.chat_id is not None
         await self._schedule_memory_command_delete(message, "/ai_memory_dream")
         scope = await self._store.get_memory_scope_state(
-            _telegram_scope_id(message.chat_id)
+            self._identity_codec.scope_id(message.chat_id)
         )
         if scope.continuous_enabled:
             await self._reply_memory_excluded(
@@ -3058,7 +2849,7 @@ class AIConversationHandler:
     async def _handle_memory_backfill(
         self,
         message: ReplyTarget,
-        request: MemoryBackfillRequest,
+        request: MemoryBackfillCommand,
     ) -> bool:
         assert message.chat_id is not None
         await self._schedule_memory_command_delete(message, "/ai_memory_backfill")
@@ -3082,19 +2873,23 @@ class AIConversationHandler:
             result = await self._dream_runner.run_backfill(message.chat_id, request)
         except Exception as exc:
             self._log_memory_failure("backfill", exc)
-            await progress.edit(
+            await self._transport.update(
+                progress,
                 "Memory backfill failed. Accepted documents are safe; "
                 "retry the same command.",
-                parse_mode=None,
+                presentation="plain",
+                wait=True,
             )
             return True
-        await progress.edit(
+        await self._transport.update(
+            progress,
             "Memory backfill complete: "
             f"scanned {_pluralize(result.messages_seen, 'message')}; "
             f"retained {result.messages_retained} in "
             f"{_pluralize(result.documents_created, 'updated thread')}; "
             f"{result.documents_unchanged} unchanged.",
-            parse_mode=None,
+            presentation="plain",
+            wait=True,
         )
         return True
 
@@ -3104,21 +2899,29 @@ class AIConversationHandler:
         text: str,
         *,
         kind: str,
-    ) -> EditableMessage:
-        reply = await message.reply(text, parse_mode=None)
+    ) -> SentMessage:
+        reply = await self._transport.reply(
+            message,
+            text,
+            presentation="plain",
+        )
         if message.chat_id is not None:
-            await self._mark_memory_excluded(message.chat_id, reply.id, kind)
+            await self._mark_memory_excluded(
+                self._identity_codec.scope_id(message.chat_id),
+                reply.id,
+                kind,
+            )
         return reply
 
     async def _mark_memory_excluded(
         self,
-        chat_id: int,
+        scope_id: str,
         message_id: int,
         kind: str,
     ) -> None:
         try:
             await self._store.mark_memory_excluded_message(
-                chat_id,
+                scope_id,
                 message_id,
                 kind,
             )
@@ -3127,7 +2930,7 @@ class AIConversationHandler:
 
     async def _classify_chat_context(
         self,
-        chat_id: int,
+        scope_id: str,
         context: ChatContext,
     ) -> tuple[
         frozenset[int],
@@ -3138,7 +2941,10 @@ class AIConversationHandler:
         uncertain_message_ids: set[int] = set()
         for message in context.messages:
             try:
-                marker = await self._store.get_answer(chat_id, message.message_id)
+                marker = await self._store.get_answer(
+                    scope_id,
+                    message.message_id,
+                )
             except Exception as exc:
                 self._log_memory_failure("AI-message filtering", exc)
                 uncertain_message_ids.add(message.message_id)
@@ -3178,22 +2984,24 @@ class AIConversationHandler:
         if self._memory is None:
             return None
         participants: dict[str, str | None] = {
-            _telegram_subject_id(requester_id): requester_identity.subject_display_name
+            self._identity_codec.actor_id(
+                requester_id
+            ): requester_identity.subject_display_name
         }
         for observation in observations:
             subject_id = (
                 observation.identity.subject_id
-                or _telegram_subject_id(observation.sender_id)
+                or self._identity_codec.actor_id(observation.sender_id)
             )
             display_name = observation.identity.subject_display_name
             if subject_id not in participants or display_name:
                 participants[subject_id] = display_name
             for mention in observation.mentioned_users:
-                subject_id = _telegram_subject_id(mention.user_id)
+                subject_id = self._identity_codec.actor_id(mention.user_id)
                 if subject_id not in participants or mention.display_name:
                     participants[subject_id] = mention.display_name
         for mention in current_mentions:
-            subject_id = _telegram_subject_id(mention.user_id)
+            subject_id = self._identity_codec.actor_id(mention.user_id)
             if subject_id not in participants or mention.display_name:
                 participants[subject_id] = mention.display_name
         anchors = tuple(
@@ -3206,7 +3014,7 @@ class AIConversationHandler:
             ]
         )
         return AgentMemoryTarget(
-            scope_id=_telegram_scope_id(chat_id),
+            scope_id=self._identity_codec.scope_id(chat_id),
             anchors=anchors,
         )
 
@@ -3222,7 +3030,7 @@ class AIConversationHandler:
                 kind="memory-control",
             )
             return True
-        target = await message.get_reply_message()
+        target = await self._transport.get_reply(message)
         if target is None or target.sender_id is None:
             await self._reply_memory_excluded(
                 message,
@@ -3239,7 +3047,10 @@ class AIConversationHandler:
             return True
         target_is_ai = False
         if target.chat_id is not None:
-            marker = await self._store.get_answer(target.chat_id, target.id)
+            marker = await self._store.get_answer(
+                self._identity_codec.scope_id(target.chat_id),
+                target.id,
+            )
             if marker is not None:
                 target_is_ai = True
         target_identity = await self._prompt_builder.resolve_identity(target)
@@ -3279,7 +3090,8 @@ class AIConversationHandler:
                 ),
                 target_identity.subject_display_name,
             )
-            revision_episode = _telegram_revision_episode(
+            revision_episode = _chat_revision_episode(
+                self._identity_codec,
                 chat_id=message.chat_id,
                 command_message_id=message.id,
                 owner_id=self._owner_id,
@@ -3309,8 +3121,8 @@ class AIConversationHandler:
                 return True
             try:
                 await self._memory.revise(
-                    scope_id=_telegram_scope_id(message.chat_id),
-                    subject_id=_telegram_subject_id(target.sender_id),
+                    scope_id=self._identity_codec.scope_id(message.chat_id),
+                    subject_id=self._identity_codec.actor_id(target.sender_id),
                     instruction=instruction,
                 )
             except Exception as exc:
@@ -3346,7 +3158,7 @@ class AIConversationHandler:
             return None
         loaded_context = await self._prompt_builder.load_reply_chain(target)
         _, _, observations = await self._classify_chat_context(
-            target.chat_id,
+            self._identity_codec.scope_id(target.chat_id),
             loaded_context,
         )
         if not observations:
@@ -3361,8 +3173,8 @@ class AIConversationHandler:
         if self._memory is None or not observations:
             return None
         try:
-            scope_id = _telegram_scope_id(chat_id)
-            root_source_id = _telegram_memory_source_id(
+            scope_id = self._identity_codec.scope_id(chat_id)
+            root_source_id = self._identity_codec.message_source_id(
                 chat_id,
                 observations[0].message_id,
             )
@@ -3373,10 +3185,14 @@ class AIConversationHandler:
             append_to_dream_document = bool(
                 existing_document_id
                 and existing_document_id.startswith(
-                    ("telegram:dream-segment:", "telegram:dream-session:")
+                    (
+                        f"{self._identity_codec.source}:dream-segment:",
+                        f"{self._identity_codec.source}:dream-session:",
+                    )
                 )
             )
-            episode = _telegram_memory_episode(
+            episode = _chat_memory_episode(
+                self._identity_codec,
                 chat_id,
                 observations,
                 document_id=(
@@ -3410,11 +3226,8 @@ class AIConversationHandler:
         message: ReplyTarget,
         command: str,
     ) -> None:
-        delete = getattr(message, "delete", None)
-        if not callable(delete):
-            return
         try:
-            await delete()
+            await self._transport.delete(message)
         except Exception as exc:
             if self._logger is not None:
                 self._logger.warning(
@@ -3458,10 +3271,10 @@ class AIConversationHandler:
 
 def _marker_from_row(row: aiosqlite.Row) -> AIAnswerMarker:
     return AIAnswerMarker(
-        chat_id=row["chat_id"],
+        scope_id=str(row["scope_id"]),
         answer_message_id=row["answer_message_id"],
         trigger_message_id=row["trigger_message_id"],
-        requester_id=row["requester_id"],
+        requester_id=str(row["requester_id"]),
         prompt=row["prompt"],
         answer_text=row["answer_text"],
         parent_answer_message_id=row["parent_answer_message_id"],
@@ -3514,71 +3327,6 @@ def _message_datetime(message: ReplyTarget) -> datetime:
     return value.astimezone(UTC)
 
 
-def _telegram_memory_event_metadata(message: ReplyTarget) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    chat_id = getattr(message, "chat_id", None)
-    post_author = getattr(message, "post_author", None)
-    if isinstance(post_author, str) and post_author.strip():
-        metadata["post_author"] = post_author.strip()[:256]
-    reply = getattr(message, "reply_to", None)
-    quote_text = getattr(reply, "quote_text", None)
-    if isinstance(quote_text, str) and quote_text.strip():
-        quotation: dict[str, Any] = {"text": quote_text.strip()[:4_000]}
-        reply_id = getattr(message, "reply_to_msg_id", None)
-        if isinstance(chat_id, int) and isinstance(reply_id, int):
-            quotation["source_id"] = _telegram_memory_source_id(chat_id, reply_id)
-        quote_offset = getattr(reply, "quote_offset", None)
-        if isinstance(quote_offset, int) and quote_offset >= 0:
-            quotation["offset"] = quote_offset
-        metadata["quotation"] = quotation
-
-    forward = getattr(message, "fwd_from", None)
-    if forward is not None:
-        attribution: dict[str, Any] = {}
-        from_name = getattr(forward, "from_name", None)
-        if isinstance(from_name, str) and from_name.strip():
-            attribution["actor_display_name"] = from_name.strip()[:256]
-        from_id = getattr(forward, "from_id", None)
-        if isinstance(from_id, telegram_types.PeerUser):
-            attribution["actor_id"] = _telegram_subject_id(from_id.user_id)
-        source_peer = getattr(forward, "saved_from_peer", None) or from_id
-        source_message_id = getattr(forward, "saved_from_msg_id", None) or getattr(
-            forward, "channel_post", None
-        )
-        if source_peer is not None and isinstance(source_message_id, int):
-            try:
-                source_chat_id = telegram_utils.get_peer_id(source_peer)
-            except (TypeError, ValueError):
-                source_chat_id = None
-            if isinstance(source_chat_id, int):
-                attribution["source_id"] = _telegram_memory_source_id(
-                    source_chat_id,
-                    source_message_id,
-                )
-        forwarded_at = getattr(forward, "date", None)
-        if isinstance(forwarded_at, datetime):
-            if forwarded_at.tzinfo is None:
-                forwarded_at = forwarded_at.replace(tzinfo=UTC)
-            attribution["source_time"] = (
-                forwarded_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-            )
-        if attribution:
-            metadata["forwarded_from"] = attribution
-    return metadata
-
-
-def _telegram_subject_id(user_id: int) -> str:
-    return f"telegram:user:{user_id}"
-
-
-def _telegram_channel_subject_id(channel_id: int) -> str:
-    return f"telegram:channel:{channel_id}"
-
-
-def _telegram_scope_id(chat_id: int) -> str:
-    return f"telegram:chat:{chat_id}"
-
-
 def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
     if target.display_name:
         return f"{target.display_name} ({target.chat_id})"
@@ -3586,11 +3334,11 @@ def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
 
 
 def _format_memory_scope_summary(state: MemoryScopeState) -> str:
-    chat_id = state.scope_id.removeprefix("telegram:chat:")
+    external_id = state.scope_id.rsplit(":", 1)[-1]
     label = (
-        f"{state.display_name} ({chat_id})"
+        f"{state.display_name} ({external_id})"
         if state.display_name
-        else chat_id
+        else state.scope_id
     )
     if state.continuous_enabled:
         cursor = (
@@ -3625,11 +3373,8 @@ def _format_memory_time(timestamp: float | None) -> str:
     )
 
 
-def _telegram_memory_source_id(chat_id: int, message_id: int) -> str:
-    return f"telegram:message:{chat_id}:{message_id}"
-
-
-def _telegram_memory_episode(
+def _chat_memory_episode(
+    identity_codec: IdentityCodec,
     chat_id: int,
     observations: tuple[HumanObservation, ...],
     *,
@@ -3648,26 +3393,29 @@ def _telegram_memory_episode(
         None,
     )
     return MemoryEpisode(
-        scope_id=_telegram_scope_id(chat_id),
+        scope_id=identity_codec.scope_id(chat_id),
         scope_display_name=scope_display_name,
-        document_id=(document_id or f"telegram:thread:{chat_id}:{root_message_id}"),
-        source="telegram",
+        document_id=(
+            document_id
+            or identity_codec.thread_document_id(chat_id, root_message_id)
+        ),
+        source=identity_codec.source,
         events=tuple(
             MemoryEvent(
-                source_id=_telegram_memory_source_id(
+                source_id=identity_codec.message_source_id(
                     chat_id,
                     observation.message_id,
                 ),
                 actor_id=(
                     observation.identity.subject_id
-                    or _telegram_subject_id(observation.sender_id)
+                    or identity_codec.actor_id(observation.sender_id)
                 ),
                 actor_display_name=observation.identity.subject_display_name,
                 occurred_at=observation.occurred_at,
                 text=observation.text,
                 mentioned_at=observation.mentioned_at,
                 reply_to_source_id=(
-                    _telegram_memory_source_id(
+                    identity_codec.message_source_id(
                         chat_id,
                         observation.reply_to_message_id,
                     )
@@ -3676,7 +3424,7 @@ def _telegram_memory_episode(
                 ),
                 mentioned_actors=tuple(
                     (
-                        _telegram_subject_id(mention.user_id),
+                        identity_codec.actor_id(mention.user_id),
                         mention.display_name,
                     )
                     for mention in observation.mentioned_users
@@ -3688,7 +3436,8 @@ def _telegram_memory_episode(
     )
 
 
-def _telegram_revision_episode(
+def _chat_revision_episode(
+    identity_codec: IdentityCodec,
     *,
     chat_id: int,
     command_message_id: int,
@@ -3700,27 +3449,30 @@ def _telegram_revision_episode(
     occurred_at: datetime,
     target_message_id: int,
 ) -> MemoryEpisode:
-    target_key = _telegram_subject_id(target_id)
+    target_key = identity_codec.actor_id(target_id)
     target_label = (
         f"{target_display_name} ({target_key})" if target_display_name else target_key
     )
     return MemoryEpisode(
-        scope_id=_telegram_scope_id(chat_id),
-        document_id=f"telegram:revision:{chat_id}:{command_message_id}",
-        source="telegram-revision",
+        scope_id=identity_codec.scope_id(chat_id),
+        document_id=identity_codec.revision_document_id(
+            chat_id,
+            command_message_id,
+        ),
+        source=f"{identity_codec.source}-revision",
         events=(
             MemoryEvent(
-                source_id=_telegram_memory_source_id(
+                source_id=identity_codec.message_source_id(
                     chat_id,
                     command_message_id,
                 ),
-                actor_id=_telegram_subject_id(owner_id),
+                actor_id=identity_codec.actor_id(owner_id),
                 actor_display_name=owner_display_name,
                 occurred_at=occurred_at,
                 text=(
                     f"Trusted owner memory revision about {target_label}: {instruction}"
                 ),
-                reply_to_source_id=_telegram_memory_source_id(
+                reply_to_source_id=identity_codec.message_source_id(
                     chat_id,
                     target_message_id,
                 ),
@@ -3747,22 +3499,6 @@ async def _record_episode_labels(
         episode.scope_display_name,
         actor_labels,
     )
-
-
-def _telegram_display_name(entity: Any | None) -> str | None:
-    if entity is None:
-        return None
-    display_name = telegram_utils.get_display_name(entity).strip()
-    if not display_name:
-        username = (getattr(entity, "username", None) or "").strip()
-        display_name = f"@{username}" if username else ""
-    display_name = " ".join(display_name.split())
-    return display_name[:256] or None
-
-
-def _memory_subject_label(user_id: int, display_name: str | None) -> str:
-    subject_id = _telegram_subject_id(user_id)
-    return f"{display_name} ({subject_id})" if display_name else subject_id
 
 
 def _pluralize(count: int, noun: str) -> str:

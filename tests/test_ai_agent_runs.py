@@ -14,6 +14,16 @@ from telefire.ai import (
     AgentRunRequest,
     PromptBuilder,
 )
+from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
+from telefire.telegram.ai_transport import TelegramChatTransport
+
+
+def make_telegram_responder(gateway, **kwargs):
+    return AIResponder(
+        gateway,
+        transport=TelegramChatTransport(edit_cadence=0),
+        **kwargs,
+    )
 
 
 class FakeAnswer:
@@ -118,19 +128,19 @@ class BlockingAgentGateway(FakeAgentGateway):
 
 
 class FakeStore:
-    def __init__(self, allowed: set[int] | None = None):
+    def __init__(self, allowed: set[str] | None = None):
         self.allowed = allowed or set()
-        self.markers: dict[tuple[int, int], AIAnswerMarker] = {}
+        self.markers: dict[tuple[str, int], AIAnswerMarker] = {}
 
-    async def get_answer(self, chat_id, answer_message_id):
-        return self.markers.get((chat_id, answer_message_id))
+    async def get_answer(self, scope_id, answer_message_id):
+        return self.markers.get((scope_id, answer_message_id))
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return next(
             (
                 marker
                 for marker in reversed(tuple(self.markers.values()))
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -138,22 +148,22 @@ class FakeStore:
         )
 
     async def save_answer(self, marker):
-        self.markers[(marker.chat_id, marker.answer_message_id)] = marker
+        self.markers[(marker.scope_id, marker.answer_message_id)] = marker
 
-    async def is_allowed(self, user_id):
-        return user_id in self.allowed
+    async def is_allowed(self, actor_id):
+        return actor_id in self.allowed
 
-    async def get_last_request_at(self, user_id):
+    async def get_last_request_at(self, actor_id):
         return None
 
-    async def set_last_request_at(self, user_id, timestamp):
+    async def set_last_request_at(self, actor_id, timestamp):
         return None
 
-    async def allow_user(self, user_id):
-        self.allowed.add(user_id)
+    async def allow_user(self, actor_id):
+        self.allowed.add(actor_id)
 
-    async def deny_user(self, user_id):
-        self.allowed.discard(user_id)
+    async def deny_user(self, actor_id):
+        self.allowed.discard(actor_id)
 
 
 @pytest.fixture(autouse=True)
@@ -186,7 +196,7 @@ async def test_tool_snapshot_is_replaced_by_the_streamed_final_answer():
                 answer="<b>Final answer</b>",
             )
 
-    responder = AIResponder(SnapshotGateway(), edit_cadence=0)
+    responder = make_telegram_responder(SnapshotGateway())
     trigger = FakeMessage("/ai search")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -244,7 +254,7 @@ async def test_repeated_tool_snapshot_does_not_fail_the_agent_run():
                 answer="Final answer",
             )
 
-    responder = AIResponder(ParallelSearchGateway(), edit_cadence=0)
+    responder = make_telegram_responder(ParallelSearchGateway())
     trigger = TelegramLikeMessage("/ai search")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -277,7 +287,7 @@ async def test_provider_rate_limit_gets_an_explicit_telegram_message():
                 message="Agent provider is temporarily rate limited",
             )
 
-    responder = AIResponder(RateLimitedGateway(), edit_cadence=0)
+    responder = make_telegram_responder(RateLimitedGateway())
     trigger = FakeMessage("/ai hello")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -300,17 +310,20 @@ async def test_provider_rate_limit_gets_an_explicit_telegram_message():
 @pytest.mark.asyncio
 async def test_handler_maps_answers_to_pi_sessions_and_forks_by_entry():
     gateway = FakeAgentGateway(["root answer", "child answer", "fork answer"])
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=store,
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     root = FakeMessage("/ai root prompt", sender_id=20)
     await handler.handle(root)
     root_answer = root.replies[0]
-    root_marker = store.markers[(root.chat_id, root_answer.id)]
+    root_marker = store.markers[
+        (TELEGRAM_IDENTITY_CODEC.scope_id(root.chat_id), root_answer.id)
+    ]
 
     child = FakeMessage("child prompt", sender_id=20, reply_to=root_answer)
     await handler.handle(child)
@@ -332,9 +345,10 @@ async def test_ai_cancel_aborts_only_the_requesters_active_run():
     store = FakeStore()
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=store,
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     trigger = FakeMessage("/ai wait")
     running = asyncio.create_task(handler.handle(trigger))

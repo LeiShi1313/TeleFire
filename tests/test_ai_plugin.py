@@ -9,9 +9,9 @@ from telethon.tl import types as telegram_types
 from telefire.ai import MemoryScopeTarget
 from telefire.plugins.ai import (
     TelegramAI,
-    TelegramMemoryScopeTargetResolver,
     _parse_telegram_message_link,
 )
+from telefire.telegram.ai_identity import TelegramMemoryScopeTargetResolver
 
 
 class FailingHandler:
@@ -279,7 +279,7 @@ async def test_memory_scope_target_resolver_resolves_channel_and_latest_message(
     resolver = TelegramMemoryScopeTargetResolver(client)
 
     target = await resolver.resolve(
-        -1002064685671,
+        "-1002064685671",
         include_latest_message=True,
     )
 
@@ -299,7 +299,7 @@ async def test_memory_scope_target_resolver_rejects_users():
     resolver = TelegramMemoryScopeTargetResolver(client)
 
     with pytest.raises(ValueError, match="group or channel"):
-        await resolver.resolve(20)
+        await resolver.resolve("20")
 
     assert client.get_messages_calls == []
 

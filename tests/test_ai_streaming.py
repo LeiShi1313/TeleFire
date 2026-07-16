@@ -9,16 +9,24 @@ from telefire.ai import (
     AIConversationHandler,
     AIResponder,
     AISettings,
-    AITrigger,
     AgentEvent,
     AgentRunRequest,
-    MemoryBackfillRequest,
     PromptBuilder,
-    parse_ai_trigger,
-    parse_memory_backfill,
-    parse_memory_revision,
+)
+from telefire.chat.commands import (
+    AIAskCommand,
+    InvalidCommand,
+    MemoryBackfillCommand,
+    MemoryRememberCommand,
+    parse_chat_command,
 )
 from telefire.plugins.base import command_registry
+from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
+from telefire.telegram.ai_transport import (
+    TelegramChatTransport,
+    select_telegram_response_format,
+    telegram_system_prompt,
+)
 import telefire.plugins.ai  # noqa: F401
 
 
@@ -84,19 +92,40 @@ class FakeGateway:
         return True
 
 
+def make_telegram_responder(
+    gateway,
+    *,
+    edit_cadence=0,
+    clock=None,
+    response_format="regular_html",
+    **kwargs,
+):
+    transport_kwargs = {"edit_cadence": edit_cadence}
+    if clock is not None:
+        transport_kwargs["clock"] = clock
+    return AIResponder(
+        gateway,
+        transport=TelegramChatTransport(
+            response_format=response_format,
+            **transport_kwargs,
+        ),
+        **kwargs,
+    )
+
+
 class FakeStore:
     def __init__(self):
         self.saved = []
 
-    async def get_answer(self, chat_id, answer_message_id):
+    async def get_answer(self, scope_id, answer_message_id):
         return None
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return next(
             (
                 marker
                 for marker in reversed(self.saved)
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -106,19 +135,19 @@ class FakeStore:
     async def save_answer(self, marker):
         self.saved.append(marker)
 
-    async def is_allowed(self, user_id):
+    async def is_allowed(self, actor_id):
         return False
 
-    async def get_last_request_at(self, user_id):
+    async def get_last_request_at(self, actor_id):
         return None
 
-    async def set_last_request_at(self, user_id, timestamp):
+    async def set_last_request_at(self, actor_id, timestamp):
         return None
 
-    async def allow_user(self, user_id):
+    async def allow_user(self, actor_id):
         return None
 
-    async def deny_user(self, user_id):
+    async def deny_user(self, actor_id):
         return None
 
 
@@ -127,7 +156,8 @@ def make_handler(owner_id, responder):
         owner_id=owner_id,
         responder=responder,
         store=FakeStore(),
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
 
 
@@ -146,37 +176,46 @@ def make_request(prompt: str) -> AgentRunRequest:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/ai hello", AITrigger(prompt="hello")),
-        ("/ai\nhello", AITrigger(prompt="hello")),
-        ("/ai", AITrigger(prompt="")),
-        ("/ai10 hello", AITrigger(prompt="hello", recent_messages=10)),
+        ("/ai hello", AIAskCommand(prompt="hello")),
+        ("/ai\nhello", AIAskCommand(prompt="hello")),
+        ("/ai", AIAskCommand(prompt="")),
+        ("/ai10 hello", AIAskCommand(prompt="hello", recent_messages=10)),
         (
             "/ai10@TelefireBot summarize this",
-            AITrigger(prompt="summarize this", recent_messages=10),
+            AIAskCommand(prompt="summarize this", recent_messages=10),
         ),
-        ("/ai0 invalid", AITrigger(prompt="invalid", recent_messages=0)),
+        ("/ai0 invalid", AIAskCommand(prompt="invalid", recent_messages=0)),
         (" /ai hello", None),
         ("/air hello", None),
         ("/ai10x hello", None),
-        ("/ai_memory hello", None),
+        (
+            "/ai_memory hello",
+            MemoryRememberCommand(instruction="hello"),
+        ),
         ("hello /ai", None),
     ],
 )
 def test_parse_ai_trigger_has_an_exact_command_boundary(text, expected):
-    assert parse_ai_trigger(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/ai_memory remember this", "remember this"),
-        ("/ai_memory\nforget that", "forget that"),
-        ("/ai_memory", ""),
+        (
+            "/ai_memory remember this",
+            MemoryRememberCommand(instruction="remember this"),
+        ),
+        (
+            "/ai_memory\nforget that",
+            MemoryRememberCommand(instruction="forget that"),
+        ),
+        ("/ai_memory", MemoryRememberCommand(instruction="")),
         ("/ai_memoryx no", None),
     ],
 )
 def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
-    assert parse_memory_revision(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -184,22 +223,37 @@ def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
     [
         (
             "/ai_memory_backfill days 7",
-            MemoryBackfillRequest(mode="days", value=7),
+            MemoryBackfillCommand(mode="days", value=7),
         ),
         (
             "/ai_memory_backfill\nmessages\t500",
-            MemoryBackfillRequest(mode="messages", value=500),
+            MemoryBackfillCommand(mode="messages", value=500),
         ),
-        ("/ai_memory_backfill days 0", None),
-        ("/ai_memory_backfill days 31", None),
-        ("/ai_memory_backfill messages 5001", None),
-        ("/ai_memory_backfill weeks 2", None),
-        ("/ai_memory_backfill days 7 extra", None),
+        (
+            "/ai_memory_backfill days 0",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill days 31",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill messages 5001",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill weeks 2",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
+        (
+            "/ai_memory_backfill days 7 extra",
+            InvalidCommand(name="/ai_memory_backfill"),
+        ),
         ("/ai_memory_backfillx days 7", None),
     ],
 )
 def test_parse_memory_backfill_has_bounded_exact_syntax(text, expected):
-    assert parse_memory_backfill(text) == expected
+    assert parse_chat_command(text) == expected
 
 
 def test_ai_settings_are_loaded_without_provider_specific_assumptions(monkeypatch):
@@ -233,7 +287,11 @@ def test_ai_command_is_registered_under_telegram():
 async def test_owner_gets_one_progressively_edited_answer():
     gateway = FakeGateway(["Hello", " ", "world"])
     times = iter([0.0, 1.0, 2.0, 3.0])
-    responder = AIResponder(gateway, edit_cadence=0.5, clock=lambda: next(times))
+    responder = make_telegram_responder(
+        gateway,
+        edit_cadence=0.5,
+        clock=lambda: next(times),
+    )
     handler = make_handler(owner_id=10, responder=responder)
     trigger = FakeMessage("/ai greet me")
 
@@ -257,9 +315,16 @@ async def test_edit_cadence_is_shared_across_answers(monkeypatch):
     async def fake_sleep(seconds):
         sleeps.append(seconds)
 
-    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "telefire.telegram.ai_transport.asyncio.sleep",
+        fake_sleep,
+    )
     gateway = FakeGateway(["answer"])
-    responder = AIResponder(gateway, edit_cadence=4, clock=lambda: 0.0)
+    responder = make_telegram_responder(
+        gateway,
+        edit_cadence=4,
+        clock=lambda: 0.0,
+    )
     first = FakeMessage("/ai first")
     second = FakeMessage("/ai second")
 
@@ -295,8 +360,11 @@ async def test_flood_wait_delays_final_edit_without_replacing_the_answer(monkeyp
             self.replies.append(answer)
             return answer
 
-    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
-    responder = AIResponder(
+    monkeypatch.setattr(
+        "telefire.telegram.ai_transport.asyncio.sleep",
+        fake_sleep,
+    )
+    responder = make_telegram_responder(
         FakeGateway(["final answer"]),
         edit_cadence=0,
         clock=lambda: 0.0,
@@ -312,7 +380,9 @@ async def test_flood_wait_delays_final_edit_without_replacing_the_answer(monkeyp
 
 
 def test_prompt_builder_appends_the_regular_telegram_format_guard():
-    builder = PromptBuilder(system_prompt="Keep answers factual.")
+    builder = PromptBuilder(
+        system_prompt=telegram_system_prompt("Keep answers factual.")
+    )
 
     assert builder.system_prompt.startswith("Keep answers factual.")
     assert "Telegram regular-message HTML" in builder.system_prompt
@@ -324,8 +394,6 @@ def test_prompt_builder_appends_the_regular_telegram_format_guard():
 
 
 def test_response_format_switches_only_for_a_bot_rich_transport():
-    from telefire.ai import select_telegram_response_format
-
     assert (
         select_telegram_response_format(
             is_bot_account=False,
@@ -349,8 +417,10 @@ def test_response_format_switches_only_for_a_bot_rich_transport():
     )
 
     rich_builder = PromptBuilder(
-        system_prompt="Keep answers factual.",
-        response_format="rich_markdown",
+        system_prompt=telegram_system_prompt(
+            "Keep answers factual.",
+            "rich_markdown",
+        ),
     )
     assert "Telegram Bot API rich-message Markdown" in rich_builder.system_prompt
     assert "| Header 1 | Header 2 |" in rich_builder.system_prompt
@@ -381,7 +451,7 @@ async def test_bot_response_uses_telegram_rich_markdown_edit():
 
     formatted = "**Result**\n\n| Key | Value |\n|:----|:------|\n| Mode | Rich |"
     gateway = FakeGateway([formatted])
-    responder = AIResponder(
+    responder = make_telegram_responder(
         gateway,
         edit_cadence=0,
         response_format="rich_markdown",
@@ -408,7 +478,7 @@ async def test_streamed_html_is_sent_as_native_telegram_entities():
         "<pre>Team     Score\nNorway   1\nEngland  2</pre>"
     )
     gateway = FakeGateway([formatted])
-    responder = AIResponder(gateway, edit_cadence=0)
+    responder = make_telegram_responder(gateway)
     trigger = FakeMessage("/ai format this")
 
     result = await responder.answer(trigger, make_request("format this"))
@@ -431,7 +501,7 @@ async def test_streamed_html_is_sent_as_native_telegram_entities():
 @pytest.mark.asyncio
 async def test_streaming_waits_for_visible_text_when_an_html_tag_is_split():
     gateway = FakeGateway(["<b>", "Result", "</b>"])
-    responder = AIResponder(gateway, edit_cadence=0)
+    responder = make_telegram_responder(gateway)
     trigger = FakeMessage("/ai format this")
 
     result = await responder.answer(trigger, make_request("format this"))
@@ -451,7 +521,7 @@ async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
     gateway = FakeGateway(["must not be used"])
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai secret", sender_id=11)
 
@@ -465,9 +535,10 @@ async def test_owner_ai_requests_are_not_blocked_by_chat_scope():
     gateway = FakeGateway(["answer"])
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=FakeStore(),
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     trigger = FakeMessage("/ai secret")
     trigger.chat_id = -1002
@@ -482,7 +553,7 @@ async def test_empty_prompt_finishes_with_usage_without_calling_provider():
     gateway = FakeGateway(["must not be used"])
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai")
 
@@ -497,7 +568,7 @@ async def test_provider_failure_replaces_loading_message():
     gateway = FakeGateway(error=RuntimeError("provider secret detail"))
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai hello")
 
@@ -512,9 +583,8 @@ async def test_provider_failure_uses_standard_logging_format(caplog):
     import logging
 
     gateway = FakeGateway(error=RuntimeError("provider detail"))
-    responder = AIResponder(
+    responder = make_telegram_responder(
         gateway,
-        edit_cadence=0,
         logger=logging.getLogger("telefire-ai-test"),
     )
     trigger = FakeMessage("/ai hello")
@@ -527,7 +597,7 @@ async def test_provider_failure_uses_standard_logging_format(caplog):
 @pytest.mark.asyncio
 async def test_output_is_bounded_and_finalized():
     gateway = FakeGateway(["abcdefghijk"])
-    responder = AIResponder(gateway, edit_cadence=0, max_output_chars=10)
+    responder = make_telegram_responder(gateway, max_output_chars=10)
     trigger = FakeMessage("/ai long")
 
     await responder.answer(trigger, make_request("long"))

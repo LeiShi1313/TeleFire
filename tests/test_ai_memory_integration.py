@@ -17,14 +17,11 @@ from telefire.ai import (
     AgentRunRequest,
     MessageIdentity,
     MentionedUser,
-    MemoryBackfillRequest,
     MemoryDreamResult,
     MemoryDreamState,
     MemoryScopeState,
     MemoryScopeTarget,
     PromptBuilder,
-    TelegramMessageIdentityResolver,
-    TelegramMessageMentionResolver,
 )
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import (
@@ -36,6 +33,13 @@ from telefire.ai_memory import (
     MemoryRetainResult,
     MemoryRevisionResult,
     RecalledMemory,
+)
+from telefire.chat.commands import MemoryBackfillCommand
+from telefire.telegram.ai_identity import (
+    TELEGRAM_IDENTITY_CODEC,
+    TelegramMessageIdentityResolver,
+    TelegramMessageMentionResolver,
+    telegram_memory_event_metadata,
 )
 
 
@@ -152,15 +156,15 @@ class FakeStore:
         self.memory_labels = {}
         self.memory_scope_display_names = {}
 
-    async def get_answer(self, chat_id, answer_message_id):
-        return self.markers.get((chat_id, answer_message_id))
+    async def get_answer(self, scope_id, answer_message_id):
+        return self.markers.get((scope_id, answer_message_id))
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return next(
             (
                 marker
                 for marker in reversed(tuple(self.markers.values()))
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -168,22 +172,22 @@ class FakeStore:
         )
 
     async def save_answer(self, marker):
-        self.markers[(marker.chat_id, marker.answer_message_id)] = marker
+        self.markers[(marker.scope_id, marker.answer_message_id)] = marker
 
-    async def is_allowed(self, user_id):
-        return user_id in self.allowed
+    async def is_allowed(self, actor_id):
+        return actor_id in self.allowed
 
-    async def allow_user(self, user_id):
-        self.allowed.add(user_id)
+    async def allow_user(self, actor_id):
+        self.allowed.add(actor_id)
 
-    async def deny_user(self, user_id):
-        self.allowed.discard(user_id)
+    async def deny_user(self, actor_id):
+        self.allowed.discard(actor_id)
 
-    async def get_last_request_at(self, user_id):
-        return self.last_request.get(user_id)
+    async def get_last_request_at(self, actor_id):
+        return self.last_request.get(actor_id)
 
-    async def set_last_request_at(self, user_id, timestamp):
-        self.last_request[user_id] = timestamp
+    async def set_last_request_at(self, actor_id, timestamp):
+        self.last_request[actor_id] = timestamp
 
     async def get_memory_document_receipt(self, scope_id, document_id):
         return self.memory_documents.get((scope_id, document_id))
@@ -279,11 +283,13 @@ class FakeStore:
         if display_name:
             self.memory_scope_display_names[scope_id] = display_name
 
-    async def mark_memory_excluded_message(self, chat_id, message_id, kind):
-        self.memory_excluded.add((chat_id, message_id, kind))
+    async def mark_memory_excluded_message(self, scope_id, message_id, kind):
+        self.memory_excluded.add((scope_id, message_id, kind))
 
-    async def is_memory_excluded_message(self, chat_id, message_id):
-        return any(item[:2] == (chat_id, message_id) for item in self.memory_excluded)
+    async def is_memory_excluded_message(self, scope_id, message_id):
+        return any(
+            item[:2] == (scope_id, message_id) for item in self.memory_excluded
+        )
 
     async def get_memory_dream_state(self, scope_id):
         return self.memory_dream_state.get(scope_id, MemoryDreamState(scope_id))
@@ -380,6 +386,9 @@ class FakeLogger:
 class FakeAttachmentDescriber:
     def __init__(self, descriptions=None):
         self.descriptions = descriptions or {}
+
+    def has_attachment(self, message):
+        return message.id in self.descriptions
 
     async def describe(self, message):
         return self.descriptions.get(message.id)
@@ -485,19 +494,22 @@ def make_handler(
     store = store or FakeStore(allowed=allowed)
     return AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=AIResponder(gateway),
         store=store,
         prompt_builder=PromptBuilder(
             attachment_describer=attachment_describer,
             identity_resolver=identity_resolver,
             mention_resolver=mention_resolver,
             history_source=history_source,
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            metadata_resolver=telegram_memory_event_metadata,
         ),
         rate_limiter=AIRateLimiter(store, cooldown_seconds=0),
         memory=memory,
         dream_runner=dream_runner,
         memory_scope_resolver=memory_scope_resolver,
         memory_command_delete_delay=memory_command_delete_delay,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         logger=logger,
     )
 
@@ -836,11 +848,12 @@ async def test_ai_generated_chain_message_is_context_but_not_retained_evidence()
     human = FakeMessage("I prefer Rust", sender_id=20)
     ai_output = FakeMessage("Generated claim", sender_id=10, reply_to=human)
     store = FakeStore()
-    store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
-        chat_id=ai_output.chat_id,
+    scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(ai_output.chat_id)
+    store.markers[(scope_id, ai_output.id)] = AIAnswerMarker(
+        scope_id=scope_id,
         answer_message_id=ai_output.id,
         trigger_message_id=999,
-        requester_id=20,
+        requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(20),
         prompt="old prompt",
         answer_text=ai_output.raw_text,
         parent_answer_message_id=None,
@@ -1016,14 +1029,15 @@ async def test_revision_does_not_curate_when_correction_evidence_fails():
 @pytest.mark.asyncio
 async def test_revision_requires_direct_human_target_and_owner():
     memory = FakeMemory()
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     human = FakeMessage("I prefer Rust", sender_id=20)
     ai_output = FakeMessage("Generated answer", sender_id=10, reply_to=human)
-    store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
-        chat_id=ai_output.chat_id,
+    scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(ai_output.chat_id)
+    store.markers[(scope_id, ai_output.id)] = AIAnswerMarker(
+        scope_id=scope_id,
         answer_message_id=ai_output.id,
         trigger_message_id=999,
-        requester_id=20,
+        requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(20),
         prompt="question",
         answer_text=ai_output.raw_text,
         parent_answer_message_id=None,
@@ -1273,7 +1287,7 @@ async def test_owner_can_enable_continuous_memory_for_remote_channel():
     store = FakeStore()
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
                 latest_message_id=33392,
@@ -1295,7 +1309,7 @@ async def test_owner_can_enable_continuous_memory_for_remote_channel():
     assert await handler.handle(command) is True
 
     scope_id = "telegram:chat:-1002064685671"
-    assert resolver.calls == [(-1002064685671, True)]
+    assert resolver.calls == [("-1002064685671", True)]
     assert scope_id in store.memory_continuous
     assert store.memory_continuous_cursors[scope_id] == 33392
     assert store.memory_scope_display_names[scope_id] == "Seele Leaks"
@@ -1313,7 +1327,7 @@ async def test_owner_can_disable_continuous_memory_for_remote_channel():
     store.memory_continuous.add(scope_id)
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
             )
@@ -1333,7 +1347,7 @@ async def test_owner_can_disable_continuous_memory_for_remote_channel():
 
     assert await handler.handle(command) is True
 
-    assert resolver.calls == [(-1002064685671, False)]
+    assert resolver.calls == [("-1002064685671", False)]
     assert scope_id not in store.memory_continuous
     assert command.deleted is True
     assert command.replies[0].text == (
@@ -1355,7 +1369,7 @@ async def test_owner_can_control_dream_for_remote_channel(command_text, enabled)
     store.memory_dream.add(scope_id)
     resolver = FakeMemoryScopeResolver(
         {
-            -1002064685671: MemoryScopeTarget(
+            "-1002064685671": MemoryScopeTarget(
                 chat_id=-1002064685671,
                 display_name="Seele Leaks",
             )
@@ -1371,42 +1385,58 @@ async def test_owner_can_control_dream_for_remote_channel(command_text, enabled)
 
     assert await handler.handle(command) is True
 
-    assert resolver.calls == [(-1002064685671, False)]
+    assert resolver.calls == [("-1002064685671", False)]
     assert (scope_id in store.memory_dream) is enabled
     assert command.deleted is True
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("command_text", "expected"),
-    [
-        (
-            "/ai_memory_enable not-an-id",
-            "Usage: /ai_memory_enable [numeric group/channel ID]",
-        ),
-        (
-            "/ai_dream_enable -1001 extra",
-            "Usage: /ai_dream_enable [numeric group/channel ID]",
-        ),
-    ],
-)
-async def test_remote_memory_commands_reject_invalid_target_syntax(
-    command_text,
-    expected,
-):
+async def test_remote_memory_commands_reject_extra_arguments():
     resolver = FakeMemoryScopeResolver()
     handler = make_handler(
         FakeGateway(["unused"]),
         FakeMemory(),
         memory_scope_resolver=resolver,
     )
-    command = FakeMessage(command_text, sender_id=10)
+    command = FakeMessage("/ai_dream_enable -1001 extra", sender_id=10)
 
     assert await handler.handle(command) is True
 
     assert resolver.calls == []
     assert command.deleted is False
-    assert command.replies[0].text == expected
+    assert command.replies[0].text == (
+        "Usage: /ai_dream_enable [chat target]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_remote_memory_command_passes_opaque_target_to_adapter():
+    resolver = FakeMemoryScopeResolver(
+        {
+            "seele-leaks": MemoryScopeTarget(
+                chat_id=-1002064685671,
+                display_name="Seele Leaks",
+                latest_message_id=33392,
+            )
+        }
+    )
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        memory_scope_resolver=resolver,
+    )
+    command = FakeMessage(
+        "/ai_memory_enable seele-leaks",
+        sender_id=10,
+        chat_id=10,
+    )
+
+    assert await handler.handle(command) is True
+
+    assert resolver.calls == [("seele-leaks", True)]
+    assert command.replies[0].text.startswith(
+        "Continuous memory enabled for Seele Leaks"
+    )
 
 
 @pytest.mark.asyncio
@@ -1427,8 +1457,8 @@ async def test_remote_memory_command_reports_inaccessible_target():
 
     assert command.deleted is False
     assert command.replies[0].text == (
-        "Unable to access that Telegram group/channel. "
-        "Check the numeric chat ID and this account's access."
+        "Unable to access that chat target. "
+        "Check its identifier and this account's access."
     )
 
 
@@ -1576,7 +1606,7 @@ async def test_continuous_scope_skips_duplicate_ai_reply_chain_retain():
 
 @pytest.mark.asyncio
 async def test_enabled_scope_does_not_retain_non_human_ai_request():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     memory = FakeMemory()
     handler = make_handler(
         FakeGateway(["answer"]),
@@ -1604,7 +1634,7 @@ async def test_failed_agent_run_does_not_retain_enabled_scope():
 
 @pytest.mark.asyncio
 async def test_non_owner_cannot_change_scope_memory_state():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     resolver = FakeMemoryScopeResolver()
     handler = make_handler(
         FakeGateway(["unused"]),
@@ -1648,10 +1678,10 @@ async def test_outgoing_channel_post_can_enable_continuous_memory():
 
 @pytest.mark.asyncio
 async def test_post_answer_retain_does_not_hold_delegated_rate_lease():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     memory = BlockingRetainMemory()
     gateway = FakeGateway(["first answer", "second answer"])
-    handler = make_handler(gateway, memory, store=store, allowed={20})
+    handler = make_handler(gateway, memory, store=store)
 
     first = FakeMessage("/ai first", sender_id=20)
     first_task = asyncio.create_task(handler.handle(first))
@@ -1859,12 +1889,12 @@ async def test_failed_manual_dream_deletes_command_but_keeps_error_visible():
     [
         (
             "/ai_memory_backfill days 7",
-            MemoryBackfillRequest(mode="days", value=7),
+            MemoryBackfillCommand(mode="days", value=7),
             "Backfilling the last 7 days...",
         ),
         (
             "/ai_memory_backfill messages 500",
-            MemoryBackfillRequest(mode="messages", value=500),
+            MemoryBackfillCommand(mode="messages", value=500),
             "Backfilling the latest 500 messages...",
         ),
     ],
@@ -1901,7 +1931,7 @@ async def test_invalid_and_non_owner_backfill_commands_do_not_start_work():
     handler = make_handler(
         FakeGateway(["unused"]),
         FakeMemory(),
-        store=FakeStore(allowed={20}),
+        store=FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)}),
         dream_runner=runner,
     )
     invalid = FakeMessage("/ai_memory_backfill days 31", sender_id=10)

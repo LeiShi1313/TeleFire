@@ -14,9 +14,6 @@ from uuid import uuid4
 
 import aiosqlite
 import aiohttp
-from telethon import helpers as telegram_helpers
-from telethon import utils as telegram_utils
-from telethon.tl import types as telegram_types
 
 from telefire.ai_memory import (
     MemoryClient,
@@ -43,6 +40,7 @@ from telefire.chat.commands import (
     MemoryStatusCommand,
     parse_chat_command,
 )
+from telefire.chat.identity import IdentityCodec, NamespacedIdentityCodec
 from telefire.chat.transport import ChatTransport, ObjectChatTransport
 
 
@@ -307,147 +305,6 @@ class MessageHistorySource(Protocol):
         *,
         limit: int,
     ) -> tuple[ReplyTarget, ...]: ...
-
-
-class TelegramMessageIdentityResolver:
-    def __init__(self, *, logger: Any | None = None):
-        self._logger = logger
-
-    async def resolve(self, message: ReplyTarget) -> MessageIdentity:
-        sender, chat = await asyncio.gather(
-            self._load_entity(message, "get_sender"),
-            self._load_entity(message, "get_chat"),
-        )
-        is_human = (
-            isinstance(sender, telegram_types.User)
-            and not bool(getattr(sender, "bot", False))
-        )
-        is_broadcast_channel_post = (
-            isinstance(sender, telegram_types.Channel)
-            and isinstance(chat, telegram_types.Channel)
-            and bool(getattr(chat, "broadcast", False))
-            and sender.id == chat.id
-        )
-        return MessageIdentity(
-            subject_id=(
-                _telegram_subject_id(sender.id)
-                if is_human
-                else _telegram_channel_subject_id(sender.id)
-                if is_broadcast_channel_post
-                else None
-            ),
-            subject_display_name=_telegram_display_name(sender),
-            scope_display_name=_telegram_display_name(chat),
-            is_human=is_human,
-        )
-
-    async def _load_entity(self, message: ReplyTarget, method_name: str) -> Any | None:
-        method = getattr(message, method_name, None)
-        if not callable(method):
-            return None
-        try:
-            return await method()
-        except Exception as exc:
-            if self._logger is not None:
-                self._logger.debug(
-                    "Telegram identity lookup failed (%s): %s",
-                    type(exc).__name__,
-                    exc,
-                )
-            return None
-
-
-class TelegramMessageMentionResolver:
-    def __init__(self, client: Any, *, logger: Any | None = None):
-        self._client = client
-        self._logger = logger
-
-    async def resolve(self, message: ReplyTarget) -> tuple[MentionedUser, ...]:
-        text = message.raw_text or ""
-        surrogate_text = telegram_helpers.add_surrogate(text)
-        resolved: dict[int, MentionedUser] = {}
-        for entity in getattr(message, "entities", None) or ():
-            candidate: Any | None = None
-            if isinstance(entity, telegram_types.MessageEntityMentionName):
-                candidate = entity.user_id
-            elif isinstance(entity, telegram_types.MessageEntityMention):
-                mention = telegram_helpers.del_surrogate(
-                    surrogate_text[entity.offset : entity.offset + entity.length]
-                )
-                if not mention.startswith("@") or len(mention) < 2:
-                    continue
-                candidate = mention
-            else:
-                continue
-            try:
-                actor = await self._client.get_entity(candidate)
-            except Exception as exc:
-                if self._logger is not None:
-                    self._logger.debug(
-                        "Telegram mention lookup failed (%s): %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-                continue
-            user_id = getattr(actor, "id", None)
-            if not isinstance(user_id, int) or user_id <= 0:
-                continue
-            resolved[user_id] = MentionedUser(
-                user_id=user_id,
-                display_name=_telegram_display_name(actor),
-            )
-        return tuple(resolved.values())
-
-
-class TelegramMemoryScopeTargetResolver:
-    def __init__(self, client: Any, *, logger: Any | None = None):
-        self._client = client
-        self._logger = logger
-
-    async def resolve(
-        self,
-        target: str,
-        *,
-        include_latest_message: bool = False,
-    ) -> MemoryScopeTarget:
-        digits = target.removeprefix("-")
-        if (
-            not digits
-            or not digits.isascii()
-            or not digits.isdecimal()
-            or int(target) == 0
-        ):
-            raise ValueError("Telegram target must be a non-zero numeric chat ID")
-        chat_id = int(target)
-        try:
-            entity = await self._client.get_entity(chat_id)
-            if not isinstance(
-                entity,
-                (telegram_types.Chat, telegram_types.Channel),
-            ):
-                raise ValueError("Telegram target is not a group or channel")
-            latest_message_id = 0
-            if include_latest_message:
-                messages = await self._client.get_messages(entity, limit=1)
-                if messages:
-                    latest_message_id = int(messages[0].id)
-        except Exception as exc:
-            if self._logger is not None:
-                self._logger.warning(
-                    "Telegram memory scope lookup failed "
-                    "(chat_id=%s, error=%s): %s",
-                    chat_id,
-                    type(exc).__name__,
-                    exc,
-                )
-            raise ValueError(
-                "Telegram group or channel is inaccessible"
-            ) from exc
-        return MemoryScopeTarget(
-            chat_id=telegram_utils.get_peer_id(entity),
-            display_name=_telegram_display_name(entity),
-            latest_message_id=latest_message_id,
-        )
 
 
 class ConversationStore(Protocol):
@@ -906,6 +763,8 @@ class PromptBuilder:
         history_source: MessageHistorySource | None = None,
         max_attachments: int = 3,
         transport: ChatTransport | None = None,
+        identity_codec: IdentityCodec | None = None,
+        metadata_resolver: Callable[[ReplyTarget], dict[str, Any]] | None = None,
     ):
         if max_context_messages < 1 or max_context_chars < 1:
             raise ValueError("Context limits must be positive")
@@ -920,6 +779,12 @@ class PromptBuilder:
         self.history_source = history_source
         self.max_attachments = max_attachments
         self._transport = transport or ObjectChatTransport()
+        self.identity_codec = identity_codec or NamespacedIdentityCodec(
+            source="chat",
+            actor_kind="actor",
+            scope_kind="scope",
+        )
+        self._metadata_resolver = metadata_resolver
 
     def has_attachment(self, message: ReplyTarget) -> bool:
         return (
@@ -956,6 +821,14 @@ class PromptBuilder:
             return await self.mention_resolver.resolve(message)
         except Exception:
             return ()
+
+    def resolve_metadata(self, message: ReplyTarget) -> dict[str, Any]:
+        if self._metadata_resolver is None:
+            return {}
+        try:
+            return self._metadata_resolver(message)
+        except Exception:
+            return {}
 
     async def load_chat_context(
         self,
@@ -1081,7 +954,7 @@ class PromptBuilder:
                         identity=message_identity,
                         reply_to_message_id=message.reply_to_msg_id,
                         mentioned_users=await self.resolve_mentions(message),
-                        metadata=_telegram_memory_event_metadata(message),
+                        metadata=self.resolve_metadata(message),
                     )
                 normalized.append(
                     ChatContextMessage(
@@ -1104,8 +977,8 @@ class PromptBuilder:
             current_reply_to_message_id=current_reply_to_message_id,
         )
 
-    @staticmethod
     def render_chat_context(
+        self,
         context: ChatContext,
         *,
         assistant_message_ids: frozenset[int] = frozenset(),
@@ -1151,7 +1024,7 @@ class PromptBuilder:
                     "actor_id="
                     + (
                         message.identity.subject_id
-                        or _telegram_subject_id(message.sender_id)
+                        or self.identity_codec.actor_id(message.sender_id)
                     )
                 )
             if message.identity.subject_display_name:
@@ -2246,6 +2119,7 @@ class AIConversationHandler:
         memory_scope_resolver: MemoryScopeTargetResolver | None = None,
         memory_command_delete_delay: float = 3.0,
         transport: ChatTransport | None = None,
+        identity_codec: IdentityCodec | None = None,
         logger: Any | None = None,
     ):
         if memory_command_delete_delay < 0:
@@ -2267,6 +2141,7 @@ class AIConversationHandler:
             or responder.transport
             or ObjectChatTransport()
         )
+        self._identity_codec = identity_codec or prompt_builder.identity_codec
 
     async def handle(self, message: ReplyTarget) -> bool:
         if message.sender_id is None or message.chat_id is None:
@@ -2531,7 +2406,9 @@ class AIConversationHandler:
                                 identity=current_identity,
                                 reply_to_message_id=message.reply_to_msg_id,
                                 mentioned_users=current_mentions,
-                                metadata=_telegram_memory_event_metadata(message),
+                                metadata=self._prompt_builder.resolve_metadata(
+                                    message
+                                ),
                             )
                         )
                     if retained_observations:
@@ -2666,7 +2543,7 @@ class AIConversationHandler:
                 latest_message_id=message.id,
             )
 
-        scope_id = _telegram_scope_id(target.chat_id)
+        scope_id = self._identity_codec.scope_id(target.chat_id)
         target_label = _memory_scope_target_label(target)
         destination = target_label if is_remote else "this chat"
         if command.mode == "continuous":
@@ -2713,7 +2590,7 @@ class AIConversationHandler:
 
     async def _handle_memory_scope_status(self, message: ReplyTarget) -> bool:
         assert message.chat_id is not None
-        scope_id = _telegram_scope_id(message.chat_id)
+        scope_id = self._identity_codec.scope_id(message.chat_id)
         scope = await self._store.get_memory_scope_state(scope_id)
         state = await self._store.get_memory_dream_state(scope_id)
         dream_status = "enabled" if scope.dream_enabled else "disabled"
@@ -2779,7 +2656,7 @@ class AIConversationHandler:
     async def _continuous_memory_enabled(self, chat_id: int) -> bool:
         try:
             state = await self._store.get_memory_scope_state(
-                _telegram_scope_id(chat_id)
+                self._identity_codec.scope_id(chat_id)
             )
             return state.continuous_enabled
         except Exception as exc:
@@ -2790,7 +2667,7 @@ class AIConversationHandler:
         assert message.chat_id is not None
         await self._schedule_memory_command_delete(message, "/ai_memory_dream")
         scope = await self._store.get_memory_scope_state(
-            _telegram_scope_id(message.chat_id)
+            self._identity_codec.scope_id(message.chat_id)
         )
         if scope.continuous_enabled:
             await self._reply_memory_excluded(
@@ -2964,22 +2841,24 @@ class AIConversationHandler:
         if self._memory is None:
             return None
         participants: dict[str, str | None] = {
-            _telegram_subject_id(requester_id): requester_identity.subject_display_name
+            self._identity_codec.actor_id(
+                requester_id
+            ): requester_identity.subject_display_name
         }
         for observation in observations:
             subject_id = (
                 observation.identity.subject_id
-                or _telegram_subject_id(observation.sender_id)
+                or self._identity_codec.actor_id(observation.sender_id)
             )
             display_name = observation.identity.subject_display_name
             if subject_id not in participants or display_name:
                 participants[subject_id] = display_name
             for mention in observation.mentioned_users:
-                subject_id = _telegram_subject_id(mention.user_id)
+                subject_id = self._identity_codec.actor_id(mention.user_id)
                 if subject_id not in participants or mention.display_name:
                     participants[subject_id] = mention.display_name
         for mention in current_mentions:
-            subject_id = _telegram_subject_id(mention.user_id)
+            subject_id = self._identity_codec.actor_id(mention.user_id)
             if subject_id not in participants or mention.display_name:
                 participants[subject_id] = mention.display_name
         anchors = tuple(
@@ -2992,7 +2871,7 @@ class AIConversationHandler:
             ]
         )
         return AgentMemoryTarget(
-            scope_id=_telegram_scope_id(chat_id),
+            scope_id=self._identity_codec.scope_id(chat_id),
             anchors=anchors,
         )
 
@@ -3065,7 +2944,8 @@ class AIConversationHandler:
                 ),
                 target_identity.subject_display_name,
             )
-            revision_episode = _telegram_revision_episode(
+            revision_episode = _chat_revision_episode(
+                self._identity_codec,
                 chat_id=message.chat_id,
                 command_message_id=message.id,
                 owner_id=self._owner_id,
@@ -3095,8 +2975,8 @@ class AIConversationHandler:
                 return True
             try:
                 await self._memory.revise(
-                    scope_id=_telegram_scope_id(message.chat_id),
-                    subject_id=_telegram_subject_id(target.sender_id),
+                    scope_id=self._identity_codec.scope_id(message.chat_id),
+                    subject_id=self._identity_codec.actor_id(target.sender_id),
                     instruction=instruction,
                 )
             except Exception as exc:
@@ -3147,8 +3027,8 @@ class AIConversationHandler:
         if self._memory is None or not observations:
             return None
         try:
-            scope_id = _telegram_scope_id(chat_id)
-            root_source_id = _telegram_memory_source_id(
+            scope_id = self._identity_codec.scope_id(chat_id)
+            root_source_id = self._identity_codec.message_source_id(
                 chat_id,
                 observations[0].message_id,
             )
@@ -3159,10 +3039,14 @@ class AIConversationHandler:
             append_to_dream_document = bool(
                 existing_document_id
                 and existing_document_id.startswith(
-                    ("telegram:dream-segment:", "telegram:dream-session:")
+                    (
+                        f"{self._identity_codec.source}:dream-segment:",
+                        f"{self._identity_codec.source}:dream-session:",
+                    )
                 )
             )
-            episode = _telegram_memory_episode(
+            episode = _chat_memory_episode(
+                self._identity_codec,
                 chat_id,
                 observations,
                 document_id=(
@@ -3297,71 +3181,6 @@ def _message_datetime(message: ReplyTarget) -> datetime:
     return value.astimezone(UTC)
 
 
-def _telegram_memory_event_metadata(message: ReplyTarget) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    chat_id = getattr(message, "chat_id", None)
-    post_author = getattr(message, "post_author", None)
-    if isinstance(post_author, str) and post_author.strip():
-        metadata["post_author"] = post_author.strip()[:256]
-    reply = getattr(message, "reply_to", None)
-    quote_text = getattr(reply, "quote_text", None)
-    if isinstance(quote_text, str) and quote_text.strip():
-        quotation: dict[str, Any] = {"text": quote_text.strip()[:4_000]}
-        reply_id = getattr(message, "reply_to_msg_id", None)
-        if isinstance(chat_id, int) and isinstance(reply_id, int):
-            quotation["source_id"] = _telegram_memory_source_id(chat_id, reply_id)
-        quote_offset = getattr(reply, "quote_offset", None)
-        if isinstance(quote_offset, int) and quote_offset >= 0:
-            quotation["offset"] = quote_offset
-        metadata["quotation"] = quotation
-
-    forward = getattr(message, "fwd_from", None)
-    if forward is not None:
-        attribution: dict[str, Any] = {}
-        from_name = getattr(forward, "from_name", None)
-        if isinstance(from_name, str) and from_name.strip():
-            attribution["actor_display_name"] = from_name.strip()[:256]
-        from_id = getattr(forward, "from_id", None)
-        if isinstance(from_id, telegram_types.PeerUser):
-            attribution["actor_id"] = _telegram_subject_id(from_id.user_id)
-        source_peer = getattr(forward, "saved_from_peer", None) or from_id
-        source_message_id = getattr(forward, "saved_from_msg_id", None) or getattr(
-            forward, "channel_post", None
-        )
-        if source_peer is not None and isinstance(source_message_id, int):
-            try:
-                source_chat_id = telegram_utils.get_peer_id(source_peer)
-            except (TypeError, ValueError):
-                source_chat_id = None
-            if isinstance(source_chat_id, int):
-                attribution["source_id"] = _telegram_memory_source_id(
-                    source_chat_id,
-                    source_message_id,
-                )
-        forwarded_at = getattr(forward, "date", None)
-        if isinstance(forwarded_at, datetime):
-            if forwarded_at.tzinfo is None:
-                forwarded_at = forwarded_at.replace(tzinfo=UTC)
-            attribution["source_time"] = (
-                forwarded_at.astimezone(UTC).isoformat().replace("+00:00", "Z")
-            )
-        if attribution:
-            metadata["forwarded_from"] = attribution
-    return metadata
-
-
-def _telegram_subject_id(user_id: int) -> str:
-    return f"telegram:user:{user_id}"
-
-
-def _telegram_channel_subject_id(channel_id: int) -> str:
-    return f"telegram:channel:{channel_id}"
-
-
-def _telegram_scope_id(chat_id: int) -> str:
-    return f"telegram:chat:{chat_id}"
-
-
 def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
     if target.display_name:
         return f"{target.display_name} ({target.chat_id})"
@@ -3369,11 +3188,11 @@ def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
 
 
 def _format_memory_scope_summary(state: MemoryScopeState) -> str:
-    chat_id = state.scope_id.removeprefix("telegram:chat:")
+    external_id = state.scope_id.rsplit(":", 1)[-1]
     label = (
-        f"{state.display_name} ({chat_id})"
+        f"{state.display_name} ({external_id})"
         if state.display_name
-        else chat_id
+        else state.scope_id
     )
     if state.continuous_enabled:
         cursor = (
@@ -3408,11 +3227,8 @@ def _format_memory_time(timestamp: float | None) -> str:
     )
 
 
-def _telegram_memory_source_id(chat_id: int, message_id: int) -> str:
-    return f"telegram:message:{chat_id}:{message_id}"
-
-
-def _telegram_memory_episode(
+def _chat_memory_episode(
+    identity_codec: IdentityCodec,
     chat_id: int,
     observations: tuple[HumanObservation, ...],
     *,
@@ -3431,26 +3247,29 @@ def _telegram_memory_episode(
         None,
     )
     return MemoryEpisode(
-        scope_id=_telegram_scope_id(chat_id),
+        scope_id=identity_codec.scope_id(chat_id),
         scope_display_name=scope_display_name,
-        document_id=(document_id or f"telegram:thread:{chat_id}:{root_message_id}"),
-        source="telegram",
+        document_id=(
+            document_id
+            or identity_codec.thread_document_id(chat_id, root_message_id)
+        ),
+        source=identity_codec.source,
         events=tuple(
             MemoryEvent(
-                source_id=_telegram_memory_source_id(
+                source_id=identity_codec.message_source_id(
                     chat_id,
                     observation.message_id,
                 ),
                 actor_id=(
                     observation.identity.subject_id
-                    or _telegram_subject_id(observation.sender_id)
+                    or identity_codec.actor_id(observation.sender_id)
                 ),
                 actor_display_name=observation.identity.subject_display_name,
                 occurred_at=observation.occurred_at,
                 text=observation.text,
                 mentioned_at=observation.mentioned_at,
                 reply_to_source_id=(
-                    _telegram_memory_source_id(
+                    identity_codec.message_source_id(
                         chat_id,
                         observation.reply_to_message_id,
                     )
@@ -3459,7 +3278,7 @@ def _telegram_memory_episode(
                 ),
                 mentioned_actors=tuple(
                     (
-                        _telegram_subject_id(mention.user_id),
+                        identity_codec.actor_id(mention.user_id),
                         mention.display_name,
                     )
                     for mention in observation.mentioned_users
@@ -3471,7 +3290,8 @@ def _telegram_memory_episode(
     )
 
 
-def _telegram_revision_episode(
+def _chat_revision_episode(
+    identity_codec: IdentityCodec,
     *,
     chat_id: int,
     command_message_id: int,
@@ -3483,27 +3303,30 @@ def _telegram_revision_episode(
     occurred_at: datetime,
     target_message_id: int,
 ) -> MemoryEpisode:
-    target_key = _telegram_subject_id(target_id)
+    target_key = identity_codec.actor_id(target_id)
     target_label = (
         f"{target_display_name} ({target_key})" if target_display_name else target_key
     )
     return MemoryEpisode(
-        scope_id=_telegram_scope_id(chat_id),
-        document_id=f"telegram:revision:{chat_id}:{command_message_id}",
-        source="telegram-revision",
+        scope_id=identity_codec.scope_id(chat_id),
+        document_id=identity_codec.revision_document_id(
+            chat_id,
+            command_message_id,
+        ),
+        source=f"{identity_codec.source}-revision",
         events=(
             MemoryEvent(
-                source_id=_telegram_memory_source_id(
+                source_id=identity_codec.message_source_id(
                     chat_id,
                     command_message_id,
                 ),
-                actor_id=_telegram_subject_id(owner_id),
+                actor_id=identity_codec.actor_id(owner_id),
                 actor_display_name=owner_display_name,
                 occurred_at=occurred_at,
                 text=(
                     f"Trusted owner memory revision about {target_label}: {instruction}"
                 ),
-                reply_to_source_id=_telegram_memory_source_id(
+                reply_to_source_id=identity_codec.message_source_id(
                     chat_id,
                     target_message_id,
                 ),
@@ -3530,22 +3353,6 @@ async def _record_episode_labels(
         episode.scope_display_name,
         actor_labels,
     )
-
-
-def _telegram_display_name(entity: Any | None) -> str | None:
-    if entity is None:
-        return None
-    display_name = telegram_utils.get_display_name(entity).strip()
-    if not display_name:
-        username = (getattr(entity, "username", None) or "").strip()
-        display_name = f"@{username}" if username else ""
-    display_name = " ".join(display_name.split())
-    return display_name[:256] or None
-
-
-def _memory_subject_label(user_id: int, display_name: str | None) -> str:
-    subject_id = _telegram_subject_id(user_id)
-    return f"{display_name} ({subject_id})" if display_name else subject_id
 
 
 def _pluralize(count: int, noun: str) -> str:

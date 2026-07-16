@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 from collections.abc import AsyncIterator
 from dataclasses import fields
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +12,7 @@ from telefire.ai import (
     AIResponder,
     AgentEvent,
     AgentRunRequest,
+    MemoryScopeState,
     PromptBuilder,
 )
 from telefire.chat.attachments import AttachmentDescription, AttachmentReference
@@ -106,7 +109,11 @@ def test_attachment_reference_contains_metadata_but_no_binary_payload():
 
 
 class FakeGateway:
+    def __init__(self):
+        self.requests: list[AgentRunRequest] = []
+
     async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
+        self.requests.append(request)
         yield AgentEvent(
             type="run_started",
             run_id=request.run_id,
@@ -229,6 +236,12 @@ class FakeStore:
     async def mark_memory_excluded_message(self, chat_id, message_id, kind):
         return None
 
+    async def get_memory_scope_state(self, scope_id):
+        return MemoryScopeState(
+            scope_id=scope_id,
+            continuous_enabled=True,
+        )
+
 
 @pytest.mark.asyncio
 async def test_handler_uses_transport_for_sdk_operations():
@@ -281,3 +294,54 @@ async def test_attachment_detection_does_not_require_telegram_file_attributes():
 
     assert handled is True
     assert transport.updates[-1] == ("final", "agent", True)
+
+
+def test_shared_ai_module_has_no_telethon_imports():
+    import telefire.ai as ai_module
+
+    tree = ast.parse(Path(ai_module.__file__).read_text())
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    imported.update(
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    )
+
+    assert not any(name == "telethon" or name.startswith("telethon.") for name in imported)
+
+
+@pytest.mark.asyncio
+async def test_memory_coordinates_follow_the_injected_chat_identity_codec():
+    transport = FakeTransport()
+    gateway = FakeGateway()
+    qq = NamespacedIdentityCodec(
+        source="qq",
+        actor_kind="user",
+        scope_kind="group",
+    )
+    prompt_builder = PromptBuilder(
+        transport=transport,
+        identity_codec=qq,
+    )
+    handler = AIConversationHandler(
+        owner_id=42,
+        responder=AIResponder(gateway, transport=transport),
+        store=FakeStore(),
+        prompt_builder=prompt_builder,
+        transport=transport,
+        memory=object(),
+        identity_codec=qq,
+    )
+    message = MinimalMessage("/ai who am I?")
+
+    assert await handler.handle(message) is True
+
+    memory = gateway.requests[0].memory
+    assert memory is not None
+    assert memory.scope_id == "qq:group:7"
+    assert [anchor.identity for anchor in memory.anchors] == ["qq:user:42"]

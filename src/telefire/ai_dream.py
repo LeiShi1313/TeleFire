@@ -18,17 +18,19 @@ from telefire.ai import (
     MemoryDreamResult,
     PromptBuilder,
     ReplyTarget,
+    _chat_memory_episode,
     _memory_message_text,
     _message_datetime,
     _record_episode_labels,
-    _telegram_memory_event_metadata,
-    _telegram_memory_episode,
-    _telegram_scope_id,
 )
 from telefire.ai_attachments import attachment_metadata_only, message_has_attachment
 from telefire.chat.commands import (
     MAX_MEMORY_BACKFILL_MESSAGES,
     MemoryBackfillCommand,
+)
+from telefire.telegram.ai_identity import (
+    TELEGRAM_IDENTITY_CODEC,
+    telegram_memory_event_metadata,
 )
 from telefire.ai_memory import (
     MemoryClient,
@@ -485,7 +487,7 @@ class TelegramDreamScanner:
             )
         except DreamCycleTimeoutError as exc:
             await self._store.record_memory_dream_failure(
-                _telegram_scope_id(chat_id),
+                TELEGRAM_IDENTITY_CODEC.scope_id(chat_id),
                 failed_at=self._clock(),
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -539,7 +541,7 @@ class TelegramDreamScanner:
     ) -> Any:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
-            scope_id = _telegram_scope_id(chat_id)
+            scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
             acquired_at = self._clock()
             acquired = await self._store.acquire_memory_dream_lease(
                 scope_id,
@@ -577,7 +579,7 @@ class TelegramDreamScanner:
         self,
         chat_id: int,
     ) -> ContinuousMemoryResult:
-        scope_id = _telegram_scope_id(chat_id)
+        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
         scope = await self._store.get_memory_scope_state(scope_id)
         if not scope.continuous_enabled:
             raise ValueError("Continuous memory is disabled for this chat")
@@ -680,7 +682,7 @@ class TelegramDreamScanner:
 
     async def _run_scope(self, chat_id: int) -> MemoryDreamResult:
         deadline = self._monotonic() + self._settings.cycle_budget_seconds
-        scope_id = _telegram_scope_id(chat_id)
+        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
         scope = await self._store.get_memory_scope_state(scope_id)
         if scope.continuous_enabled:
             raise ValueError("Continuous memory overrides Dream for this chat")
@@ -873,7 +875,7 @@ class TelegramDreamScanner:
             for item in chain:
                 group[item.id] = item
 
-        scope_id = _telegram_scope_id(chat_id)
+        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
         source_ids = tuple(
             f"telegram:message:{chat_id}:{message_id}"
             for grouped in root_groups.values()
@@ -1042,7 +1044,8 @@ class TelegramDreamScanner:
             )
             if not observations:
                 continue
-            episode = _telegram_memory_episode(
+            episode = _chat_memory_episode(
+                TELEGRAM_IDENTITY_CODEC,
                 chat_id,
                 observations,
                 document_id=document_id,
@@ -1220,7 +1223,7 @@ class TelegramDreamScanner:
                     identity=identity,
                     reply_to_message_id=message.reply_to_msg_id,
                     mentioned_users=mentioned_users,
-                    metadata=_telegram_memory_event_metadata(message),
+                    metadata=telegram_memory_event_metadata(message),
                 )
 
         observations = await asyncio.gather(*(build(message) for message in messages))

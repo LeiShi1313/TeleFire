@@ -16,9 +16,6 @@ from telefire.ai import (
     AIStateRepository,
     PiAgentGateway,
     PromptBuilder,
-    TelegramMemoryScopeTargetResolver,
-    TelegramMessageIdentityResolver,
-    TelegramMessageMentionResolver,
 )
 from telefire.ai_attachments import TelegramAttachmentDescriber
 from telefire.ai_dream import (
@@ -38,6 +35,13 @@ from telefire.telegram.ai_transport import (
     TelegramEditLimiter,
     select_telegram_response_format,
     telegram_system_prompt,
+)
+from telefire.telegram.ai_identity import (
+    TELEGRAM_IDENTITY_CODEC,
+    TelegramMemoryScopeTargetResolver,
+    TelegramMessageIdentityResolver,
+    TelegramMessageMentionResolver,
+    telegram_memory_event_metadata,
 )
 
 
@@ -243,6 +247,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             ),
             history_source=history_source,
             transport=transport,
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            metadata_resolver=telegram_memory_event_metadata,
         )
         dream_runner = (
             TelegramDreamScanner(
@@ -288,6 +294,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 self._settings.memory_command_delete_delay
             ),
             transport=transport,
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
             logger=self.logger,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())

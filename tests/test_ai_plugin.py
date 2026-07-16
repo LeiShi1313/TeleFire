@@ -9,9 +9,9 @@ from telethon.tl import types as telegram_types
 from telefire.ai import MemoryScopeTarget
 from telefire.plugins.ai import (
     TelegramAI,
-    TelegramMemoryScopeTargetResolver,
     _parse_telegram_message_link,
 )
+from telefire.telegram.ai_identity import TelegramMemoryScopeTargetResolver
 
 
 class FailingHandler:

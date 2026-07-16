@@ -29,6 +29,10 @@ from telefire.ai_dream import (
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import MemoryClientError, MemoryRetainResult
 from telefire.chat.commands import MemoryBackfillCommand
+from telefire.telegram.ai_identity import (
+    TELEGRAM_IDENTITY_CODEC,
+    telegram_memory_event_metadata,
+)
 
 
 NOW = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
@@ -323,6 +327,8 @@ async def make_scanner(
         prompt_builder=PromptBuilder(
             identity_resolver=identity_resolver or FakeIdentityResolver(),
             attachment_describer=attachment_describer,
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            metadata_resolver=telegram_memory_event_metadata,
         ),
         settings=DreamSettings(
             lookback=timedelta(hours=1),

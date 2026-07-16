@@ -15,6 +15,7 @@ from telefire.ai import (
     PromptBuilder,
 )
 from telefire.ai_attachments import AttachmentDescription
+from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
 
 
 class FakeAnswer:
@@ -151,7 +152,10 @@ def make_handler(gateway, store=None, **builder_options):
             owner_id=10,
             responder=AIResponder(gateway),
             store=store,
-            prompt_builder=PromptBuilder(**builder_options),
+            prompt_builder=PromptBuilder(
+                identity_codec=TELEGRAM_IDENTITY_CODEC,
+                **builder_options,
+            ),
         ),
         store,
     )

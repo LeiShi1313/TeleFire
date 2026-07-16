@@ -22,8 +22,6 @@ from telefire.ai import (
     MemoryScopeState,
     MemoryScopeTarget,
     PromptBuilder,
-    TelegramMessageIdentityResolver,
-    TelegramMessageMentionResolver,
 )
 from telefire.ai_attachments import AttachmentDescription
 from telefire.ai_memory import (
@@ -37,6 +35,12 @@ from telefire.ai_memory import (
     RecalledMemory,
 )
 from telefire.chat.commands import MemoryBackfillCommand
+from telefire.telegram.ai_identity import (
+    TELEGRAM_IDENTITY_CODEC,
+    TelegramMessageIdentityResolver,
+    TelegramMessageMentionResolver,
+    telegram_memory_event_metadata,
+)
 
 
 class FakeAnswer:
@@ -495,12 +499,15 @@ def make_handler(
             identity_resolver=identity_resolver,
             mention_resolver=mention_resolver,
             history_source=history_source,
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+            metadata_resolver=telegram_memory_event_metadata,
         ),
         rate_limiter=AIRateLimiter(store, cooldown_seconds=0),
         memory=memory,
         dream_runner=dream_runner,
         memory_scope_resolver=memory_scope_resolver,
         memory_command_delete_delay=memory_command_delete_delay,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
         logger=logger,
     )
 

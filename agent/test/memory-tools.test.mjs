@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createMemoryTools } from "../src/memory-tools.mjs";
@@ -10,19 +11,27 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
-function fixture(handler, observe) {
+function fixture(handler, observe, accessOverrides = {}) {
   const calls = [];
   const tools = createMemoryTools({
     baseUrl: "http://memory.internal:8888",
     access: {
-      bankId: "telegram:chat:-1001",
+      primaryBankId: "telegram:chat:-1001",
       references: [
         {
+          bankId: "telegram:chat:-1001",
           memoryId: "memory-1",
           documentId: "telegram:thread:-1001:41",
           chunkId: "chunk-1",
         },
       ],
+      sourceCapabilities: [],
+      directoryPolicy: {
+        owner: false,
+        allowedBankIds: ["telegram:chat:-1001"],
+      },
+      participants: [],
+      ...accessOverrides,
     },
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
@@ -185,4 +194,145 @@ test("observes memory tool HTTP with tool-call correlation", async () => {
   assert.equal(observed[1].data.exchangeId, observed[0].data.exchangeId);
   assert.deepEqual(observed[0].data.request.body.query, "Who owns deployment?");
   assert.deepEqual(observed[1].data.response.body, payload);
+});
+
+test("queries only a host-issued source handle and exposes no bank ID to the model", async () => {
+  const bankId = "qq:group:686743769";
+  const app = fixture(
+    (url, options) => {
+      assert.match(url, /banks\/qq%3Agroup%3A686743769\/memories\/recall$/);
+      assert.equal(JSON.parse(options.body).query, "最近在聊什么？");
+      return jsonResponse({
+        results: [
+          {
+            id: "cross-memory-1",
+            text: "群里最近在讨论本地模型。",
+            entities: [],
+            document_id: "qq:thread:686743769:7",
+          },
+        ],
+      });
+    },
+    null,
+    {
+      sourceCapabilities: [
+        {
+          handle: "source_1",
+          bankId,
+          displayName: "Coder Offtopic",
+          platform: "qq",
+          sourceKind: "group",
+          evidence: [],
+        },
+      ],
+      directoryPolicy: {
+        owner: false,
+        allowedBankIds: ["telegram:chat:-1001", bankId],
+      },
+    },
+  );
+  const querySource = app.byName.get("memory_query_source");
+
+  const result = await querySource.execute("call-source-1", {
+    reference: "source_1",
+    query: "最近在聊什么？",
+  });
+
+  assert.match(result.content[0].text, /Coder Offtopic/);
+  assert.match(result.content[0].text, /cross-memory-1/);
+  assert.doesNotMatch(result.content[0].text, /qq:group:686743769/);
+  assert.equal(result.details.bankId, bankId);
+  await assert.rejects(
+    querySource.execute("call-source-2", {
+      reference: "source_999",
+      query: "anything",
+    }),
+    /not issued by the host/,
+  );
+});
+
+test("limits cross-bank traversal to two distinct consulted sources", async () => {
+  const capabilities = [1, 2, 3].map((index) => ({
+    handle: `source_${index}`,
+    bankId: `chat:bank:${index}`,
+    displayName: `Source ${index}`,
+    platform: "chat",
+    sourceKind: "group",
+    evidence: [],
+  }));
+  const app = fixture(
+    () => jsonResponse({ results: [] }),
+    null,
+    {
+      sourceCapabilities: capabilities,
+      directoryPolicy: {
+        owner: true,
+        allowedBankIds: null,
+      },
+    },
+  );
+  const tool = app.byName.get("memory_query_source");
+
+  await tool.execute("call-1", { reference: "source_1", query: "one" });
+  await tool.execute("call-2", { reference: "source_2", query: "two" });
+  await tool.execute("call-3", { reference: "source_1", query: "again" });
+  await assert.rejects(
+    tool.execute("call-4", { reference: "source_3", query: "three" }),
+    /consulted-source limit/,
+  );
+  assert.equal(app.calls.length, 3);
+});
+
+test("performs one extra filtered directory lookup and mints the next handle", async () => {
+  const primary = "telegram:chat:-1001";
+  const grant = "telegram:chat:-1002";
+  const tag = `telefire:bank-ref:${createHash("sha256").update(grant).digest("hex")}`;
+  const app = fixture(
+    (url, options) => {
+      assert.match(url, /banks\/system%3Aknowledge-directory\/memories\/recall$/);
+      const body = JSON.parse(options.body);
+      assert.deepEqual(body.tag_groups[0].or.map((item) => item.tags[0]), [
+        `telefire:bank-ref:${createHash("sha256").update(primary).digest("hex")}`,
+        tag,
+      ]);
+      return jsonResponse({
+        results: [
+          {
+            id: "directory-memory-2",
+            text: "这个群也叫 Arch 群。",
+            entities: [],
+            tags: [tag],
+            metadata: {
+              client: "telefire",
+              source: "knowledge-directory",
+              schema: "telefire.knowledge-directory.v1",
+              bank_id: grant,
+              bank_ref: tag,
+              source_name: "Arch Linux 中文群",
+              source_platform: "telegram",
+              source_kind: "group",
+            },
+          },
+        ],
+      });
+    },
+    null,
+    {
+      directoryPolicy: {
+        owner: false,
+        allowedBankIds: [primary, grant],
+      },
+    },
+  );
+  const find = app.byName.get("memory_find_sources");
+
+  const result = await find.execute("call-find-1", { query: "Arch 群是什么？" });
+
+  assert.match(result.content[0].text, /source_1/);
+  assert.match(result.content[0].text, /Arch Linux 中文群/);
+  assert.equal(result.details.references[0].bankId, grant);
+  await assert.rejects(
+    find.execute("call-find-2", { query: "again" }),
+    /directory lookup limit/,
+  );
 });

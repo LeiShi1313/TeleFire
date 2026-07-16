@@ -9,12 +9,15 @@ from telethon import utils as telegram_utils
 from telethon.tl import types as telegram_types
 
 from telefire.ai import (
+    DirectoryPublicationTarget,
     MemoryScopeTarget,
     MentionedUser,
     MessageIdentity,
     ReplyTarget,
 )
 from telefire.chat.identity import IdentityCodec, NamespacedIdentityCodec
+from telefire.memory_directory import DirectorySource
+from telefire.telegram.message_links import parse_telegram_message_link
 
 
 TELEGRAM_IDENTITY_CODEC = NamespacedIdentityCodec(
@@ -44,9 +47,8 @@ class TelegramMessageIdentityResolver:
             self._load_entity(message, "get_sender"),
             self._load_entity(message, "get_chat"),
         )
-        is_human = (
-            isinstance(sender, telegram_types.User)
-            and not bool(getattr(sender, "bot", False))
+        is_human = isinstance(sender, telegram_types.User) and not bool(
+            getattr(sender, "bot", False)
         )
         is_broadcast_channel_post = (
             isinstance(sender, telegram_types.Channel)
@@ -165,20 +167,162 @@ class TelegramMemoryScopeTargetResolver:
         except Exception as exc:
             if self._logger is not None:
                 self._logger.warning(
-                    "Telegram memory scope lookup failed "
-                    "(chat_id=%s, error=%s): %s",
+                    "Telegram memory scope lookup failed (chat_id=%s, error=%s): %s",
                     chat_id,
                     type(exc).__name__,
                     exc,
                 )
-            raise ValueError(
-                "Telegram group or channel is inaccessible"
-            ) from exc
+            raise ValueError("Telegram group or channel is inaccessible") from exc
         return MemoryScopeTarget(
             chat_id=telegram_utils.get_peer_id(entity),
             display_name=telegram_display_name(entity),
             latest_message_id=latest_message_id,
         )
+
+
+class TelegramDirectorySourceResolver:
+    def __init__(self, client: Any, *, logger: Any | None = None):
+        self._client = client
+        self._logger = logger
+
+    async def resolve_publication(
+        self,
+        message: ReplyTarget,
+        arguments: str,
+    ) -> DirectoryPublicationTarget:
+        selector, description = self._publication_arguments(arguments)
+        if selector is not None:
+            entity = await self._resolve_selector(selector)
+        else:
+            entity = await self._resolve_forwarded_source(message)
+            if entity is None:
+                entity = await self._resolve_current(message)
+        return DirectoryPublicationTarget(
+            source=self._directory_source(entity),
+            description=description,
+        )
+
+    async def resolve_bank(
+        self,
+        message: ReplyTarget,
+        selector: str,
+    ) -> DirectorySource:
+        selector = selector.strip()
+        if not selector:
+            return self._directory_source(await self._resolve_current(message))
+        if any(character.isspace() for character in selector):
+            raise ValueError("Telegram source selector must be one token")
+        return self._directory_source(await self._resolve_selector(selector))
+
+    @staticmethod
+    def _publication_arguments(arguments: str) -> tuple[str | None, str]:
+        arguments = arguments.strip()
+        if not arguments:
+            return None, ""
+        first, *remainder = arguments.split(maxsplit=1)
+        if first.startswith("@") or first.casefold().startswith("https://t.me/"):
+            return first, remainder[0] if remainder else ""
+        if first.count(":") >= 2:
+            raise ValueError("Telegram publication does not accept cross-platform IDs")
+        return None, arguments
+
+    async def _resolve_selector(self, selector: str) -> Any:
+        if selector.startswith("@"):
+            username = selector[1:]
+            if (
+                not username
+                or len(username) > 64
+                or not username.isascii()
+                or not username.replace("_", "").isalnum()
+            ):
+                raise ValueError("Invalid Telegram username")
+            candidate: Any = selector
+        elif selector.casefold().startswith("https://t.me/"):
+            link = parse_telegram_message_link(selector)
+            if link is None:
+                raise ValueError("Invalid Telegram message link")
+            candidate = (
+                f"@{link.username}"
+                if link.username is not None
+                else telegram_types.PeerChannel(link.channel_id)
+            )
+        else:
+            raise ValueError("Use a Telegram @username or message link")
+        try:
+            return await self._client.get_entity(candidate)
+        except Exception as exc:
+            self._log_failure(selector, exc)
+            raise ValueError("Telegram source is inaccessible") from exc
+
+    async def _resolve_current(self, message: ReplyTarget) -> Any:
+        get_chat = getattr(message, "get_chat", None)
+        try:
+            if callable(get_chat):
+                return await get_chat()
+            if message.chat_id is None:
+                raise ValueError("Telegram chat identity is unavailable")
+            return await self._client.get_entity(message.chat_id)
+        except Exception as exc:
+            self._log_failure("current chat", exc)
+            raise ValueError("Telegram source is inaccessible") from exc
+
+    async def _resolve_forwarded_source(self, message: ReplyTarget) -> Any | None:
+        get_reply = getattr(message, "get_reply_message", None)
+        if not callable(get_reply):
+            return None
+        reply = await get_reply()
+        forward = getattr(reply, "fwd_from", None)
+        if forward is None:
+            return None
+        peer = getattr(forward, "saved_from_peer", None) or getattr(
+            forward,
+            "from_id",
+            None,
+        )
+        if peer is None:
+            raise ValueError("Forwarded message hides its source")
+        try:
+            return await self._client.get_entity(peer)
+        except Exception as exc:
+            self._log_failure("forwarded source", exc)
+            raise ValueError("Forwarded Telegram source is inaccessible") from exc
+
+    @staticmethod
+    def _directory_source(entity: Any) -> DirectorySource:
+        if not isinstance(entity, (telegram_types.Chat, telegram_types.Channel)):
+            raise ValueError("Telegram source must be a group or channel")
+        display_name = telegram_display_name(entity)
+        if display_name is None:
+            raise ValueError("Telegram source has no display name")
+        username = getattr(entity, "username", None)
+        attributes = (
+            {"username": f"@{username}"}
+            if isinstance(username, str) and username.strip()
+            else {}
+        )
+        return DirectorySource(
+            bank_id=TELEGRAM_IDENTITY_CODEC.scope_id(
+                telegram_utils.get_peer_id(entity)
+            ),
+            display_name=display_name,
+            platform="telegram",
+            source_kind=(
+                "channel"
+                if isinstance(entity, telegram_types.Channel)
+                and bool(getattr(entity, "broadcast", False))
+                else "group"
+            ),
+            attributes=attributes,
+        )
+
+    def _log_failure(self, selector: str, exc: Exception) -> None:
+        if self._logger is not None:
+            self._logger.warning(
+                "Telegram directory lookup failed (selector=%s, error=%s): %s",
+                selector,
+                type(exc).__name__,
+                exc,
+            )
 
 
 def telegram_memory_event_metadata(

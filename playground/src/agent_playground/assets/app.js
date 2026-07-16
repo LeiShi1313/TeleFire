@@ -225,7 +225,7 @@ function handleEvent(event, assistant) {
   }
   if (event.type === "memory_snapshot") {
     state.memory = {
-      bankId: event.scopeId,
+      bankId: event.primaryBankId,
       query: event.queries.join("\n\n"),
       queries: event.queries,
       memories: event.memories,
@@ -749,6 +749,18 @@ function auditDescription(event) {
     return `${data.operation || "memory"} · HTTP ${response.status ?? "?"} · ${response.durationMs ?? "?"} ms · ${response.bodyBytes ?? "?"} bytes`;
   }
   if (event.type === "memory.http.error") return `${data.operation || "memory"} · ${data.error?.message || "request failed"}`;
+  if (event.type === "memory.directory.policy") {
+    return `${data.requester?.owner ? "Owner" : "Delegated"} directory policy · ${(data.allowedBankIds || []).length || "unrestricted"} allowed banks · ${(data.participants || []).length} participants`;
+  }
+  if (event.type === "memory.directory.result") {
+    return `${data.status || "unknown"} · ${(data.references || []).length} validated directory references`;
+  }
+  if (event.type === "memory.capabilities.issued") {
+    return `${(data.sources || []).length} opaque source handles issued · ${data.stopReason || "complete"}`;
+  }
+  if (event.type === "memory.access.warning") {
+    return `Access warning · ${data.unavailableBankIds?.length || 0} prior source banks are no longer available to this requester. Earlier branch evidence remains in the shared session; the non-disclosure safeguard is advisory in this version.`;
+  }
   if (event.type === "tool.started") return `${data.toolName || "tool"} started\n${short(pretty(data.args), 300)}`;
   if (event.type === "tool.completed") return `${data.toolName || "tool"} ${data.isError ? "failed" : "completed"} · ${data.durationMs ?? "?"} ms`;
   if (event.type === "model.input") return `${data.model?.id || "model"} · ${(data.tools || []).length} tools\n${short(currentRequest(data.prompt), 300)}`;
@@ -779,7 +791,8 @@ function renderAuditEvents() {
   }
   elements.auditEvents.replaceChildren(...events.map((event) => {
     const category = event.type.split(".")[0];
-    const item = node("article", null, `audit-event ${category}`);
+    const warning = event.type === "memory.access.warning" ? " warning" : "";
+    const item = node("article", null, `audit-event ${category}${warning}`);
     const header = node("div", null, "audit-event-header");
     header.append(node("span", `#${event.sequence}`, "audit-sequence"));
     header.append(node("span", event.type, "audit-type"));

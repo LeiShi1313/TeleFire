@@ -7,6 +7,7 @@ from telefire.ai import (
     AgentContext,
     AgentIdentityAnchor,
     AgentMemoryTarget,
+    AgentParticipantAccess,
     AgentRunRequest,
     PiAgentGateway,
 )
@@ -33,7 +34,19 @@ def run_request() -> AgentRunRequest:
         system_prompt="Answer directly.",
         tool_policy="delegated",
         memory=AgentMemoryTarget(
-            scope_id="telegram:chat:-1001",
+            primary_bank_id="telegram:chat:-1001",
+            requester_id="telegram:user:40",
+            requester_label="Alice",
+            requester_is_owner=False,
+            granted_bank_ids=("qq:group:686743769",),
+            participants=(
+                AgentParticipantAccess(
+                    identity="telegram:user:41",
+                    label="Bob",
+                    allowed=True,
+                    bank_ids=("telegram:chat:-1002",),
+                ),
+            ),
             anchors=(
                 AgentIdentityAnchor(
                     identity="telegram:user:40",
@@ -89,7 +102,21 @@ async def test_pi_gateway_streams_validated_ndjson_events() -> None:
         "systemPrompt": "Answer directly.",
         "toolPolicy": "delegated",
         "memory": {
-            "scopeId": "telegram:chat:-1001",
+            "primaryBankId": "telegram:chat:-1001",
+            "requester": {
+                "id": "telegram:user:40",
+                "label": "Alice",
+                "owner": False,
+            },
+            "grantedBankIds": ["qq:group:686743769"],
+            "participants": [
+                {
+                    "id": "telegram:user:41",
+                    "label": "Bob",
+                    "allowed": True,
+                    "bankIds": ["telegram:chat:-1002"],
+                }
+            ],
             "anchors": [{"id": "telegram:user:40", "label": "Alice"}],
         },
     }

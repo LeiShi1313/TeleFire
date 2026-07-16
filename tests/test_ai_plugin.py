@@ -11,7 +11,10 @@ from telefire.plugins.ai import (
     TelegramAI,
     _parse_telegram_message_link,
 )
-from telefire.telegram.ai_identity import TelegramMemoryScopeTargetResolver
+from telefire.telegram.ai_identity import (
+    TelegramDirectorySourceResolver,
+    TelegramMemoryScopeTargetResolver,
+)
 
 
 class FailingHandler:
@@ -139,6 +142,37 @@ class FakeMemoryScopeClient:
     async def get_messages(self, entity, *, limit):
         self.get_messages_calls.append((entity, limit))
         return self.latest_messages
+
+
+class FakeDirectoryClient:
+    def __init__(self, entities):
+        self.entities = entities
+        self.get_entity_calls = []
+
+    async def get_entity(self, candidate):
+        self.get_entity_calls.append(candidate)
+        key = (
+            ("channel", candidate.channel_id)
+            if isinstance(candidate, telegram_types.PeerChannel)
+            else candidate
+        )
+        if key not in self.entities:
+            raise ValueError("inaccessible")
+        return self.entities[key]
+
+
+class FakeDirectoryCommand:
+    def __init__(self, chat, *, reply=None, chat_id=None):
+        self.id = 55
+        self.chat_id = telegram_utils.get_peer_id(chat) if chat_id is None else chat_id
+        self._chat = chat
+        self._reply = reply
+
+    async def get_chat(self):
+        return self._chat
+
+    async def get_reply_message(self):
+        return self._reply
 
 
 class FakeSavedMessage:
@@ -302,6 +336,100 @@ async def test_memory_scope_target_resolver_rejects_users():
         await resolver.resolve("20")
 
     assert client.get_messages_calls == []
+
+
+@pytest.mark.asyncio
+async def test_telegram_directory_publication_resolves_current_and_username():
+    current = telegram_types.Channel(
+        id=1001,
+        title="Coder Offtopic",
+        photo=telegram_types.ChatPhotoEmpty(),
+        date=None,
+        megagroup=True,
+    )
+    leaks = telegram_types.Channel(
+        id=2064685671,
+        title="Seele Leaks",
+        username="Seele_Leaks",
+        photo=telegram_types.ChatPhotoEmpty(),
+        date=None,
+        broadcast=True,
+    )
+    client = FakeDirectoryClient({"@Seele_Leaks": leaks})
+    resolver = TelegramDirectorySourceResolver(client)
+    message = FakeDirectoryCommand(current)
+
+    local = await resolver.resolve_publication(
+        message,
+        "中文技术闲聊群",
+    )
+    explicit = await resolver.resolve_publication(
+        message,
+        "@Seele_Leaks 原神爆料频道",
+    )
+    linked = await resolver.resolve_publication(
+        message,
+        "https://t.me/Seele_Leaks/99 链接选中的频道",
+    )
+
+    assert local.source.bank_id == "telegram:chat:-1000000001001"
+    assert local.source.display_name == "Coder Offtopic"
+    assert local.source.source_kind == "group"
+    assert local.description == "中文技术闲聊群"
+    assert explicit.source.bank_id == "telegram:chat:-1002064685671"
+    assert explicit.source.source_kind == "channel"
+    assert explicit.source.attributes == {"username": "@Seele_Leaks"}
+    assert explicit.description == "原神爆料频道"
+    assert linked.source == explicit.source
+    assert linked.description == "链接选中的频道"
+
+
+@pytest.mark.asyncio
+async def test_telegram_directory_publication_uses_trusted_forward_origin():
+    current = telegram_types.Channel(
+        id=1001,
+        title="Current Group",
+        photo=telegram_types.ChatPhotoEmpty(),
+        date=None,
+        megagroup=True,
+    )
+    source = telegram_types.Channel(
+        id=2002,
+        title="Forwarded Source",
+        photo=telegram_types.ChatPhotoEmpty(),
+        date=None,
+        broadcast=True,
+    )
+    forwarded = SimpleNamespace(
+        fwd_from=SimpleNamespace(
+            saved_from_peer=telegram_types.PeerChannel(2002),
+        )
+    )
+    client = FakeDirectoryClient({("channel", 2002): source})
+    resolver = TelegramDirectorySourceResolver(client)
+
+    target = await resolver.resolve_publication(
+        FakeDirectoryCommand(current, reply=forwarded),
+        "可信转发来源",
+    )
+
+    assert target.source.bank_id == "telegram:chat:-1000000002002"
+    assert target.source.display_name == "Forwarded Source"
+    assert target.description == "可信转发来源"
+
+
+@pytest.mark.asyncio
+async def test_telegram_directory_rejects_private_and_cross_platform_sources():
+    private = telegram_types.User(id=20, first_name="Alice")
+    resolver = TelegramDirectorySourceResolver(FakeDirectoryClient({}))
+
+    with pytest.raises(ValueError, match="group or channel"):
+        await resolver.resolve_publication(FakeDirectoryCommand(private), "")
+    with pytest.raises(ValueError, match="cross-platform"):
+        await resolver.resolve_publication(
+            FakeDirectoryCommand(private),
+            "qq:group:686743769",
+        )
 
 
 @pytest.mark.asyncio

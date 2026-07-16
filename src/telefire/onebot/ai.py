@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import quote
 
 from telefire.ai import (
+    DirectoryPublicationTarget,
     MemoryScopeTarget,
     MentionedUser,
     MessageIdentity,
@@ -20,6 +21,7 @@ from telefire.onebot.message import (
     OneBotMessage,
     OneBotMessageError,
 )
+from telefire.memory_directory import DirectorySource
 
 
 ONEBOT_PLAIN_TEXT_FORMAT_GUIDE = """Response format: QQ plain text.
@@ -62,10 +64,7 @@ class QQIdentityCodec:
         message_id: ExternalId,
     ) -> str:
         scope_kind, scope_value = _scope_components(scope_id)
-        return (
-            f"qq:message:{scope_kind}:{scope_value}:"
-            f"{_component(message_id)}"
-        )
+        return f"qq:message:{scope_kind}:{scope_value}:{_component(message_id)}"
 
     def thread_document_id(
         self,
@@ -73,10 +72,7 @@ class QQIdentityCodec:
         root_message_id: ExternalId,
     ) -> str:
         scope_kind, scope_value = _scope_components(scope_id)
-        return (
-            f"qq:thread:{scope_kind}:{scope_value}:"
-            f"{_component(root_message_id)}"
-        )
+        return f"qq:thread:{scope_kind}:{scope_value}:{_component(root_message_id)}"
 
     def revision_document_id(
         self,
@@ -84,10 +80,7 @@ class QQIdentityCodec:
         message_id: ExternalId,
     ) -> str:
         scope_kind, scope_value = _scope_components(scope_id)
-        return (
-            f"qq:revision:{scope_kind}:{scope_value}:"
-            f"{_component(message_id)}"
-        )
+        return f"qq:revision:{scope_kind}:{scope_value}:{_component(message_id)}"
 
 
 QQ_IDENTITY_CODEC: IdentityCodec = QQIdentityCodec()
@@ -148,9 +141,7 @@ class OneBotChatTransport:
                 action_client=self._client,
                 scope_display_name=getattr(message, "scope_display_name", None),
                 private_peer_id=(
-                    abs(message.chat_id)
-                    if getattr(message, "chat_id", 0) < 0
-                    else None
+                    abs(message.chat_id) if getattr(message, "chat_id", 0) < 0 else None
                 ),
             )
         except (OneBotActionError, OneBotMessageError) as exc:
@@ -217,9 +208,7 @@ class OneBotChatTransport:
             )
 
     def is_outgoing(self, message: Any) -> bool:
-        return bool(
-            getattr(message, "is_outgoing", getattr(message, "out", False))
-        )
+        return bool(getattr(message, "is_outgoing", getattr(message, "out", False)))
 
     async def _send(self, trigger: OneBotMessage, text: str) -> int:
         message = [
@@ -275,7 +264,11 @@ class OneBotHistorySource:
             scope_display_name=getattr(trigger, "scope_display_name", None),
         )
         trigger_index = next(
-            (index for index, message in enumerate(messages) if message.id == trigger.id),
+            (
+                index
+                for index, message in enumerate(messages)
+                if message.id == trigger.id
+            ),
             None,
         )
         if trigger_index is not None:
@@ -311,9 +304,7 @@ class OneBotHistorySource:
         )
         while messages:
             eligible = [
-                message
-                for message in messages
-                if since <= message.date <= until
+                message for message in messages if since <= message.date <= until
             ]
             if len(eligible) >= limit:
                 return tuple(eligible[-limit:])
@@ -326,11 +317,7 @@ class OneBotHistorySource:
                 message_seq=oldest.id,
                 reverse_order=True,
             )
-            unseen = [
-                message
-                for message in previous
-                if message.id not in seen
-            ]
+            unseen = [message for message in previous if message.id not in seen]
             if not unseen:
                 return tuple(eligible)
             seen.update(message.id for message in unseen)
@@ -531,6 +518,89 @@ class OneBotMemoryScopeTargetResolver:
         )
 
 
+class OneBotDirectorySourceResolver:
+    def __init__(self, client: OneBotActionClient):
+        self._client = client
+
+    async def resolve_publication(
+        self,
+        message: ReplyTarget,
+        arguments: str,
+    ) -> DirectoryPublicationTarget:
+        selector, description = self._publication_arguments(arguments)
+        group_id = (
+            self._current_group_id(message)
+            if selector is None
+            else self._parse_group_id(selector)
+        )
+        return DirectoryPublicationTarget(
+            source=await self._resolve_group(group_id),
+            description=description,
+        )
+
+    async def resolve_bank(
+        self,
+        message: ReplyTarget,
+        selector: str,
+    ) -> DirectorySource:
+        selector = selector.strip()
+        group_id = (
+            self._current_group_id(message)
+            if not selector
+            else self._parse_group_id(selector)
+        )
+        return await self._resolve_group(group_id)
+
+    @staticmethod
+    def _publication_arguments(arguments: str) -> tuple[str | None, str]:
+        arguments = arguments.strip()
+        if not arguments:
+            return None, ""
+        first, *remainder = arguments.split(maxsplit=1)
+        if _positive_int(first) is not None:
+            return first, remainder[0] if remainder else ""
+        if (
+            first.startswith("@")
+            or first.casefold().startswith(("http://", "https://"))
+            or first.count(":") >= 2
+        ):
+            raise ValueError("QQ publication requires a numeric QQ group selector")
+        return None, arguments
+
+    @staticmethod
+    def _current_group_id(message: ReplyTarget) -> int:
+        if message.chat_id is None or message.chat_id <= 0:
+            raise ValueError("Directory source must be a QQ group")
+        return message.chat_id
+
+    @staticmethod
+    def _parse_group_id(selector: str) -> int:
+        group_id = _positive_int(selector)
+        if group_id is None:
+            raise ValueError("Use a numeric QQ group selector")
+        return group_id
+
+    async def _resolve_group(self, group_id: int) -> DirectorySource:
+        info = await self._client.call(
+            "get_group_info",
+            {"group_id": str(group_id), "no_cache": False},
+        )
+        if (
+            not isinstance(info, dict)
+            or _positive_int(info.get("group_id")) != group_id
+        ):
+            raise ValueError("QQ group is inaccessible")
+        display_name = info.get("group_name")
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ValueError("QQ group has no display name")
+        return DirectorySource(
+            bank_id=QQ_IDENTITY_CODEC.scope_id(group_id),
+            display_name=display_name,
+            platform="qq",
+            source_kind="group",
+        )
+
+
 def onebot_memory_event_metadata(message: ReplyTarget) -> dict[str, Any]:
     role = getattr(message, "sender_role", None)
     return {"sender_role": role} if isinstance(role, str) and role else {}
@@ -624,8 +694,7 @@ def _directory_labels(
             (
                 " ".join(candidate.split())[:256]
                 for field in label_fields
-                if isinstance(candidate := value.get(field), str)
-                and candidate.strip()
+                if isinstance(candidate := value.get(field), str) and candidate.strip()
             ),
             None,
         )

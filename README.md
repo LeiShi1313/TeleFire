@@ -344,6 +344,25 @@ tool and text snapshots stay internal.
   access. The owner is always allowed. A successfully executed owner command is
   deleted while its acknowledgement remains visible; usage and execution failures
   stay visible for inspection and retry.
+- `/ai_directory [source] [description]` publishes one owner-approved group or
+  channel in the shared Knowledge Directory without reading that source's memory.
+  With no source selector it publishes the current group/channel and treats the
+  suffix as a description. Telegram also accepts an accessible `@username`, a
+  `t.me` message link, or the trusted origin of a replied forwarded message. QQ
+  accepts an accessible positive group ID. Telegram users, QQ private chats,
+  hidden forward origins, inaccessible sources, and cross-platform publication
+  selectors are rejected. Retrying the same command message is idempotent and
+  publication does not enable continuous capture, Dream, or backfill.
+- Reply to a whitelisted user's message with `/ai_bank_allow [source]` or
+  `/ai_bank_deny [source]` to grant or revoke that exact knowledge bank for that
+  platform-qualified account. An omitted source means the current group. On
+  Telegram use an `@username` or message link; on QQ use a numeric group ID. A
+  bank from another chat platform requires its full canonical bank ID, such as
+  `qq:group:686743769`. Creating a grant requires a valid Directory Publication;
+  revocation does not depend on the publication or memory service still being
+  available.
+  `/ai_deny` also removes all of that account's bank grants, so re-allowing the
+  user starts with primary-chat memory only.
 - Reply in a thread with `/ai_memory` to ingest the bounded human reply chain,
   attributing each message to its author. An accepted owner's command is deleted
   after the configured delay while its result or error acknowledgement remains

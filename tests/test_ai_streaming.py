@@ -15,6 +15,8 @@ from telefire.ai import (
 )
 from telefire.chat.commands import (
     AIAskCommand,
+    BankGrantCommand,
+    DirectoryPublishCommand,
     InvalidCommand,
     MemoryBackfillCommand,
     MemoryRememberCommand,
@@ -126,8 +128,7 @@ class FakeStore:
                 marker
                 for marker in reversed(self.saved)
                 if marker.scope_id == scope_id
-                and message_id
-                in {marker.answer_message_id, marker.trigger_message_id}
+                and message_id in {marker.answer_message_id, marker.trigger_message_id}
             ),
             None,
         )
@@ -215,6 +216,35 @@ def test_parse_ai_trigger_has_an_exact_command_boundary(text, expected):
     ],
 )
 def test_parse_memory_revision_has_an_exact_command_boundary(text, expected):
+    assert parse_chat_command(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/ai_directory", DirectoryPublishCommand(arguments="")),
+        (
+            "/ai_directory @Seele_Leaks 原神爆料频道",
+            DirectoryPublishCommand(arguments="@Seele_Leaks 原神爆料频道"),
+        ),
+        (
+            "/ai_directory\ntelegram:chat:-100123 Coder OT",
+            DirectoryPublishCommand(arguments="telegram:chat:-100123 Coder OT"),
+        ),
+        ("/ai_directoryx", None),
+        ("/ai_bank_allow", BankGrantCommand(allowed=True, source="")),
+        (
+            "/ai_bank_allow qq:group:686743769",
+            BankGrantCommand(allowed=True, source="qq:group:686743769"),
+        ),
+        (
+            "/ai_bank_deny @Seele_Leaks",
+            BankGrantCommand(allowed=False, source="@Seele_Leaks"),
+        ),
+        ("/ai_bank_allowx", None),
+    ],
+)
+def test_parse_directory_commands_preserves_adapter_arguments(text, expected):
     assert parse_chat_command(text) == expected
 
 

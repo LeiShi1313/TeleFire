@@ -31,6 +31,8 @@ from telefire.chat.commands import (
     AIAskCommand,
     AICancelCommand,
     AccessCommand,
+    BankGrantCommand,
+    DirectoryPublishCommand,
     InvalidCommand,
     MemoryBackfillCommand,
     MemoryDreamCommand,
@@ -42,6 +44,12 @@ from telefire.chat.commands import (
 )
 from telefire.chat.identity import IdentityCodec, NamespacedIdentityCodec
 from telefire.chat.transport import ChatTransport, ObjectChatTransport, SentMessage
+from telefire.memory_directory import (
+    DirectoryPublication,
+    DirectorySource,
+    is_canonical_actor_id,
+    is_canonical_bank_id,
+)
 
 
 ToolPolicy = Literal["owner", "delegated", "none"]
@@ -53,6 +61,8 @@ AgentEventType = Literal[
     "run_failed",
 ]
 MAX_AGENT_MEMORY_ANCHORS = 64
+MAX_AGENT_BANK_GRANTS = 64
+MAX_AGENT_PARTICIPANTS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,9 +78,22 @@ class AgentIdentityAnchor:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentParticipantAccess:
+    identity: str
+    label: str | None
+    allowed: bool
+    bank_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AgentMemoryTarget:
-    scope_id: str
+    primary_bank_id: str
+    requester_id: str
+    requester_label: str | None
+    requester_is_owner: bool
     anchors: tuple[AgentIdentityAnchor, ...] = ()
+    granted_bank_ids: tuple[str, ...] = ()
+    participants: tuple[AgentParticipantAccess, ...] = ()
     query: str | None = None
 
 
@@ -140,7 +163,22 @@ class PiAgentGateway:
         }
         if request.memory is not None:
             payload["memory"] = {
-                "scopeId": request.memory.scope_id,
+                "primaryBankId": request.memory.primary_bank_id,
+                "requester": {
+                    "id": request.memory.requester_id,
+                    "label": request.memory.requester_label,
+                    "owner": request.memory.requester_is_owner,
+                },
+                "grantedBankIds": list(request.memory.granted_bank_ids),
+                "participants": [
+                    {
+                        "id": participant.identity,
+                        "label": participant.label,
+                        "allowed": participant.allowed,
+                        "bankIds": list(participant.bank_ids),
+                    }
+                    for participant in request.memory.participants
+                ],
                 "anchors": [
                     {"id": anchor.identity, "label": anchor.label}
                     for anchor in request.memory.anchors
@@ -270,6 +308,26 @@ class MemoryScopeTarget:
     latest_message_id: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class DirectoryPublicationTarget:
+    source: DirectorySource
+    description: str = ""
+
+
+class DirectorySourceResolver(Protocol):
+    async def resolve_publication(
+        self,
+        message: ReplyTarget,
+        arguments: str,
+    ) -> DirectoryPublicationTarget: ...
+
+    async def resolve_bank(
+        self,
+        message: ReplyTarget,
+        selector: str,
+    ) -> DirectorySource: ...
+
+
 class MessageIdentityResolver(Protocol):
     async def resolve(self, message: ReplyTarget) -> MessageIdentity: ...
 
@@ -312,6 +370,12 @@ class ConversationStore(Protocol):
     async def allow_user(self, actor_id: str) -> None: ...
 
     async def deny_user(self, actor_id: str) -> None: ...
+
+    async def grant_bank(self, actor_id: str, bank_id: str) -> bool: ...
+
+    async def revoke_bank(self, actor_id: str, bank_id: str) -> None: ...
+
+    async def list_bank_grants(self, actor_id: str) -> tuple[str, ...]: ...
 
     async def get_last_request_at(self, actor_id: str) -> float | None: ...
 
@@ -1048,9 +1112,7 @@ class PromptBuilder:
                 )
             if message.reply_to_message_id is not None:
                 reply_target = references.get(message.reply_to_message_id)
-                attributes.append(
-                    f"reply_to={reply_target or 'outside_context'}"
-                )
+                attributes.append(f"reply_to={reply_target or 'outside_context'}")
             lines.append(
                 f"[{references[message.message_id]} | {' | '.join(attributes)}]"
             )
@@ -1213,6 +1275,16 @@ class AIStateRepository:
             "ai_usage",
             value_definition="last_request_at REAL NOT NULL",
         )
+        await self._require_connection().execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_bank_grants (
+                actor_id TEXT NOT NULL,
+                bank_id TEXT NOT NULL,
+                granted_at REAL NOT NULL,
+                PRIMARY KEY (actor_id, bank_id)
+            )
+            """
+        )
         await self._ensure_excluded_messages_schema()
 
     async def _ensure_ai_answers_schema(self) -> None:
@@ -1233,14 +1305,10 @@ class AIStateRepository:
             await self._create_ai_answers_index()
             return
 
-        session_value = (
-            "agent_session_id" if "agent_session_id" in columns else "NULL"
-        )
+        session_value = "agent_session_id" if "agent_session_id" in columns else "NULL"
         entry_value = "agent_entry_id" if "agent_entry_id" in columns else "NULL"
         await connection.execute("DROP INDEX IF EXISTS ai_answers_by_trigger")
-        await connection.execute(
-            "ALTER TABLE ai_answers RENAME TO ai_answers_legacy"
-        )
+        await connection.execute("ALTER TABLE ai_answers RENAME TO ai_answers_legacy")
         await self._create_ai_answers_table()
         await connection.execute(
             f"""
@@ -1365,9 +1433,7 @@ class AIStateRepository:
             FROM ai_memory_excluded_messages_legacy
             """
         )
-        await connection.execute(
-            "DROP TABLE ai_memory_excluded_messages_legacy"
-        )
+        await connection.execute("DROP TABLE ai_memory_excluded_messages_legacy")
 
     async def _create_excluded_messages_table(self) -> None:
         await self._require_connection().execute(
@@ -1537,7 +1603,54 @@ class AIStateRepository:
             "DELETE FROM ai_usage WHERE actor_id = ?",
             (actor_id,),
         )
+        await connection.execute(
+            "DELETE FROM ai_bank_grants WHERE actor_id = ?",
+            (actor_id,),
+        )
         await connection.commit()
+
+    async def grant_bank(self, actor_id: str, bank_id: str) -> bool:
+        if not is_canonical_actor_id(actor_id) or not is_canonical_bank_id(bank_id):
+            raise ValueError("Bank grants require canonical actor and bank identities")
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            INSERT INTO ai_bank_grants (actor_id, bank_id, granted_at)
+            SELECT ?, ?, ?
+            WHERE EXISTS (
+                SELECT 1 FROM ai_whitelist WHERE actor_id = ?
+            )
+            ON CONFLICT(actor_id, bank_id) DO UPDATE SET
+                granted_at = excluded.granted_at
+            """,
+            (actor_id, bank_id, time.time(), actor_id),
+        )
+        cursor = await connection.execute(
+            "SELECT 1 FROM ai_bank_grants WHERE actor_id = ? AND bank_id = ?",
+            (actor_id, bank_id),
+        )
+        granted = await cursor.fetchone() is not None
+        await connection.commit()
+        return granted
+
+    async def revoke_bank(self, actor_id: str, bank_id: str) -> None:
+        if not is_canonical_actor_id(actor_id) or not is_canonical_bank_id(bank_id):
+            raise ValueError("Bank grants require canonical actor and bank identities")
+        connection = self._require_connection()
+        await connection.execute(
+            "DELETE FROM ai_bank_grants WHERE actor_id = ? AND bank_id = ?",
+            (actor_id, bank_id),
+        )
+        await connection.commit()
+
+    async def list_bank_grants(self, actor_id: str) -> tuple[str, ...]:
+        if not is_canonical_actor_id(actor_id):
+            raise ValueError("Bank grants require a canonical actor identity")
+        cursor = await self._require_connection().execute(
+            "SELECT bank_id FROM ai_bank_grants WHERE actor_id = ? ORDER BY bank_id",
+            (actor_id,),
+        )
+        return tuple([str(row["bank_id"]) async for row in cursor])
 
     async def get_last_request_at(self, actor_id: str) -> float | None:
         connection = self._require_connection()
@@ -1783,9 +1896,7 @@ class AIStateRepository:
                 scope.scope_id
             """
         )
-        return tuple(
-            [_memory_scope_state_from_row(row) async for row in cursor]
-        )
+        return tuple([_memory_scope_state_from_row(row) async for row in cursor])
 
     async def record_memory_labels(
         self,
@@ -2264,6 +2375,7 @@ class AIConversationHandler:
         memory: MemoryClient | None = None,
         dream_runner: MemoryDreamRunner | None = None,
         memory_scope_resolver: MemoryScopeTargetResolver | None = None,
+        directory_source_resolver: DirectorySourceResolver | None = None,
         memory_command_delete_delay: float = 3.0,
         transport: ChatTransport | None = None,
         identity_codec: IdentityCodec | None = None,
@@ -2279,14 +2391,11 @@ class AIConversationHandler:
         self._memory = memory
         self._dream_runner = dream_runner
         self._memory_scope_resolver = memory_scope_resolver
+        self._directory_source_resolver = directory_source_resolver
         self._memory_command_delete_delay = memory_command_delete_delay
         self._memory_command_delete_tasks: set[asyncio.Task[None]] = set()
         self._logger = logger
-        self._transport = (
-            transport
-            or responder.transport
-            or ObjectChatTransport()
-        )
+        self._transport = transport or responder.transport or ObjectChatTransport()
         self._identity_codec = identity_codec or prompt_builder.identity_codec
         self._owner_actor_id = self._identity_codec.actor_id(owner_id)
         self._active_runs: dict[str, str] = {}
@@ -2298,9 +2407,7 @@ class AIConversationHandler:
         scope_id = self._identity_codec.scope_id(message.chat_id)
         command = parse_chat_command(message.raw_text)
         is_owner = actor_id == self._owner_actor_id
-        is_owner_control = (
-            is_owner or self._transport.is_outgoing(message)
-        )
+        is_owner_control = is_owner or self._transport.is_outgoing(message)
         if isinstance(command, MemoryRememberCommand):
             if not is_owner_control:
                 return False
@@ -2349,6 +2456,14 @@ class AIConversationHandler:
             if not is_owner_control:
                 return False
             return await self._handle_access_command(message, command)
+        if isinstance(command, DirectoryPublishCommand):
+            if not is_owner_control:
+                return False
+            return await self._handle_directory_publish(message, command)
+        if isinstance(command, BankGrantCommand):
+            if not is_owner_control:
+                return False
+            return await self._handle_bank_grant(message, command)
 
         if isinstance(command, AICancelCommand):
             if not is_owner and not await self._store.is_allowed(actor_id):
@@ -2483,7 +2598,7 @@ class AIConversationHandler:
                     )
                 anchor_observations.extend(human_context)
                 retained_observations.extend(human_reply_path)
-            memory_target = self._build_agent_memory_target(
+            memory_target = await self._build_agent_memory_target(
                 requester_id=message.sender_id,
                 chat_id=message.chat_id,
                 requester_identity=current_identity,
@@ -2555,9 +2670,7 @@ class AIConversationHandler:
                                 identity=current_identity,
                                 reply_to_message_id=message.reply_to_msg_id,
                                 mentioned_users=current_mentions,
-                                metadata=self._prompt_builder.resolve_metadata(
-                                    message
-                                ),
+                                metadata=self._prompt_builder.resolve_metadata(message),
                             )
                         )
                     if retained_observations:
@@ -2656,6 +2769,143 @@ class AIConversationHandler:
             response = "AI access denied."
         await self._reply_memory_excluded(message, response, kind="ai-control")
         await self._delete_command_message(message, command.name)
+        return True
+
+    async def _handle_directory_publish(
+        self,
+        message: ReplyTarget,
+        command: DirectoryPublishCommand,
+    ) -> bool:
+        if self._memory is None or self._directory_source_resolver is None:
+            await self._reply_memory_excluded(
+                message,
+                "Knowledge directory is unavailable.",
+                kind="memory-control",
+            )
+            return True
+        try:
+            target = await self._directory_source_resolver.resolve_publication(
+                message,
+                command.arguments,
+            )
+            assert message.chat_id is not None
+            publication = DirectoryPublication(
+                publication_id=self._identity_codec.message_source_id(
+                    message.chat_id,
+                    message.id,
+                ),
+                publisher_id=self._owner_actor_id,
+                published_at=_message_datetime(message),
+                source=target.source,
+                description=target.description,
+            )
+            await self._memory.publish_directory(publication)
+        except Exception as exc:
+            self._log_memory_failure("directory publication", exc)
+            await self._reply_memory_excluded(
+                message,
+                "Unable to publish that knowledge source. Check the selector and access.",
+                kind="memory-control",
+            )
+            return True
+        await self._reply_memory_excluded(
+            message,
+            f"Knowledge source published: {publication.source.display_name}.",
+            kind="memory-control",
+        )
+        await self._schedule_memory_command_delete(message, "/ai_directory")
+        return True
+
+    async def _handle_bank_grant(
+        self,
+        message: ReplyTarget,
+        command: BankGrantCommand,
+    ) -> bool:
+        target = await self._transport.get_reply(message)
+        if target is None or target.sender_id is None:
+            await self._reply_memory_excluded(
+                message,
+                f"Usage: reply to a user with {command.name} [source]",
+                kind="ai-control",
+            )
+            return True
+        if target.sender_id == self._owner_id:
+            await self._reply_memory_excluded(
+                message,
+                "Owner knowledge-source access is unrestricted.",
+                kind="ai-control",
+            )
+            await self._schedule_memory_command_delete(message, command.name)
+            return True
+        if self._directory_source_resolver is None or (
+            command.allowed and self._memory is None
+        ):
+            await self._reply_memory_excluded(
+                message,
+                "Knowledge directory is unavailable.",
+                kind="memory-control",
+            )
+            return True
+
+        label: str | None = None
+        try:
+            selector = command.source.strip()
+            if _is_explicit_bank_selector(selector) and not selector.startswith(
+                f"{self._identity_codec.source}:"
+            ):
+                bank_id = selector
+            else:
+                source = await self._directory_source_resolver.resolve_bank(
+                    message,
+                    selector,
+                )
+                bank_id = source.bank_id
+                label = source.display_name
+            if command.allowed:
+                assert self._memory is not None
+                if not await self._memory.is_directory_source_published(bank_id):
+                    await self._reply_memory_excluded(
+                        message,
+                        "Publish that knowledge source first.",
+                        kind="memory-control",
+                    )
+                    return True
+        except Exception as exc:
+            self._log_memory_failure("directory grant lookup", exc)
+            await self._reply_memory_excluded(
+                message,
+                "Unable to resolve that knowledge source. Check the selector and access.",
+                kind="memory-control",
+            )
+            return True
+
+        target_actor_id = self._identity_codec.actor_id(target.sender_id)
+        if command.allowed:
+            if not await self._store.is_allowed(target_actor_id):
+                await self._reply_memory_excluded(
+                    message,
+                    "Allow AI access for that user first.",
+                    kind="ai-control",
+                )
+                return True
+            if not await self._store.grant_bank(target_actor_id, bank_id):
+                await self._reply_memory_excluded(
+                    message,
+                    "Allow AI access for that user first.",
+                    kind="ai-control",
+                )
+                return True
+            action = "allowed"
+        else:
+            await self._store.revoke_bank(target_actor_id, bank_id)
+            action = "denied"
+        suffix = f": {label}" if label else ""
+        await self._reply_memory_excluded(
+            message,
+            f"Knowledge source access {action}{suffix}.",
+            kind="ai-control",
+        )
+        await self._schedule_memory_command_delete(message, command.name)
         return True
 
     async def _handle_memory_scope_command(
@@ -2765,8 +3015,7 @@ class AIConversationHandler:
                 f"{_format_memory_time(scope.continuous_last_attempt_at)}",
                 "Last continuous success: "
                 f"{_format_memory_time(scope.continuous_last_success_at)}",
-                "Last continuous error: "
-                f"{scope.continuous_last_error or 'none'}",
+                f"Last continuous error: {scope.continuous_last_error or 'none'}",
                 f"Last Dream attempt: {_format_memory_time(state.last_attempt_at)}",
                 f"Last Dream success: {_format_memory_time(state.last_success_at)}",
                 f"Last Dream error: {state.last_error or 'none'}",
@@ -2823,9 +3072,7 @@ class AIConversationHandler:
             self._identity_codec.scope_id(message.chat_id)
         )
         if scope.continuous_enabled:
-            response = (
-                "Continuous memory is enabled; Dream is currently overridden."
-            )
+            response = "Continuous memory is enabled; Dream is currently overridden."
         elif not scope.dream_enabled:
             response = "Dream is disabled for this chat."
         elif self._dream_runner is None:
@@ -2835,9 +3082,7 @@ class AIConversationHandler:
                 result = await self._dream_runner.run_scope(message.chat_id)
             except Exception as exc:
                 self._log_memory_failure("Dream Cycle", exc)
-                response = (
-                    "Dream Cycle failed. It will retry from the previous cursor."
-                )
+                response = "Dream Cycle failed. It will retry from the previous cursor."
             else:
                 response = (
                     "Dream Cycle complete: "
@@ -2967,8 +3212,7 @@ class AIConversationHandler:
         human_context = tuple(
             message.observation
             for message in context.messages
-            if message.observation is not None
-            and message.message_id not in excluded
+            if message.observation is not None and message.message_id not in excluded
         )
         human_reply_path = tuple(
             message.observation
@@ -2983,7 +3227,7 @@ class AIConversationHandler:
             human_reply_path,
         )
 
-    def _build_agent_memory_target(
+    async def _build_agent_memory_target(
         self,
         *,
         requester_id: int,
@@ -2994,40 +3238,88 @@ class AIConversationHandler:
     ) -> AgentMemoryTarget | None:
         if self._memory is None:
             return None
-        participants: dict[str, str | None] = {
+        anchor_identities: dict[str, str | None] = {
             self._identity_codec.actor_id(
                 requester_id
             ): requester_identity.subject_display_name
         }
+        participant_authors: dict[str, str | None] = {}
         for observation in observations:
             subject_id = (
                 observation.identity.subject_id
                 or self._identity_codec.actor_id(observation.sender_id)
             )
             display_name = observation.identity.subject_display_name
-            if subject_id not in participants or display_name:
-                participants[subject_id] = display_name
+            if subject_id not in anchor_identities or display_name:
+                anchor_identities[subject_id] = display_name
+            if subject_id not in participant_authors or display_name:
+                participant_authors[subject_id] = display_name
             for mention in observation.mentioned_users:
                 subject_id = self._identity_codec.actor_id(mention.user_id)
-                if subject_id not in participants or mention.display_name:
-                    participants[subject_id] = mention.display_name
+                if subject_id not in anchor_identities or mention.display_name:
+                    anchor_identities[subject_id] = mention.display_name
         for mention in current_mentions:
             subject_id = self._identity_codec.actor_id(mention.user_id)
-            if subject_id not in participants or mention.display_name:
-                participants[subject_id] = mention.display_name
+            if subject_id not in anchor_identities or mention.display_name:
+                anchor_identities[subject_id] = mention.display_name
         anchors = tuple(
             AgentIdentityAnchor(
                 identity=subject_id,
                 label=display_name,
             )
-            for subject_id, display_name in list(participants.items())[
+            for subject_id, display_name in list(anchor_identities.items())[
                 :MAX_AGENT_MEMORY_ANCHORS
             ]
         )
-        return AgentMemoryTarget(
-            scope_id=self._identity_codec.scope_id(chat_id),
-            anchors=anchors,
+        requester_actor_id = self._identity_codec.actor_id(requester_id)
+        requester_is_owner = requester_actor_id == self._owner_actor_id
+        requester_grants = (
+            ()
+            if requester_is_owner
+            else await self._load_bank_grants(requester_actor_id)
         )
+        participant_access: list[AgentParticipantAccess] = []
+        for subject_id, display_name in participant_authors.items():
+            if (
+                subject_id in {requester_actor_id, self._owner_actor_id}
+                or len(participant_access) >= MAX_AGENT_PARTICIPANTS
+                or not is_canonical_actor_id(subject_id)
+            ):
+                continue
+            try:
+                allowed = await self._store.is_allowed(subject_id)
+            except Exception as exc:
+                self._log_memory_failure("participant access lookup", exc)
+                allowed = False
+            participant_access.append(
+                AgentParticipantAccess(
+                    identity=subject_id,
+                    label=display_name,
+                    allowed=allowed,
+                    bank_ids=(
+                        await self._load_bank_grants(subject_id) if allowed else ()
+                    ),
+                )
+            )
+        return AgentMemoryTarget(
+            primary_bank_id=self._identity_codec.scope_id(chat_id),
+            requester_id=requester_actor_id,
+            requester_label=requester_identity.subject_display_name,
+            requester_is_owner=requester_is_owner,
+            anchors=anchors,
+            granted_bank_ids=requester_grants,
+            participants=tuple(participant_access),
+        )
+
+    async def _load_bank_grants(self, actor_id: str) -> tuple[str, ...]:
+        try:
+            grants = await self._store.list_bank_grants(actor_id)
+        except Exception as exc:
+            self._log_memory_failure("bank grant lookup", exc)
+            return ()
+        return tuple(bank_id for bank_id in grants if is_canonical_bank_id(bank_id))[
+            :MAX_AGENT_BANK_GRANTS
+        ]
 
     async def _handle_memory_command(
         self,
@@ -3342,6 +3634,10 @@ def _message_datetime(message: ReplyTarget) -> datetime:
     return value.astimezone(UTC)
 
 
+def _is_explicit_bank_selector(value: str) -> bool:
+    return value.count(":") >= 2 and is_canonical_bank_id(value)
+
+
 def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
     if target.display_name:
         return f"{target.display_name} ({target.chat_id})"
@@ -3411,8 +3707,7 @@ def _chat_memory_episode(
         scope_id=identity_codec.scope_id(chat_id),
         scope_display_name=scope_display_name,
         document_id=(
-            document_id
-            or identity_codec.thread_document_id(chat_id, root_message_id)
+            document_id or identity_codec.thread_document_id(chat_id, root_message_id)
         ),
         source=identity_codec.source,
         events=tuple(

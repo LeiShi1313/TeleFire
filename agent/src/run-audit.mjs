@@ -199,7 +199,8 @@ function summarize(runId, events) {
     startedAt: events[0]?.timestamp ?? null,
     finishedAt: terminal?.timestamp ?? null,
     prompt: bounded(request.prompt, 300),
-    memoryScopeId: request.memory?.scopeId ?? null,
+    memoryScopeId:
+      request.memory?.primaryBankId ?? request.memory?.scopeId ?? null,
     eventCount: events.length,
   };
 }

@@ -1,6 +1,4 @@
 import asyncio
-from dataclasses import dataclass
-from urllib.parse import parse_qs, urlsplit
 
 from telethon import events
 from telethon import utils as telegram_utils
@@ -37,6 +35,7 @@ from telefire.telegram.ai_transport import (
 )
 from telefire.telegram.ai_identity import (
     TELEGRAM_IDENTITY_CODEC,
+    TelegramDirectorySourceResolver,
     TelegramMemoryScopeTargetResolver,
     TelegramMessageIdentityResolver,
     TelegramMessageMentionResolver,
@@ -47,6 +46,10 @@ from telefire.telegram.ai_history import (
     telegram_channel_album_document_id,
     telegram_source_retry_delay,
 )
+from telefire.telegram.message_links import (
+    TelegramMessageLink as _TelegramMessageLink,
+    parse_telegram_message_link as _parse_telegram_message_link,
+)
 
 
 class _SavedMemoryForwardSourceUnavailable(RuntimeError):
@@ -55,83 +58,6 @@ class _SavedMemoryForwardSourceUnavailable(RuntimeError):
 
 class _SavedMemoryLinkUnavailable(RuntimeError):
     pass
-
-
-@dataclass(frozen=True, slots=True)
-class _TelegramMessageLink:
-    username: str | None
-    channel_id: int | None
-    message_id: int
-
-
-def _parse_positive_id(value: str, *, maximum: int) -> int | None:
-    if not value.isascii() or not value.isdecimal():
-        return None
-    parsed = int(value)
-    return parsed if 0 < parsed <= maximum else None
-
-
-# https://core.telegram.org/api/links#message-links
-def _parse_telegram_message_link(text: str) -> _TelegramMessageLink | None:
-    candidate = text.strip()
-    if any(character.isspace() for character in candidate):
-        return None
-    try:
-        link = urlsplit(candidate)
-    except ValueError:
-        return None
-    if link.scheme != "https" or link.netloc.casefold() != "t.me":
-        return None
-    query_keys = parse_qs(link.query, keep_blank_values=True)
-    if any(key.casefold() == "comment" for key in query_keys):
-        return None
-
-    path = link.path.strip("/")
-    segments = path.split("/") if path else []
-    if any(not segment for segment in segments):
-        return None
-
-    max_message_id = (1 << 31) - 1
-    if segments[:1] == ["c"]:
-        if len(segments) not in {3, 4}:
-            return None
-        channel_id = _parse_positive_id(segments[1], maximum=(1 << 63) - 1)
-        if (
-            len(segments) == 4
-            and _parse_positive_id(segments[2], maximum=max_message_id) is None
-        ):
-            return None
-        message_id = _parse_positive_id(segments[-1], maximum=max_message_id)
-        if channel_id is None or message_id is None:
-            return None
-        return _TelegramMessageLink(
-            username=None,
-            channel_id=channel_id,
-            message_id=message_id,
-        )
-
-    if len(segments) not in {2, 3}:
-        return None
-    username = segments[0]
-    if (
-        len(username) > 64
-        or not username.isascii()
-        or not username.replace("_", "").isalnum()
-    ):
-        return None
-    if (
-        len(segments) == 3
-        and _parse_positive_id(segments[1], maximum=max_message_id) is None
-    ):
-        return None
-    message_id = _parse_positive_id(segments[-1], maximum=max_message_id)
-    if message_id is None:
-        return None
-    return _TelegramMessageLink(
-        username=username,
-        channel_id=None,
-        message_id=message_id,
-    )
 
 
 class TelegramAI(TelegramCommand, metaclass=PluginMount):
@@ -299,9 +225,11 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 self.client,
                 logger=self.logger,
             ),
-            memory_command_delete_delay=(
-                self._settings.memory_command_delete_delay
+            directory_source_resolver=TelegramDirectorySourceResolver(
+                self.client,
+                logger=self.logger,
             ),
+            memory_command_delete_delay=(self._settings.memory_command_delete_delay),
             transport=transport,
             identity_codec=TELEGRAM_IDENTITY_CODEC,
             logger=self.logger,

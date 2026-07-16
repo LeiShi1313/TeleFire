@@ -6,9 +6,11 @@ const MAX_ATTACHMENT_BODY_BYTES = 3 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 const MAX_ATTACHMENT_TEXT_CHARS = 50_000;
 const MAX_MEMORY_ANCHORS = 64;
+const MAX_BANK_GRANTS = 64;
+const MAX_PARTICIPANTS = 16;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,128}$/;
-const BANK_ID_RE = /^[A-Za-z0-9:_-]{1,256}$/;
+const BANK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9:_.%-]{0,255}$/;
 const MIME_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -42,6 +44,26 @@ function isBoundedString(value, min, max) {
 
 function hasOnlyKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isBankId(value) {
+  return typeof value === "string" && BANK_ID_RE.test(value);
+}
+
+function boundedBankIds(value) {
+  if (!Array.isArray(value) || value.length > MAX_BANK_GRANTS) return null;
+  const unique = new Set(value);
+  if (
+    unique.size !== value.length ||
+    value.some((item) => !isBankId(item))
+  ) {
+    return null;
+  }
+  return [...value];
+}
+
+function isActorId(value) {
+  return isBankId(value) && value.includes(":user:");
 }
 
 function listOptions(url, kind) {
@@ -120,15 +142,46 @@ export function validateRunRequest(value) {
       !supplied ||
       typeof supplied !== "object" ||
       Array.isArray(supplied) ||
-      !hasOnlyKeys(supplied, new Set(["scopeId", "query", "anchors"])) ||
-      !BANK_ID_RE.test(supplied.scopeId ?? "") ||
+      !hasOnlyKeys(
+        supplied,
+        new Set([
+          "primaryBankId",
+          "requester",
+          "grantedBankIds",
+          "participants",
+          "query",
+          "anchors",
+        ]),
+      ) ||
+      !isBankId(supplied.primaryBankId) ||
       !(
         supplied.query === undefined ||
         supplied.query === null ||
         isBoundedString(supplied.query, 1, 8_000)
       ) ||
       !Array.isArray(supplied.anchors) ||
-      supplied.anchors.length > MAX_MEMORY_ANCHORS
+      supplied.anchors.length > MAX_MEMORY_ANCHORS ||
+      !Array.isArray(supplied.participants) ||
+      supplied.participants.length > MAX_PARTICIPANTS
+    ) {
+      return null;
+    }
+    const requester = supplied.requester;
+    const grantedBankIds = boundedBankIds(supplied.grantedBankIds);
+    if (
+      !requester ||
+      typeof requester !== "object" ||
+      Array.isArray(requester) ||
+      !hasOnlyKeys(requester, new Set(["id", "label", "owner"])) ||
+      !isActorId(requester.id) ||
+      !(
+        requester.label === null ||
+        requester.label === undefined ||
+        isBoundedString(requester.label, 1, 256)
+      ) ||
+      typeof requester.owner !== "boolean" ||
+      grantedBankIds === null ||
+      (requester.owner && grantedBankIds.length > 0)
     ) {
       return null;
     }
@@ -156,8 +209,49 @@ export function validateRunRequest(value) {
         label: anchor.label ?? null,
       });
     }
+    const participants = [];
+    const participantIds = new Set();
+    for (const participant of supplied.participants) {
+      const bankIds = boundedBankIds(participant?.bankIds);
+      if (
+        !participant ||
+        typeof participant !== "object" ||
+        Array.isArray(participant) ||
+        !hasOnlyKeys(
+          participant,
+          new Set(["id", "label", "allowed", "bankIds"]),
+        ) ||
+        !isActorId(participant.id) ||
+        participant.id === requester.id ||
+        participantIds.has(participant.id) ||
+        !(
+          participant.label === null ||
+          participant.label === undefined ||
+          isBoundedString(participant.label, 1, 256)
+        ) ||
+        typeof participant.allowed !== "boolean" ||
+        bankIds === null ||
+        (!participant.allowed && bankIds.length > 0)
+      ) {
+        return null;
+      }
+      participantIds.add(participant.id);
+      participants.push({
+        id: participant.id,
+        label: participant.label ?? null,
+        allowed: participant.allowed,
+        bankIds,
+      });
+    }
     memory = {
-      scopeId: supplied.scopeId,
+      primaryBankId: supplied.primaryBankId,
+      requester: {
+        id: requester.id,
+        label: requester.label ?? null,
+        owner: requester.owner,
+      },
+      grantedBankIds,
+      participants,
       ...(supplied.query ? { query: supplied.query } : {}),
       anchors,
     };

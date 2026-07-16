@@ -30,6 +30,7 @@ from telefire.onebot.ai import (
     QQ_IDENTITY_CODEC,
     OneBotChatTransport,
     OneBotDirectory,
+    OneBotDirectorySourceResolver,
     OneBotHistorySource,
     OneBotMemoryScopeTargetResolver,
     OneBotMessageIdentityResolver,
@@ -64,8 +65,7 @@ class OneBotRuntimeSettings:
         if port is None or port > 65_535:
             raise ValueError("TELEFIRE_ONEBOT_PORT must be between 1 and 65535")
         return cls(
-            host=os.environ.get("TELEFIRE_ONEBOT_HOST", "0.0.0.0").strip()
-            or "0.0.0.0",
+            host=os.environ.get("TELEFIRE_ONEBOT_HOST", "0.0.0.0").strip() or "0.0.0.0",
             port=port,
             token=token,
             self_id=self_id,
@@ -220,9 +220,8 @@ class OneBotAI(metaclass=PluginMount):
             memory=self._memory,
             dream_runner=dream_runner,
             memory_scope_resolver=OneBotMemoryScopeTargetResolver(self._bridge),
-            memory_command_delete_delay=(
-                self._settings.memory_command_delete_delay
-            ),
+            directory_source_resolver=OneBotDirectorySourceResolver(self._bridge),
+            memory_command_delete_delay=(self._settings.memory_command_delete_delay),
             transport=transport,
             identity_codec=QQ_IDENTITY_CODEC,
             logger=self.logger,
@@ -231,11 +230,7 @@ class OneBotAI(metaclass=PluginMount):
 
     async def _verify_account(self) -> None:
         info = await self._bridge.call("get_login_info", {}, timeout=30)
-        user_id = (
-            _positive_int(info.get("user_id"))
-            if isinstance(info, dict)
-            else None
-        )
+        user_id = _positive_int(info.get("user_id")) if isinstance(info, dict) else None
         if user_id != self._runtime.self_id:
             raise RuntimeError("NapCat connected with an unexpected QQ account")
 
@@ -275,8 +270,7 @@ class OneBotAI(metaclass=PluginMount):
             await self._handler.handle(message)
         except Exception:
             self.logger.exception(
-                "OneBot AI message handling failed "
-                "(chat_id=%s, message_id=%s)",
+                "OneBot AI message handling failed (chat_id=%s, message_id=%s)",
                 message.chat_id,
                 message.id,
             )

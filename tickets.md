@@ -243,3 +243,83 @@ Work the **frontier**: any ticket whose blockers are all done. The initial front
 - Compose was rebuilt and force-recreated. AI, Pi, Hindsight, dashboard, and the standalone Qwen embedding service are healthy; every application container is read-only, drops all capabilities, and uses `no-new-privileges`. The offline `telefire-legacy-zvec` volume is not mounted by a runtime service.
 - Browser QA passed populated bank navigation, source and memory-evidence drill-down, safe rendering, foreign-Host rejection, desktop layout, and a 390x844 viewport with no page overflow (`1151px` table inside a `366px` scroll panel).
 - Live Telegram smoke passed with the existing owner and second account in the two-member disposable group: authorization, enable/disable, standalone and reply Dream capture, explicit memory, exact mention, continuation, implicit alias, delegated `code_exec`, attachment description, Saved Messages source link, revision, bank isolation, deny, and cleanup.
+
+---
+
+# Tickets: Knowledge directory and bounded cross-bank retrieval
+
+These tickets add owner-published knowledge-source discovery, per-user Bank Grants, and policy-enforced agent traversal across Hindsight banks. The source decision is [ADR 0006](docs/adr/0006-use-a-knowledge-directory-for-bounded-cross-bank-retrieval.md).
+
+Work the **frontier**: any ticket whose blockers are all done. The initial frontier is **Validate the Trusted Directory Contract**.
+
+## Validate the Trusted Directory Contract
+
+**What to build:** Prove and expose the minimal standalone Hindsight contract for publishing one trusted Bank Reference and recalling only references allowed by an exact bank filter.
+
+**Blocked by:** None - can start immediately.
+
+- [x] A Directory Publication retains deterministic source metadata and owner description in the deployment-wide Knowledge Directory Bank without reading the referenced bank.
+- [x] Every publication has one internal Bank Reference tag, matching metadata, and one explicit observation scope; memories from different references cannot consolidate together.
+- [x] Exact OR tag-group recall returns only permitted references, and malformed, untagged, mixed-tag, or metadata-mismatched results are rejected.
+- [x] Publication idempotently ensures the referenced bank exists but does not enable capture, Dream, or backfill.
+- [x] A real Hindsight contract test covers publication, observation recall, filtering, reference validation, and bank isolation.
+
+## Publish Sources from Telegram and QQ
+
+**What to build:** Let the owner publish an accessible Telegram group/channel or QQ group into the shared directory with `/ai_directory`, using the same chat-neutral command behavior on both adapters.
+
+**Blocked by:** Validate the Trusted Directory Contract.
+
+- [x] Bare `/ai_directory` publishes the current group/channel using deterministic adapter metadata; an optional description adds owner evidence.
+- [x] Telegram resolves accessible `@username`, message-link, and trusted forwarded-source selectors; QQ resolves only an accessible current or numeric group.
+- [x] One command publishes exactly one source, is idempotent for command retries, gives a concise result, and follows low-noise command deletion.
+- [x] Private QQ chats, Telegram users, inaccessible targets, ambiguous selectors, and cross-platform publication selectors fail without guessing.
+- [x] Adapter and chat-neutral tests prove identical publication semantics while preserving platform-specific identity resolution.
+
+## Grant and Filter Cross-Bank Access
+
+**What to build:** Let the owner grant or revoke one published bank for one replied Whitelisted User and calculate fresh Effective Bank Access for every request.
+
+**Blocked by:** Publish Sources from Telegram and QQ.
+
+- [x] `/ai_bank_allow [source]` and `/ai_bank_deny [source]` target the replied user and are owner-only and low-noise; grants require an existing Directory Publication while revocation remains available if the publication or memory service is unavailable.
+- [x] Same-platform selectors use Telegram native identity or QQ group number; cross-platform selectors require the full canonical bank ID.
+- [x] Grants are keyed only by exact platform-qualified actor and target bank, apply across origin chats, and cannot be created for a user who is not whitelisted.
+- [x] `/ai_deny` atomically removes whitelist access, rate-limit state, and all Bank Grants; later re-whitelisting starts with no cross-bank grants.
+- [x] Owner access is unrestricted; delegated directory recall is prefiltered to the Primary Bank plus explicit grants and fails closed on policy or directory errors.
+
+## Let Pi Discover and Query Bounded Sources
+
+**What to build:** Give each Agent Run fresh primary and directory evidence, opaque source handles, and tools that can query at most two policy-approved non-primary banks.
+
+**Blocked by:** Grant and Filter Cross-Bank Access.
+
+- [x] The private Pi run contract carries the Primary Bank, requester identity, effective grants, and bounded participant access without exposing raw bank selection to the model.
+- [x] Initial Primary Bank and filtered Knowledge Directory recall run independently; directory failure degrades to Primary Bank context while cross-bank issuance fails closed.
+- [x] Directory evidence produces opaque per-run source handles only after reference and grant validation; arbitrary prompt IDs and hallucinated handles are rejected.
+- [x] `memory_query_source` recalls a selected source with a model-written query, labels provenance, and adds its returned memory IDs to bounded source inspection.
+- [x] One additional filtered directory lookup and at most two distinct Consulted Banks are permitted; cycles, ambiguity, unauthorized references, and exhausted budgets stop traversal.
+- [x] Participant Access Context is advisory and bounded; only the current requester's grants control tools, and another participant never expands access.
+
+## Expose Retrieval Audits and Pass the Live Gate
+
+**What to build:** Make cross-bank behavior inspectable, benchmark its routing quality, and prove the deployed stack through real Telegram and QQ workflows.
+
+**Blocked by:** Let Pi Discover and Query Bounded Sources.
+
+- [x] Run audits show primary recall, filtered directory request/response, reference validation, capability issuance, grant decisions, consulted-bank queries/results, and stop reasons.
+- [x] The session dashboard visibly warns when a continuation requester has less access than bank evidence already persisted in that branch.
+- [x] A focused fixture benchmark covers exact names, colloquial names, description-only discovery, multilingual prompts, collisions, ambiguity, distractors, recursive lookup, authorization filtering, reference integrity, quality, and latency.
+- [x] Focused Python and Node tests, full suites, formatting, security review, and Compose health checks pass.
+- [x] Live Telegram tests prove owner and delegated grant/revoke behavior in the disposable two-account group; live QQ tests prove owner publication and retrieval with synthetic messages that are deleted afterward.
+- [x] The existing local stack is rebuilt without losing sessions, memory banks, grants, or unrelated runtime data, and every residual live-test gap is reported precisely.
+
+## Verification Evidence (2026-07-17)
+
+- Changed Python files pass Ruff formatting and lint; `git diff --check` passes. The default Python suite reports `318 passed, 8 skipped`, the Pi Agent suite reports `68 passed`, and the playground suite reports `8 passed`.
+- The real Hindsight directory contract passes against the local service. The seven-case multilingual routing gate recalls the expected source in 7/7 cases, ranks it first in 6/7, passes exact authorization filtering, and records 243.7 ms p50 and 358.8 ms p95 recall latency.
+- `npm audit --omit=dev` reports zero vulnerabilities. Secret-pattern scanning finds no private key, OpenAI-style secret, AWS access key, or GitHub token in the worktree. Directory evidence is validated as untrusted input, raw prompt IDs cannot select banks, and all stored grant queries remain parameterized and bounded.
+- Live Telegram verification used the existing owner and second account in the disposable two-member group. It passed publication, delegated grant, cross-bank retrieval, revocation, denied post-revocation retrieval, and cleanup. Live QQ verification passed owner publication and primary-memory retrieval in the real group; synthetic messages and Hindsight documents were removed afterward.
+- Pi, playground, Telegram AI, and OneBot AI were rebuilt and force-recreated while preserving named volumes. Pi, playground, and OneBot are healthy, Telegram restarted successfully, NapCat reconnected, and the deployed playground completed a real memory-enabled run through the proxy with all directory audit events visible.
+- Telegram state remained at 164 answer markers, 2 whitelisted users, 0 temporary grants, and 8 configured memory scopes; QQ remained at 7 answer markers, 0 whitelisted users, 0 temporary grants, and 1 configured memory scope. Existing Agent Sessions and memory banks remain mounted.
+- V1 intentionally retains the documented advisory-only limitation for a shared Pi continuation whose earlier branch contains source evidence no longer available to the current requester. Fresh retrieval is denied, the dashboard warns, and hard confidentiality requires a future session-fork or history-sanitization mode.

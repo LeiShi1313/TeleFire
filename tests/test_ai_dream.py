@@ -2064,6 +2064,39 @@ async def test_continuous_scheduler_immediately_drains_backlog(tmp_path):
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_continuous_scheduler_waits_between_idle_cycles(tmp_path):
+    class RecordingSleep:
+        def __init__(self):
+            self.calls = []
+            self.started = asyncio.Event()
+
+        async def __call__(self, seconds):
+            self.calls.append(seconds)
+            self.started.set()
+            await asyncio.Event().wait()
+
+    store = await AIStateRepository(tmp_path / "ai.db").connect()
+    sleep = RecordingSleep()
+    scheduler = ContinuousMemoryScheduler(
+        scanner=FakeContinuousScanner(),
+        store=store,
+        settings=ContinuousMemorySchedulerSettings(
+            poll_interval_seconds=10,
+            concurrency=1,
+            scope_batch_size=1,
+        ),
+        sleep=sleep,
+    )
+    try:
+        scheduler.start()
+        await asyncio.wait_for(sleep.started.wait(), timeout=1)
+        assert sleep.calls == [10]
+    finally:
+        await scheduler.close()
+        await store.close()
+
+
 def test_dream_settings_load_temporal_session_limits(monkeypatch):
     monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_IDLE_SECONDS", "120")
     monkeypatch.setenv("TELEFIRE_MEMORY_DREAM_SESSION_MAX_SPAN_SECONDS", "600")

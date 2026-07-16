@@ -282,13 +282,6 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
 
     async def _on_message(self, event) -> None:
         if self._handler is not None:
-            continuous_scheduler = getattr(
-                self,
-                "_continuous_memory_scheduler",
-                None,
-            )
-            if continuous_scheduler is not None:
-                continuous_scheduler.notify()
             try:
                 if await self._handle_saved_memory(event.message):
                     return
@@ -299,9 +292,6 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     event.message.chat_id,
                     event.message.id,
                 )
-            finally:
-                if continuous_scheduler is not None:
-                    continuous_scheduler.notify()
 
     async def _handle_saved_memory(self, message) -> bool:
         if not self._is_saved_messages_message(message):

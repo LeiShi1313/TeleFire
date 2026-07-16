@@ -822,7 +822,7 @@ class TelegramDreamScanner:
             documents_created=documents_created,
             documents_unchanged=documents_unchanged,
         )
-        if self._logger is not None:
+        if self._logger is not None and result.messages_seen:
             finished_at = self._monotonic()
             self._logger.info(
                 "Dream retention complete "
@@ -1439,7 +1439,6 @@ class ContinuousMemoryScheduler:
         self._settings = settings
         self._sleep = sleep
         self._logger = logger
-        self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -1449,9 +1448,6 @@ class ContinuousMemoryScheduler:
             self._run_forever(),
             name="telefire-continuous-memory-scheduler",
         )
-
-    def notify(self) -> None:
-        self._wake.set()
 
     async def close(self) -> None:
         if self._task is None:
@@ -1526,7 +1522,12 @@ class ContinuousMemoryScheduler:
             messages_seen=messages_seen,
             messages_retained=messages_retained,
         )
-        if self._logger is not None:
+        if self._logger is not None and (
+            schedule_result.messages_seen
+            or schedule_result.scopes_failed
+            or schedule_result.scopes_busy
+            or schedule_result.scopes_pending
+        ):
             self._logger.info(
                 "Continuous memory cycle complete "
                 "(scopes=%s, succeeded=%s, failed=%s, busy=%s, pending=%s, "
@@ -1543,7 +1544,6 @@ class ContinuousMemoryScheduler:
 
     async def _run_forever(self) -> None:
         while True:
-            self._wake.clear()
             try:
                 result = await self.run_once()
             except Exception as exc:
@@ -1556,11 +1556,5 @@ class ContinuousMemoryScheduler:
                 result = None
             if result is not None and result.scopes_pending:
                 await self._sleep(0)
-                continue
-            try:
-                await asyncio.wait_for(
-                    self._wake.wait(),
-                    timeout=self._settings.poll_interval_seconds,
-                )
-            except TimeoutError:
-                pass
+            else:
+                await self._sleep(self._settings.poll_interval_seconds)

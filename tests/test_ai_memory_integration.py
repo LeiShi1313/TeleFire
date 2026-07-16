@@ -1986,7 +1986,7 @@ async def test_memory_status_command_is_deleted_after_configured_delay():
 
 
 @pytest.mark.asyncio
-async def test_memory_dream_command_deletes_while_scan_is_still_running():
+async def test_memory_dream_command_deletes_after_scan_acknowledgement():
     class BlockingDreamRunner(FakeDreamRunner):
         def __init__(self):
             super().__init__()
@@ -2020,8 +2020,42 @@ async def test_memory_dream_command_deletes_while_scan_is_still_running():
     await runner.started.wait()
     await asyncio.sleep(0.02)
 
-    assert command.deleted is True
+    assert command.deleted is False
     assert run.done() is False
 
     runner.release.set()
     assert await run is True
+    assert command.replies[0].text.startswith("Dream Cycle complete:")
+    assert command.deleted is False
+
+    await asyncio.sleep(0.02)
+
+    assert command.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_memory_command_deletes_after_retain_acknowledgement():
+    memory = BlockingRetainMemory()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        memory,
+        memory_command_delete_delay=0.01,
+    )
+    target = FakeMessage("I prefer tea", sender_id=20)
+    command = FakeMessage("/ai_memory", sender_id=10, reply_to=target)
+
+    run = asyncio.create_task(handler.handle(command))
+    await memory.retain_started.wait()
+    await asyncio.sleep(0.02)
+
+    assert command.deleted is False
+    assert run.done() is False
+
+    memory.release_retain.set()
+    assert await run is True
+    assert command.replies[0].text == "Memory stored from reply chain: 1 message."
+    assert command.deleted is False
+
+    await asyncio.sleep(0.02)
+
+    assert command.deleted is True

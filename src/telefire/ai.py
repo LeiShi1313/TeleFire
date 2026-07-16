@@ -2720,8 +2720,8 @@ class AIConversationHandler:
                 response = f"Dream enabled for {destination}."
             else:
                 response = f"Dream disabled for {destination}."
-        await self._schedule_memory_command_delete(message, command.name)
         await self._reply_memory_excluded(message, response, kind="memory-control")
+        await self._schedule_memory_command_delete(message, command.name)
         return True
 
     async def _handle_memory_scope_status(self, message: ReplyTarget) -> bool:
@@ -2754,14 +2754,14 @@ class AIConversationHandler:
                 f"Last Dream error: {state.last_error or 'none'}",
             )
         )
-        await self._schedule_memory_command_delete(
-            message,
-            "/ai_memory_status",
-        )
         await self._reply_memory_excluded(
             message,
             response,
             kind="memory-control",
+        )
+        await self._schedule_memory_command_delete(
+            message,
+            "/ai_memory_status",
         )
         return True
 
@@ -2781,12 +2781,12 @@ class AIConversationHandler:
                 lines.append(line)
                 response_length += len(line) + 1
             response = "\n".join((header, *lines))
-        await self._schedule_memory_command_delete(message, "/ai_memory_list")
         await self._reply_memory_excluded(
             message,
             response,
             kind="memory-control",
         )
+        await self._schedule_memory_command_delete(message, "/ai_memory_list")
         return True
 
     async def _continuous_memory_enabled(self, chat_id: int) -> bool:
@@ -2801,49 +2801,38 @@ class AIConversationHandler:
 
     async def _handle_memory_dream(self, message: ReplyTarget) -> bool:
         assert message.chat_id is not None
-        await self._schedule_memory_command_delete(message, "/ai_memory_dream")
         scope = await self._store.get_memory_scope_state(
             self._identity_codec.scope_id(message.chat_id)
         )
         if scope.continuous_enabled:
-            await self._reply_memory_excluded(
-                message,
-                "Continuous memory is enabled; Dream is currently overridden.",
-                kind="memory-control",
+            response = (
+                "Continuous memory is enabled; Dream is currently overridden."
             )
-            return True
-        if not scope.dream_enabled:
-            await self._reply_memory_excluded(
-                message,
-                "Dream is disabled for this chat.",
-                kind="memory-control",
-            )
-            return True
-        if self._dream_runner is None:
-            await self._reply_memory_excluded(
-                message,
-                "Dream Cycle is unavailable.",
-                kind="memory-control",
-            )
-            return True
-        try:
-            result = await self._dream_runner.run_scope(message.chat_id)
-        except Exception as exc:
-            self._log_memory_failure("Dream Cycle", exc)
-            await self._reply_memory_excluded(
-                message,
-                "Dream Cycle failed. It will retry from the previous cursor.",
-                kind="memory-control",
-            )
-            return True
+        elif not scope.dream_enabled:
+            response = "Dream is disabled for this chat."
+        elif self._dream_runner is None:
+            response = "Dream Cycle is unavailable."
+        else:
+            try:
+                result = await self._dream_runner.run_scope(message.chat_id)
+            except Exception as exc:
+                self._log_memory_failure("Dream Cycle", exc)
+                response = (
+                    "Dream Cycle failed. It will retry from the previous cursor."
+                )
+            else:
+                response = (
+                    "Dream Cycle complete: "
+                    f"{_pluralize(result.messages_retained, 'message')} in "
+                    f"{_pluralize(result.documents_created, 'updated thread')}; "
+                    f"{result.documents_unchanged} unchanged."
+                )
         await self._reply_memory_excluded(
             message,
-            "Dream Cycle complete: "
-            f"{_pluralize(result.messages_retained, 'message')} in "
-            f"{_pluralize(result.documents_created, 'updated thread')}; "
-            f"{result.documents_unchanged} unchanged.",
+            response,
             kind="memory-control",
         )
+        await self._schedule_memory_command_delete(message, "/ai_memory_dream")
         return True
 
     async def _handle_memory_backfill(
@@ -2852,12 +2841,15 @@ class AIConversationHandler:
         request: MemoryBackfillCommand,
     ) -> bool:
         assert message.chat_id is not None
-        await self._schedule_memory_command_delete(message, "/ai_memory_backfill")
         if self._dream_runner is None:
             await self._reply_memory_excluded(
                 message,
                 "Memory backfill is unavailable.",
                 kind="memory-control",
+            )
+            await self._schedule_memory_command_delete(
+                message,
+                "/ai_memory_backfill",
             )
             return True
         if request.mode == "days":
@@ -2869,6 +2861,7 @@ class AIConversationHandler:
             progress_text,
             kind="memory-control",
         )
+        await self._schedule_memory_command_delete(message, "/ai_memory_backfill")
         try:
             result = await self._dream_runner.run_backfill(message.chat_id, request)
         except Exception as exc:
@@ -3062,7 +3055,6 @@ class AIConversationHandler:
             )
             return True
 
-        await self._schedule_memory_command_delete(message, "/ai_memory")
         retained = await self._retain_memory_chain(target)
         if retained is None:
             await self._reply_memory_excluded(
@@ -3070,6 +3062,7 @@ class AIConversationHandler:
                 "Memory update failed. Retry the command.",
                 kind="memory-control",
             )
+            await self._schedule_memory_command_delete(message, "/ai_memory")
             return True
         observations = retained.observations
         if not instruction and not observations:
@@ -3078,6 +3071,7 @@ class AIConversationHandler:
                 "The reply chain has no supported human content to remember.",
                 kind="memory-control",
             )
+            await self._schedule_memory_command_delete(message, "/ai_memory")
             return True
 
         if instruction:
@@ -3118,6 +3112,7 @@ class AIConversationHandler:
                     "Memory revision failed. Retry the command.",
                     kind="memory-control",
                 )
+                await self._schedule_memory_command_delete(message, "/ai_memory")
                 return True
             try:
                 await self._memory.revise(
@@ -3132,6 +3127,7 @@ class AIConversationHandler:
                     "Memory revision failed. Retry the command.",
                     kind="memory-control",
                 )
+                await self._schedule_memory_command_delete(message, "/ai_memory")
                 return True
 
         if instruction:
@@ -3148,6 +3144,7 @@ class AIConversationHandler:
             response,
             kind="memory-control",
         )
+        await self._schedule_memory_command_delete(message, "/ai_memory")
         return True
 
     async def _retain_memory_chain(

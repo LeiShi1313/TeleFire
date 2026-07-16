@@ -49,6 +49,7 @@ def group_event(
     text="/ai hello",
     segments=None,
     post_type="message",
+    timestamp=1_700_000_000,
 ):
     return {
         "post_type": post_type,
@@ -58,7 +59,7 @@ def group_event(
         "group_id": group_id,
         "group_name": "Dog Food Filter",
         "message_id": message_id,
-        "time": 1_700_000_000,
+        "time": timestamp,
         "sender": {
             "user_id": sender_id,
             "nickname": "Alice",
@@ -384,6 +385,54 @@ async def test_onebot_history_resumes_from_latest_window_when_cursor_is_gone():
     )
 
     assert [message.id for message in messages] == [501, 502]
+
+
+@pytest.mark.asyncio
+async def test_onebot_history_pages_past_unsettled_messages_for_window():
+    cutoff = datetime.fromtimestamp(1_700_000_000, UTC)
+    action_client = RecordingActionClient(
+        responses=[
+            {
+                "messages": [
+                    group_event(
+                        message_id=501,
+                        text="unsettled one",
+                        timestamp=1_700_000_010,
+                    ),
+                    group_event(
+                        message_id=502,
+                        text="unsettled two",
+                        timestamp=1_700_000_011,
+                    ),
+                ]
+            },
+            {
+                "messages": [
+                    group_event(
+                        message_id=500,
+                        text="settled",
+                        timestamp=1_699_999_999,
+                    ),
+                    group_event(
+                        message_id=501,
+                        text="unsettled one",
+                        timestamp=1_700_000_010,
+                    ),
+                ]
+            },
+        ]
+    )
+
+    messages = await OneBotHistorySource(action_client).fetch_window(
+        700,
+        since=datetime.fromtimestamp(1_699_999_000, UTC),
+        until=cutoff,
+        limit=1,
+    )
+
+    assert [message.id for message in messages] == [500]
+    assert action_client.calls[1][1]["message_seq"] == "501"
+    assert action_client.calls[1][1]["reverse_order"] is True
 
 
 @pytest.mark.asyncio

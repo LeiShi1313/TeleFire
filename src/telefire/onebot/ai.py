@@ -247,6 +247,9 @@ class OneBotChatTransport:
 
 
 class OneBotHistorySource:
+    WINDOW_PAGE_SIZE = 500
+    MAX_WINDOW_SCAN_MESSAGES = 10_000
+
     def __init__(
         self,
         client: OneBotActionClient,
@@ -294,12 +297,45 @@ class OneBotHistorySource:
         until: datetime,
         limit: int,
     ) -> tuple[OneBotMessage, ...]:
-        messages = await self._history(chat_id, count=limit)
-        return tuple(
-            message
-            for message in messages
-            if since <= message.date <= until
+        if limit < 1:
+            return ()
+        page_size = min(
+            self.WINDOW_PAGE_SIZE,
+            max(100, limit),
         )
+        messages = list(await self._history(chat_id, count=page_size))
+        seen = {message.id for message in messages}
+        maximum_scan = min(
+            self.MAX_WINDOW_SCAN_MESSAGES,
+            max(1_000, limit * 2),
+        )
+        while messages:
+            eligible = [
+                message
+                for message in messages
+                if since <= message.date <= until
+            ]
+            if len(eligible) >= limit:
+                return tuple(eligible[-limit:])
+            oldest = messages[0]
+            if oldest.date <= since or len(seen) >= maximum_scan:
+                return tuple(eligible)
+            previous = await self._history(
+                chat_id,
+                count=min(page_size + 1, maximum_scan - len(seen) + 1),
+                message_seq=oldest.id,
+                reverse_order=True,
+            )
+            unseen = [
+                message
+                for message in previous
+                if message.id not in seen
+            ]
+            if not unseen:
+                return tuple(eligible)
+            seen.update(message.id for message in unseen)
+            messages[:0] = unseen
+        return ()
 
     async def fetch_message(
         self,

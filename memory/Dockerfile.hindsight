@@ -2,15 +2,23 @@ FROM ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a5607
 
 USER root
 
+COPY patches/408d7c34-observation-history-fk-race.patch /tmp/
+
 # Hindsight runs from its bundled virtualenv and invokes Node directly. Remove
-# package managers left by the upstream build and apply available OS fixes.
+# package managers left by the upstream build, apply available OS fixes, and
+# backport upstream PR #2620 until it is included in a tagged release.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends patch \
+    && patch --batch --forward -d /app/api -p1 \
+        < /tmp/408d7c34-observation-history-fk-race.patch \
+    && apt-get purge -y --auto-remove patch \
     && rm -rf \
         /app/sdk/node_modules/@hey-api/openapi-ts \
         /usr/lib/node_modules/npm \
         /usr/local/lib/python3.11/site-packages/* \
         /var/lib/apt/lists/* \
+        /tmp/408d7c34-observation-history-fk-race.patch \
     && rm -f \
         /usr/bin/npm \
         /usr/bin/npx \

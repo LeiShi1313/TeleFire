@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.hindsight
-    image: telefire-hindsight:0.8.4-hardened
+    image: telefire-hindsight:0.8.4-hardened-r1
     container_name: memory-api
     environment:
       HINDSIGHT_API_LLM_PROVIDER: openai

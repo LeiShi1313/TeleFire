@@ -158,6 +158,9 @@ def make_handler(gateway, store=None, **builder_options):
 
 
 class FakeAttachmentDescriber:
+    def has_attachment(self, message):
+        return message.file is not None
+
     async def describe(self, message):
         if message.file is None:
             return None

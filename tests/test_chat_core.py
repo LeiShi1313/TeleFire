@@ -6,11 +6,13 @@ from dataclasses import fields
 import pytest
 
 from telefire.ai import (
+    AIConversationHandler,
     AIResponder,
     AgentEvent,
     AgentRunRequest,
+    PromptBuilder,
 )
-from telefire.chat.attachments import AttachmentReference
+from telefire.chat.attachments import AttachmentDescription, AttachmentReference
 from telefire.chat.commands import (
     AIAskCommand,
     AICancelCommand,
@@ -132,12 +134,15 @@ class FakeTransport:
     def __init__(self):
         self.sent = FakeSentMessage()
         self.updates: list[tuple[str, ChatPresentation, bool]] = []
+        self.replies: list[tuple[object, str, ChatPresentation]] = []
+        self.reply_targets: dict[object, object] = {}
+        self.deleted: list[object] = []
 
     async def get_reply(self, message):
-        return None
+        return self.reply_targets.get(message)
 
     async def reply(self, message, text, *, presentation):
-        assert presentation == "plain"
+        self.replies.append((message, text, presentation))
         self.sent.text = text
         return self.sent
 
@@ -147,7 +152,7 @@ class FakeTransport:
         return True
 
     async def delete(self, message):
-        return None
+        self.deleted.append(message)
 
     def is_outgoing(self, message):
         return False
@@ -172,4 +177,107 @@ async def test_responder_streams_through_transport_not_message_sdk_methods():
 
     assert result.succeeded is True
     assert result.message is transport.sent
+    assert transport.updates[-1] == ("final", "agent", True)
+
+
+class MinimalMessage:
+    def __init__(
+        self,
+        text: str,
+        *,
+        message_id: int = 1,
+        chat_id: int = 7,
+        sender_id: int = 42,
+        reply_to_message_id: int | None = None,
+    ):
+        self.id = message_id
+        self.chat_id = chat_id
+        self.sender_id = sender_id
+        self.raw_text = text
+        self.reply_to_msg_id = reply_to_message_id
+        self.date = None
+
+
+class FakeStore:
+    def __init__(self):
+        self.saved = []
+
+    async def get_answer(self, chat_id, answer_message_id):
+        return None
+
+    async def get_turn_for_message(self, chat_id, message_id):
+        return None
+
+    async def save_answer(self, marker):
+        self.saved.append(marker)
+
+    async def is_allowed(self, user_id):
+        return False
+
+    async def get_last_request_at(self, user_id):
+        return None
+
+    async def set_last_request_at(self, user_id, timestamp):
+        return None
+
+    async def allow_user(self, user_id):
+        return None
+
+    async def deny_user(self, user_id):
+        return None
+
+    async def mark_memory_excluded_message(self, chat_id, message_id, kind):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_handler_uses_transport_for_sdk_operations():
+    transport = FakeTransport()
+    gateway = FakeGateway()
+    handler = AIConversationHandler(
+        owner_id=42,
+        responder=AIResponder(gateway, transport=transport),
+        store=FakeStore(),
+        prompt_builder=PromptBuilder(transport=transport),
+        transport=transport,
+    )
+    message = MinimalMessage("/ai question")
+
+    handled = await handler.handle(message)
+
+    assert handled is True
+    assert transport.replies[0] == (message, "Thinking...", "plain")
+    assert transport.updates[-1] == ("final", "agent", True)
+
+
+class OpaqueAttachmentDescriber:
+    def has_attachment(self, message):
+        return True
+
+    async def describe(self, message):
+        return AttachmentDescription(
+            context_text="Generated image description",
+            memory_text="The subject shared an image.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_attachment_detection_does_not_require_telegram_file_attributes():
+    transport = FakeTransport()
+    gateway = FakeGateway()
+    handler = AIConversationHandler(
+        owner_id=42,
+        responder=AIResponder(gateway, transport=transport),
+        store=FakeStore(),
+        prompt_builder=PromptBuilder(
+            transport=transport,
+            attachment_describer=OpaqueAttachmentDescriber(),
+        ),
+        transport=transport,
+    )
+    message = MinimalMessage("/ai")
+
+    handled = await handler.handle(message)
+
+    assert handled is True
     assert transport.updates[-1] == ("final", "agent", True)

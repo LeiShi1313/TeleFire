@@ -31,11 +31,9 @@ from telefire.ai_memory import (
 )
 from telefire.ai_attachments import (
     AttachmentAnalysisRequest,
-    AttachmentDescriber,
-    AttachmentDescription,
-    message_has_attachment,
 )
-from telefire.chat.transport import ChatTransport
+from telefire.chat.attachments import AttachmentDescriber, AttachmentDescription
+from telefire.chat.transport import ChatTransport, ObjectChatTransport
 
 
 TelegramResponseFormat = Literal["regular_html", "rich_markdown"]
@@ -1048,6 +1046,10 @@ class AIResponder:
     async def cancel(self, run_id: str) -> bool:
         return await self._gateway.cancel(run_id)
 
+    @property
+    def transport(self) -> ChatTransport | None:
+        return self._transport
+
     def _truncate(self, text: str) -> str:
         if len(text) <= self._max_output_chars:
             return text
@@ -1161,6 +1163,7 @@ class PromptBuilder:
         mention_resolver: MessageMentionResolver | None = None,
         history_source: MessageHistorySource | None = None,
         max_attachments: int = 3,
+        transport: ChatTransport | None = None,
     ):
         if max_context_messages < 1 or max_context_chars < 1:
             raise ValueError("Context limits must be positive")
@@ -1174,12 +1177,19 @@ class PromptBuilder:
         self.mention_resolver = mention_resolver
         self.history_source = history_source
         self.max_attachments = max_attachments
+        self._transport = transport or ObjectChatTransport()
+
+    def has_attachment(self, message: ReplyTarget) -> bool:
+        return (
+            self.attachment_describer is not None
+            and self.attachment_describer.has_attachment(message)
+        )
 
     async def describe_attachment(
         self,
         message: ReplyTarget,
     ) -> AttachmentDescription | None:
-        if self.attachment_describer is None or not message_has_attachment(message):
+        if not self.has_attachment(message):
             return None
         try:
             return await self.attachment_describer.describe(message)
@@ -1211,7 +1221,9 @@ class PromptBuilder:
         *,
         recent_messages: int | None = None,
     ) -> ChatContext:
-        reply_path = await self._load_reply_path(await trigger.get_reply_message())
+        reply_path = await self._load_reply_path(
+            await self._transport.get_reply(trigger)
+        )
         recent: tuple[ReplyTarget, ...] = ()
         if recent_messages is not None:
             if not 1 <= recent_messages <= self.max_context_messages:
@@ -1260,7 +1272,7 @@ class PromptBuilder:
                 break
             seen.add(key)
             newest_first.append(current)
-            current = await current.get_reply_message()
+            current = await self._transport.get_reply(current)
         return tuple(newest_first)
 
     async def _build_chat_context(
@@ -2491,6 +2503,7 @@ class AIConversationHandler:
         dream_runner: MemoryDreamRunner | None = None,
         memory_scope_resolver: MemoryScopeTargetResolver | None = None,
         memory_command_delete_delay: float = 3.0,
+        transport: ChatTransport | None = None,
         logger: Any | None = None,
     ):
         if memory_command_delete_delay < 0:
@@ -2507,14 +2520,20 @@ class AIConversationHandler:
         self._memory_command_delete_tasks: set[asyncio.Task[None]] = set()
         self._logger = logger
         self._active_runs: dict[int, str] = {}
+        self._transport = (
+            transport
+            or responder.transport
+            or ObjectChatTransport()
+        )
 
     async def handle(self, message: ReplyTarget) -> bool:
         if message.sender_id is None or message.chat_id is None:
             return False
         command = (message.raw_text or "").strip()
         command_name = command.split(maxsplit=1)[0] if command else ""
-        is_owner_control = message.sender_id == self._owner_id or bool(
-            getattr(message, "out", False)
+        is_owner_control = (
+            message.sender_id == self._owner_id
+            or self._transport.is_outgoing(message)
         )
         memory_instruction = parse_memory_revision(message.raw_text)
         if memory_instruction is not None:
@@ -2612,7 +2631,7 @@ class AIConversationHandler:
         reference_context = ""
         anchor_observations: list[HumanObservation] = []
         retained_observations: list[HumanObservation] = []
-        has_current_attachment = message_has_attachment(message)
+        has_current_attachment = self._prompt_builder.has_attachment(message)
         authored_prompt = ""
         if ai_trigger is not None:
             if not ai_trigger.prompt and not has_current_attachment:
@@ -2813,7 +2832,7 @@ class AIConversationHandler:
         message: ReplyTarget,
     ) -> AIAnswerMarker | None:
         assert message.chat_id is not None
-        current = await message.get_reply_message()
+        current = await self._transport.get_reply(message)
         seen: set[tuple[int | None, int]] = set()
         for _ in range(self._prompt_builder.max_context_messages):
             if current is None:
@@ -2825,7 +2844,7 @@ class AIConversationHandler:
             turn = await self._store.get_turn_for_message(message.chat_id, current.id)
             if turn is not None:
                 return turn
-            current = await current.get_reply_message()
+            current = await self._transport.get_reply(current)
         return None
 
     async def _handle_cancel(self, message: ReplyTarget) -> bool:
@@ -2852,7 +2871,7 @@ class AIConversationHandler:
         message: ReplyTarget,
         command: str,
     ) -> bool:
-        target = await message.get_reply_message()
+        target = await self._transport.get_reply(message)
         if target is None or target.sender_id is None:
             await self._reply_memory_excluded(
                 message,
@@ -3107,19 +3126,23 @@ class AIConversationHandler:
             result = await self._dream_runner.run_backfill(message.chat_id, request)
         except Exception as exc:
             self._log_memory_failure("backfill", exc)
-            await progress.edit(
+            await self._transport.update(
+                progress,
                 "Memory backfill failed. Accepted documents are safe; "
                 "retry the same command.",
-                parse_mode=None,
+                presentation="plain",
+                wait=True,
             )
             return True
-        await progress.edit(
+        await self._transport.update(
+            progress,
             "Memory backfill complete: "
             f"scanned {_pluralize(result.messages_seen, 'message')}; "
             f"retained {result.messages_retained} in "
             f"{_pluralize(result.documents_created, 'updated thread')}; "
             f"{result.documents_unchanged} unchanged.",
-            parse_mode=None,
+            presentation="plain",
+            wait=True,
         )
         return True
 
@@ -3130,7 +3153,11 @@ class AIConversationHandler:
         *,
         kind: str,
     ) -> EditableMessage:
-        reply = await message.reply(text, parse_mode=None)
+        reply = await self._transport.reply(
+            message,
+            text,
+            presentation="plain",
+        )
         if message.chat_id is not None:
             await self._mark_memory_excluded(message.chat_id, reply.id, kind)
         return reply
@@ -3247,7 +3274,7 @@ class AIConversationHandler:
                 kind="memory-control",
             )
             return True
-        target = await message.get_reply_message()
+        target = await self._transport.get_reply(message)
         if target is None or target.sender_id is None:
             await self._reply_memory_excluded(
                 message,
@@ -3435,11 +3462,8 @@ class AIConversationHandler:
         message: ReplyTarget,
         command: str,
     ) -> None:
-        delete = getattr(message, "delete", None)
-        if not callable(delete):
-            return
         try:
-            await delete()
+            await self._transport.delete(message)
         except Exception as exc:
             if self._logger is not None:
                 self._logger.warning(

@@ -381,6 +381,9 @@ class FakeAttachmentDescriber:
     def __init__(self, descriptions=None):
         self.descriptions = descriptions or {}
 
+    def has_attachment(self, message):
+        return message.id in self.descriptions
+
     async def describe(self, message):
         return self.descriptions.get(message.id)
 

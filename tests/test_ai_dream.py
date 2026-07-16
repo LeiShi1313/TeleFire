@@ -288,6 +288,9 @@ class FakeAttachmentDescriber:
     def __init__(self):
         self.calls = []
 
+    def has_attachment(self, message):
+        return message.file is not None
+
     async def describe(self, message):
         self.calls.append(message.id)
         if message.file is None:

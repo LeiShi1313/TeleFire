@@ -11,6 +11,8 @@ from typing import Any, Literal, Protocol
 from PIL import Image
 from pypdf import PdfReader
 
+from telefire.chat.attachments import AttachmentDescription
+
 
 AttachmentKind = Literal["image", "text"]
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -60,18 +62,8 @@ class AttachmentAnalysisRequest:
             raise ValueError("Attachment analysis requires exactly one content type")
 
 
-@dataclass(frozen=True, slots=True)
-class AttachmentDescription:
-    context_text: str
-    memory_text: str
-
-
 class AttachmentAnalysisGateway(Protocol):
     async def describe_attachment(self, request: AttachmentAnalysisRequest) -> str: ...
-
-
-class AttachmentDescriber(Protocol):
-    async def describe(self, message: Any) -> AttachmentDescription | None: ...
 
 
 def message_has_attachment(message: Any) -> bool:
@@ -115,6 +107,9 @@ class TelegramAttachmentDescriber:
         self._gateway = gateway
         self._download_timeout = download_timeout
         self._logger = logger
+
+    def has_attachment(self, message: Any) -> bool:
+        return message_has_attachment(message)
 
     async def describe(self, message: Any) -> AttachmentDescription | None:
         file = getattr(message, "file", None)

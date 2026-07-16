@@ -35,6 +35,7 @@ from telefire.ai_attachments import (
     AttachmentDescription,
     message_has_attachment,
 )
+from telefire.chat.transport import ChatTransport
 
 
 TelegramResponseFormat = Literal["regular_html", "rich_markdown"]
@@ -921,9 +922,11 @@ class AIResponder:
         response_format: TelegramResponseFormat = "regular_html",
         clock: Callable[[], float] = time.monotonic,
         edit_limiter: TelegramEditLimiter | None = None,
+        transport: ChatTransport | None = None,
         logger: Any | None = None,
     ):
         self._gateway = gateway
+        self._transport = transport
         self._response_format = response_format
         self._edit_limiter = edit_limiter or TelegramEditLimiter(
             edit_cadence,
@@ -936,7 +939,15 @@ class AIResponder:
     async def answer(
         self, trigger: ReplyTarget, request: AgentRunRequest
     ) -> AnswerResult:
-        answer = await trigger.reply("Thinking...", parse_mode=None)
+        answer = (
+            await self._transport.reply(
+                trigger,
+                "Thinking...",
+                presentation="plain",
+            )
+            if self._transport is not None
+            else await trigger.reply("Thinking...", parse_mode=None)
+        )
         text = ""
         last_edited_source: str | None = None
         session_id: str | None = None
@@ -1049,6 +1060,13 @@ class AIResponder:
         *,
         wait: bool,
     ) -> bool:
+        if self._transport is not None:
+            return await self._transport.update(
+                answer,
+                text,
+                presentation="agent",
+                wait=wait,
+            )
         if self._response_format == "rich_markdown":
             return await self._edit_rich_markdown(answer, text, wait=wait)
         rendered, entities = telegram_html.parse(text)
@@ -1070,6 +1088,13 @@ class AIResponder:
         wait: bool,
         **kwargs: Any,
     ) -> bool:
+        if self._transport is not None:
+            return await self._transport.update(
+                answer,
+                text,
+                presentation="plain",
+                wait=wait,
+            )
         return await self._edit_limiter.run(
             lambda: answer.edit(text, **kwargs),
             wait=wait,

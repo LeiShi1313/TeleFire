@@ -6,7 +6,12 @@ from telethon import utils as telegram_utils
 from telethon.tl import functions as telegram_functions
 from telethon.tl import types as telegram_types
 
-from telefire.plugins.ai import TelegramAI, _parse_telegram_message_link
+from telefire.ai import MemoryScopeTarget
+from telefire.plugins.ai import (
+    TelegramAI,
+    TelegramMemoryScopeTargetResolver,
+    _parse_telegram_message_link,
+)
 
 
 class FailingHandler:
@@ -118,6 +123,22 @@ class FakeTelegramClient:
         if self.request_error is not None:
             raise self.request_error
         return SimpleNamespace()
+
+
+class FakeMemoryScopeClient:
+    def __init__(self, entity, latest_messages=()):
+        self.entity = entity
+        self.latest_messages = latest_messages
+        self.get_entity_calls = []
+        self.get_messages_calls = []
+
+    async def get_entity(self, candidate):
+        self.get_entity_calls.append(candidate)
+        return self.entity
+
+    async def get_messages(self, entity, *, limit):
+        self.get_messages_calls.append((entity, limit))
+        return self.latest_messages
 
 
 class FakeSavedMessage:
@@ -240,6 +261,47 @@ def test_parse_telegram_message_link(
 )
 def test_parse_telegram_message_link_rejects_non_message_links(text):
     assert _parse_telegram_message_link(text) is None
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_target_resolver_resolves_channel_and_latest_message():
+    channel = telegram_types.Channel(
+        id=2064685671,
+        title="Seele Leaks",
+        photo=telegram_types.ChatPhotoEmpty(),
+        date=None,
+        broadcast=True,
+    )
+    client = FakeMemoryScopeClient(
+        channel,
+        latest_messages=[SimpleNamespace(id=33392)],
+    )
+    resolver = TelegramMemoryScopeTargetResolver(client)
+
+    target = await resolver.resolve(
+        -1002064685671,
+        include_latest_message=True,
+    )
+
+    assert target == MemoryScopeTarget(
+        chat_id=-1002064685671,
+        display_name="Seele Leaks",
+        latest_message_id=33392,
+    )
+    assert client.get_entity_calls == [-1002064685671]
+    assert client.get_messages_calls == [(channel, 1)]
+
+
+@pytest.mark.asyncio
+async def test_memory_scope_target_resolver_rejects_users():
+    user = telegram_types.User(id=20, first_name="Alice")
+    client = FakeMemoryScopeClient(user)
+    resolver = TelegramMemoryScopeTargetResolver(client)
+
+    with pytest.raises(ValueError, match="group or channel"):
+        await resolver.resolve(20)
+
+    assert client.get_messages_calls == []
 
 
 @pytest.mark.asyncio

@@ -268,6 +268,7 @@ class OneBotHistorySource:
             trigger.chat_id,
             count=limit + 1,
             message_seq=trigger.id,
+            reverse_order=True,
             scope_display_name=getattr(trigger, "scope_display_name", None),
         )
         trigger_index = next(
@@ -360,6 +361,7 @@ class OneBotHistorySource:
         *,
         count: int,
         message_seq: int | None = None,
+        reverse_order: bool = False,
         scope_display_name: str | None = None,
     ) -> tuple[OneBotMessage, ...]:
         if chat_id > 0:
@@ -371,7 +373,7 @@ class OneBotHistorySource:
         params.update(
             {
                 "count": count,
-                "reverse_order": False,
+                "reverse_order": reverse_order,
                 "disable_get_url": False,
                 "parse_mult_msg": True,
             }

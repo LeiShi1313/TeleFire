@@ -359,6 +359,7 @@ async def test_onebot_history_uses_transport_order_not_random_message_id_order()
     assert action == "get_group_msg_history"
     assert params["group_id"] == "700"
     assert params["message_seq"] == "100"
+    assert params["reverse_order"] is True
 
 
 @pytest.mark.asyncio

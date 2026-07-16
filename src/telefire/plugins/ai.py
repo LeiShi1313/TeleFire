@@ -17,6 +17,7 @@ from telefire.ai import (
     PiAgentGateway,
     PromptBuilder,
     TelegramEditLimiter,
+    TelegramMemoryScopeTargetResolver,
     TelegramMessageIdentityResolver,
     TelegramMessageMentionResolver,
     select_telegram_response_format,
@@ -268,6 +269,10 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             ),
             memory=self._memory,
             dream_runner=dream_runner,
+            memory_scope_resolver=TelegramMemoryScopeTargetResolver(
+                self.client,
+                logger=self.logger,
+            ),
             memory_command_delete_delay=(
                 self._settings.memory_command_delete_delay
             ),

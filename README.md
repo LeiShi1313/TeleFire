@@ -338,15 +338,22 @@ Commands and reply behavior:
 - Every successful `/ai` request retains its bounded human reply path plus the
   current prompt. No chat-level memory switch is required. `/ai_memory_enable`
   instead enables continuous capture of all eligible settled messages arriving
-  after the command; `/ai_memory_disable` stops that background capture.
+  after the command; `/ai_memory_disable` stops that background capture. Both
+  commands accept an optional numeric Telegram group/channel ID, for example
+  `/ai_memory_enable -1002064685671`, so the owner can manage another accessible
+  chat from anywhere. Remote enable starts after that target's latest message.
 - `/ai_dream_enable` separately enables scheduled Dream scans and
-  `/ai_dream_disable` disables them. Continuous capture overrides Dream while both
-  settings are enabled, so the same chat is never scanned by both workers.
+  `/ai_dream_disable` disables them. These commands accept the same optional
+  numeric group/channel ID. Continuous capture overrides Dream while both settings
+  are enabled, so the same chat is never scanned by both workers.
   `/ai_memory_dream` runs one bounded Dream scan immediately when Dream is enabled
   and continuous capture is disabled. `/ai_memory_status` reports both modes,
-  their cursor, and the latest Dream attempt, success, and failure. Recall and
-  one-shot `/ai_memory` do not depend on either mode. Accepted owner
-  memory-management commands delete on the configured timer.
+  their cursor, and the latest Dream attempt, success, and failure for the current
+  chat. `/ai_memory_list` reports every chat with continuous memory or Dream
+  enabled, including its display name, canonical numeric ID, cursor, override
+  state, and latest errors. Recall and one-shot `/ai_memory` do not depend on
+  either mode. Accepted owner memory-management commands delete on the configured
+  timer.
 - Dream-enabled chats are scanned on `TELEFIRE_MEMORY_DREAM_CRON` (hourly by default).
   Lookback, overlap, settlement delay, concurrency, transport batch size, and
   bounded retry settings use the `TELEFIRE_MEMORY_DREAM_*` variables documented

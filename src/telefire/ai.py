@@ -310,12 +310,28 @@ class MentionedUser:
     display_name: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class MemoryScopeTarget:
+    chat_id: int
+    display_name: str | None = None
+    latest_message_id: int = 0
+
+
 class MessageIdentityResolver(Protocol):
     async def resolve(self, message: ReplyTarget) -> MessageIdentity: ...
 
 
 class MessageMentionResolver(Protocol):
     async def resolve(self, message: ReplyTarget) -> tuple[MentionedUser, ...]: ...
+
+
+class MemoryScopeTargetResolver(Protocol):
+    async def resolve(
+        self,
+        chat_id: int,
+        *,
+        include_latest_message: bool = False,
+    ) -> MemoryScopeTarget: ...
 
 
 class MessageHistorySource(Protocol):
@@ -417,6 +433,48 @@ class TelegramMessageMentionResolver:
         return tuple(resolved.values())
 
 
+class TelegramMemoryScopeTargetResolver:
+    def __init__(self, client: Any, *, logger: Any | None = None):
+        self._client = client
+        self._logger = logger
+
+    async def resolve(
+        self,
+        chat_id: int,
+        *,
+        include_latest_message: bool = False,
+    ) -> MemoryScopeTarget:
+        try:
+            entity = await self._client.get_entity(chat_id)
+            if not isinstance(
+                entity,
+                (telegram_types.Chat, telegram_types.Channel),
+            ):
+                raise ValueError("Telegram target is not a group or channel")
+            latest_message_id = 0
+            if include_latest_message:
+                messages = await self._client.get_messages(entity, limit=1)
+                if messages:
+                    latest_message_id = int(messages[0].id)
+        except Exception as exc:
+            if self._logger is not None:
+                self._logger.warning(
+                    "Telegram memory scope lookup failed "
+                    "(chat_id=%s, error=%s): %s",
+                    chat_id,
+                    type(exc).__name__,
+                    exc,
+                )
+            raise ValueError(
+                "Telegram group or channel is inaccessible"
+            ) from exc
+        return MemoryScopeTarget(
+            chat_id=telegram_utils.get_peer_id(entity),
+            display_name=_telegram_display_name(entity),
+            latest_message_id=latest_message_id,
+        )
+
+
 class ConversationStore(Protocol):
     async def get_answer(
         self, chat_id: int, answer_message_id: int
@@ -470,6 +528,10 @@ class ConversationStore(Protocol):
         scope_id: str,
     ) -> MemoryScopeState: ...
 
+    async def list_enabled_memory_scope_states(
+        self,
+    ) -> tuple[MemoryScopeState, ...]: ...
+
     async def set_continuous_memory_enabled(
         self,
         scope_id: str,
@@ -514,12 +576,14 @@ class MemoryDreamState:
 @dataclass(frozen=True, slots=True)
 class MemoryScopeState:
     scope_id: str
+    display_name: str | None = None
     continuous_enabled: bool = False
     dream_enabled: bool = False
     continuous_cursor_message_id: int | None = None
     continuous_last_attempt_at: float | None = None
     continuous_last_success_at: float | None = None
     continuous_last_error: str | None = None
+    dream_last_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -814,6 +878,23 @@ def parse_memory_backfill(text: str | None) -> MemoryBackfillRequest | None:
         return MemoryBackfillRequest(mode=mode, value=value)
     except ValueError:
         return None
+
+
+def _parse_optional_memory_scope_target(
+    text: str,
+    command: str,
+) -> tuple[bool, int | None]:
+    parts = text.split()
+    if parts == [command]:
+        return True, None
+    if len(parts) != 2 or parts[0] != command:
+        return False, None
+    candidate = parts[1]
+    digits = candidate.removeprefix("-")
+    if not digits or not digits.isascii() or not digits.isdecimal():
+        return False, None
+    chat_id = int(candidate)
+    return (True, chat_id) if chat_id != 0 else (False, None)
 
 
 def _memory_message_text(text: str) -> str:
@@ -1866,12 +1947,45 @@ class AIStateRepository:
             return MemoryScopeState(scope_id=scope_id)
         return MemoryScopeState(
             scope_id=scope_id,
+            display_name=row["display_name"],
             continuous_enabled=bool(row["continuous_enabled"]),
             dream_enabled=bool(row["dream_enabled"]),
             continuous_cursor_message_id=row["continuous_cursor_message_id"],
             continuous_last_attempt_at=row["continuous_last_attempt_at"],
             continuous_last_success_at=row["continuous_last_success_at"],
             continuous_last_error=row["continuous_last_error"],
+        )
+
+    async def list_enabled_memory_scope_states(
+        self,
+    ) -> tuple[MemoryScopeState, ...]:
+        connection = self._require_connection()
+        cursor = await connection.execute(
+            """
+            SELECT
+                scope.*,
+                COALESCE(
+                    NULLIF(scope.display_name, ''),
+                    labels.display_name
+                ) AS resolved_display_name,
+                dream.last_error AS dream_last_error
+            FROM ai_memory_scopes AS scope
+            LEFT JOIN ai_memory_scope_labels AS labels
+                ON labels.scope_id = scope.scope_id
+            LEFT JOIN ai_memory_dream_state AS dream
+                ON dream.scope_id = scope.scope_id
+            WHERE scope.continuous_enabled = 1 OR scope.dream_enabled = 1
+            ORDER BY
+                COALESCE(
+                    NULLIF(scope.display_name, ''),
+                    labels.display_name,
+                    scope.scope_id
+                ) COLLATE NOCASE,
+                scope.scope_id
+            """
+        )
+        return tuple(
+            [_memory_scope_state_from_row(row) async for row in cursor]
         )
 
     async def record_memory_labels(
@@ -2350,6 +2464,7 @@ class AIConversationHandler:
         rate_limiter: AIRateLimiter | None = None,
         memory: MemoryClient | None = None,
         dream_runner: MemoryDreamRunner | None = None,
+        memory_scope_resolver: MemoryScopeTargetResolver | None = None,
         memory_command_delete_delay: float = 3.0,
         logger: Any | None = None,
     ):
@@ -2362,6 +2477,7 @@ class AIConversationHandler:
         self._rate_limiter = rate_limiter or AIRateLimiter(store)
         self._memory = memory
         self._dream_runner = dream_runner
+        self._memory_scope_resolver = memory_scope_resolver
         self._memory_command_delete_delay = memory_command_delete_delay
         self._memory_command_delete_tasks: set[asyncio.Task[None]] = set()
         self._logger = logger
@@ -2396,21 +2512,42 @@ class AIConversationHandler:
                 )
                 return True
             return await self._handle_memory_backfill(message, request)
-        if command in {
+        if command_name in {
             "/ai_memory_enable",
             "/ai_memory_disable",
-            "/ai_memory_status",
-            "/ai_memory_dream",
             "/ai_dream_enable",
             "/ai_dream_disable",
         }:
             if not is_owner_control:
                 return False
+            valid_target, target_chat_id = _parse_optional_memory_scope_target(
+                command,
+                command_name,
+            )
+            if not valid_target:
+                await self._reply_memory_excluded(
+                    message,
+                    f"Usage: {command_name} [numeric group/channel ID]",
+                    kind="memory-control",
+                )
+                return True
+            return await self._handle_memory_scope_command(
+                message,
+                command_name,
+                target_chat_id=target_chat_id,
+            )
+        if command in {
+            "/ai_memory_status",
+            "/ai_memory_list",
+            "/ai_memory_dream",
+        }:
+            if not is_owner_control:
+                return False
             if command == "/ai_memory_dream":
-                handled = await self._handle_memory_dream(message)
-            else:
-                handled = await self._handle_memory_scope_command(message, command)
-            return handled
+                return await self._handle_memory_dream(message)
+            if command == "/ai_memory_list":
+                return await self._handle_memory_scope_list(message)
+            return await self._handle_memory_scope_command(message, command)
         if command in {"/ai_allow", "/ai_deny"}:
             if not is_owner_control:
                 return False
@@ -2720,10 +2857,12 @@ class AIConversationHandler:
         self,
         message: ReplyTarget,
         command: str,
+        *,
+        target_chat_id: int | None = None,
     ) -> bool:
         assert message.chat_id is not None
-        scope_id = _telegram_scope_id(message.chat_id)
         if command == "/ai_memory_status":
+            scope_id = _telegram_scope_id(message.chat_id)
             scope = await self._store.get_memory_scope_state(scope_id)
             state = await self._store.get_memory_dream_state(scope_id)
             dream_status = "enabled" if scope.dream_enabled else "disabled"
@@ -2751,45 +2890,112 @@ class AIConversationHandler:
                     f"Last Dream error: {state.last_error or 'none'}",
                 )
             )
-        elif command in {"/ai_memory_enable", "/ai_memory_disable"}:
-            enabled = command == "/ai_memory_enable"
+            await self._schedule_memory_command_delete(message, command)
+            await self._reply_memory_excluded(
+                message,
+                response,
+                kind="memory-control",
+            )
+            return True
+
+        is_remote = target_chat_id is not None
+        if is_remote:
+            if self._memory_scope_resolver is None:
+                await self._reply_memory_excluded(
+                    message,
+                    "Remote Telegram group/channel lookup is unavailable.",
+                    kind="memory-control",
+                )
+                return True
+            try:
+                target = await self._memory_scope_resolver.resolve(
+                    target_chat_id,
+                    include_latest_message=command == "/ai_memory_enable",
+                )
+            except Exception as exc:
+                self._log_memory_failure("scope lookup", exc)
+                await self._reply_memory_excluded(
+                    message,
+                    "Unable to access that Telegram group/channel. "
+                    "Check the numeric chat ID and this account's access.",
+                    kind="memory-control",
+                )
+                return True
+        else:
             identity = await self._prompt_builder.resolve_identity(message)
+            target = MemoryScopeTarget(
+                chat_id=message.chat_id,
+                display_name=identity.scope_display_name,
+                latest_message_id=message.id,
+            )
+
+        scope_id = _telegram_scope_id(target.chat_id)
+        target_label = _memory_scope_target_label(target)
+        destination = target_label if is_remote else "this chat"
+        if command in {"/ai_memory_enable", "/ai_memory_disable"}:
+            enabled = command == "/ai_memory_enable"
             await self._store.set_continuous_memory_enabled(
                 scope_id,
                 enabled,
-                identity.scope_display_name,
-                cursor_message_id=message.id if enabled else None,
+                target.display_name,
+                cursor_message_id=target.latest_message_id if enabled else None,
             )
             scope = await self._store.get_memory_scope_state(scope_id)
             if enabled:
                 response = (
-                    "Continuous memory enabled for this chat. "
+                    f"Continuous memory enabled for {destination}. "
                     "New messages will be remembered."
                 )
             elif scope.dream_enabled:
-                response = "Continuous memory disabled for this chat. Dream remains enabled."
+                response = (
+                    f"Continuous memory disabled for {destination}. "
+                    "Dream remains enabled."
+                )
             else:
-                response = "Continuous memory disabled for this chat."
+                response = f"Continuous memory disabled for {destination}."
         else:
             enabled = command == "/ai_dream_enable"
-            identity = await self._prompt_builder.resolve_identity(message)
             await self._store.set_dream_memory_enabled(
                 scope_id,
                 enabled,
-                identity.scope_display_name,
+                target.display_name,
             )
             scope = await self._store.get_memory_scope_state(scope_id)
             if enabled and scope.continuous_enabled:
                 response = (
-                    "Dream enabled for this chat, but continuous memory "
+                    f"Dream enabled for {destination}, but continuous memory "
                     "currently overrides it."
                 )
             elif enabled:
-                response = "Dream enabled for this chat."
+                response = f"Dream enabled for {destination}."
             else:
-                response = "Dream disabled for this chat."
+                response = f"Dream disabled for {destination}."
         await self._schedule_memory_command_delete(message, command)
         await self._reply_memory_excluded(message, response, kind="memory-control")
+        return True
+
+    async def _handle_memory_scope_list(self, message: ReplyTarget) -> bool:
+        states = await self._store.list_enabled_memory_scope_states()
+        if not states:
+            response = "No chats have continuous memory or Dream enabled."
+        else:
+            header = f"Memory-enabled chats ({len(states)}):"
+            lines: list[str] = []
+            response_length = len(header)
+            for index, state in enumerate(states):
+                line = _format_memory_scope_summary(state)
+                if response_length + len(line) + 1 > 3700:
+                    lines.append(f"- ... {len(states) - index} more")
+                    break
+                lines.append(line)
+                response_length += len(line) + 1
+            response = "\n".join((header, *lines))
+        await self._schedule_memory_command_delete(message, "/ai_memory_list")
+        await self._reply_memory_excluded(
+            message,
+            response,
+            kind="memory-control",
+        )
         return True
 
     async def _continuous_memory_enabled(self, chat_id: int) -> bool:
@@ -3265,6 +3471,20 @@ def _marker_from_row(row: aiosqlite.Row) -> AIAnswerMarker:
     )
 
 
+def _memory_scope_state_from_row(row: aiosqlite.Row) -> MemoryScopeState:
+    return MemoryScopeState(
+        scope_id=str(row["scope_id"]),
+        display_name=row["resolved_display_name"],
+        continuous_enabled=bool(row["continuous_enabled"]),
+        dream_enabled=bool(row["dream_enabled"]),
+        continuous_cursor_message_id=row["continuous_cursor_message_id"],
+        continuous_last_attempt_at=row["continuous_last_attempt_at"],
+        continuous_last_success_at=row["continuous_last_success_at"],
+        continuous_last_error=row["continuous_last_error"],
+        dream_last_error=row["dream_last_error"],
+    )
+
+
 def _memory_document_receipt_from_row(
     row: aiosqlite.Row,
 ) -> MemoryDocumentReceipt:
@@ -3357,6 +3577,42 @@ def _telegram_channel_subject_id(channel_id: int) -> str:
 
 def _telegram_scope_id(chat_id: int) -> str:
     return f"telegram:chat:{chat_id}"
+
+
+def _memory_scope_target_label(target: MemoryScopeTarget) -> str:
+    if target.display_name:
+        return f"{target.display_name} ({target.chat_id})"
+    return str(target.chat_id)
+
+
+def _format_memory_scope_summary(state: MemoryScopeState) -> str:
+    chat_id = state.scope_id.removeprefix("telegram:chat:")
+    label = (
+        f"{state.display_name} ({chat_id})"
+        if state.display_name
+        else chat_id
+    )
+    if state.continuous_enabled:
+        cursor = (
+            str(state.continuous_cursor_message_id)
+            if state.continuous_cursor_message_id is not None
+            else "not started"
+        )
+        continuous = f"continuous enabled (cursor {cursor})"
+    else:
+        continuous = "continuous disabled"
+    dream = "Dream enabled" if state.dream_enabled else "Dream disabled"
+    if state.continuous_enabled and state.dream_enabled:
+        dream += " (overridden)"
+    errors = []
+    if state.continuous_last_error:
+        errors.append(f"continuous: {state.continuous_last_error}")
+    if state.dream_last_error:
+        errors.append(f"Dream: {state.dream_last_error}")
+    return (
+        f"- {label}: {continuous}; {dream}; "
+        f"errors: {'; '.join(errors) if errors else 'none'}"
+    )
 
 
 def _format_memory_time(timestamp: float | None) -> str:

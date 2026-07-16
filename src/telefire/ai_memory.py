@@ -423,49 +423,59 @@ class HindsightMemoryClient:
         subject_id: str,
         instruction: str,
     ) -> MemoryRevisionResult:
-        selection = await self._request(
-            "POST",
-            self._bank_path(scope_id, "/reflect"),
-            {
-                "query": self._revision_query(
-                    subject_id=subject_id,
-                    instruction=instruction,
-                ),
-                "budget": "mid",
-                "max_tokens": 1_500,
-                "fact_types": ["world", "experience"],
-                "include": {"facts": {"max_tokens": 2_000}},
-                "response_schema": {
-                    "type": "object",
-                    "properties": {
-                        "invalidate_memory_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        }
-                    },
-                    "required": ["invalidate_memory_ids"],
-                    "additionalProperties": False,
-                },
-            },
+        query = self._revision_query(
+            subject_id=subject_id,
+            instruction=instruction,
         )
-        structured = selection.get("structured_output")
-        based_on = selection.get("based_on")
-        if not isinstance(structured, dict) or not isinstance(based_on, dict):
-            raise MemoryClientError("Hindsight revision response is malformed")
-        candidate_ids = structured.get("invalidate_memory_ids")
-        cited = based_on.get("memories")
-        if not isinstance(candidate_ids, list) or not all(
-            isinstance(memory_id, str) for memory_id in candidate_ids
-        ):
-            raise MemoryClientError("Hindsight revision response is malformed")
-        if not isinstance(cited, list):
-            raise MemoryClientError("Hindsight revision response is malformed")
-        cited_ids = {
-            item.get("id")
-            for item in cited
-            if isinstance(item, dict) and isinstance(item.get("id"), str)
-        }
-        if not set(candidate_ids) <= cited_ids:
+        for attempt in range(2):
+            if attempt:
+                query += (
+                    "\nRetry requirement: Every returned memory ID must be copied "
+                    "verbatim from a memory consulted in this reflection so it appears "
+                    "in based_on.memories. Otherwise return an empty list."
+                )
+            selection = await self._request(
+                "POST",
+                self._bank_path(scope_id, "/reflect"),
+                {
+                    "query": query,
+                    "budget": "mid",
+                    "max_tokens": 1_500,
+                    "fact_types": ["world", "experience"],
+                    "include": {"facts": {"max_tokens": 2_000}},
+                    "response_schema": {
+                        "type": "object",
+                        "properties": {
+                            "invalidate_memory_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            }
+                        },
+                        "required": ["invalidate_memory_ids"],
+                        "additionalProperties": False,
+                    },
+                },
+            )
+            structured = selection.get("structured_output")
+            based_on = selection.get("based_on")
+            if not isinstance(structured, dict) or not isinstance(based_on, dict):
+                raise MemoryClientError("Hindsight revision response is malformed")
+            candidate_ids = structured.get("invalidate_memory_ids")
+            cited = based_on.get("memories")
+            if not isinstance(candidate_ids, list) or not all(
+                isinstance(memory_id, str) for memory_id in candidate_ids
+            ):
+                raise MemoryClientError("Hindsight revision response is malformed")
+            if not isinstance(cited, list):
+                raise MemoryClientError("Hindsight revision response is malformed")
+            cited_ids = {
+                item.get("id")
+                for item in cited
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            if set(candidate_ids) <= cited_ids:
+                break
+        else:
             raise MemoryClientError("Hindsight revision selected uncited memory")
 
         invalidated_count = 0

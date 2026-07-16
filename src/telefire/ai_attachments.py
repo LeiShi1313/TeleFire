@@ -87,7 +87,7 @@ def attachment_metadata_only(
     )
 
 
-class TelegramAttachmentDescriber:
+class ChatAttachmentDescriber:
     MAX_FILE_BYTES = 5 * 1024 * 1024
     DEFAULT_DOWNLOAD_TIMEOUT = 30.0
     MAX_TEXT_CHARS = 50_000
@@ -137,7 +137,7 @@ class TelegramAttachmentDescriber:
                 timeout=self._download_timeout,
             )
             if not isinstance(raw, bytes) or not raw:
-                raise ValueError("Telegram returned no attachment bytes")
+                raise ValueError("Chat transport returned no attachment bytes")
             if len(raw) > self.MAX_FILE_BYTES:
                 return _metadata_only(
                     metadata,

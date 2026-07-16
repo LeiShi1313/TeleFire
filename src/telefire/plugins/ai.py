@@ -17,15 +17,14 @@ from telefire.ai import (
     PiAgentGateway,
     PromptBuilder,
 )
-from telefire.ai_attachments import TelegramAttachmentDescriber
+from telefire.ai_attachments import ChatAttachmentDescriber
 from telefire.ai_dream import (
+    ChatDreamScanner,
     ContinuousMemoryScheduler,
     ContinuousMemorySchedulerSettings,
     DreamScheduler,
     DreamSchedulerSettings,
     DreamSettings,
-    TelegramDreamScanner,
-    TelegramHistorySource,
 )
 from telefire.ai_memory import HindsightMemoryClient
 from telefire.plugins.base import PluginMount
@@ -42,6 +41,11 @@ from telefire.telegram.ai_identity import (
     TelegramMessageIdentityResolver,
     TelegramMessageMentionResolver,
     telegram_memory_event_metadata,
+)
+from telefire.telegram.ai_history import (
+    TelegramHistorySource,
+    telegram_channel_album_document_id,
+    telegram_source_retry_delay,
 )
 
 
@@ -234,7 +238,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             ),
             max_context_messages=self._settings.max_context_messages,
             max_context_chars=self._settings.max_context_chars,
-            attachment_describer=TelegramAttachmentDescriber(
+            attachment_describer=ChatAttachmentDescriber(
                 self._gateway,
                 logger=self.logger,
             ),
@@ -251,12 +255,15 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             metadata_resolver=telegram_memory_event_metadata,
         )
         dream_runner = (
-            TelegramDreamScanner(
+            ChatDreamScanner(
                 source=history_source,
                 store=self._store,
                 memory=self._memory,
                 prompt_builder=prompt_builder,
                 settings=DreamSettings.from_env(),
+                identity_codec=TELEGRAM_IDENTITY_CODEC,
+                source_retry_delay=telegram_source_retry_delay,
+                album_document_id=telegram_channel_album_document_id,
                 logger=self.logger,
             )
             if self._memory is not None
@@ -266,12 +273,14 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             self._dream_scheduler = DreamScheduler(
                 scanner=dream_runner,
                 store=self._store,
+                identity_codec=TELEGRAM_IDENTITY_CODEC,
                 settings=DreamSchedulerSettings.from_env(),
                 logger=self.logger,
             )
             self._continuous_memory_scheduler = ContinuousMemoryScheduler(
                 scanner=dream_runner,
                 store=self._store,
+                identity_codec=TELEGRAM_IDENTITY_CODEC,
                 settings=ContinuousMemorySchedulerSettings.from_env(),
                 logger=self.logger,
             )

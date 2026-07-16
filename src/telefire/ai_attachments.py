@@ -78,6 +78,23 @@ def message_has_attachment(message: Any) -> bool:
     return getattr(message, "file", None) is not None
 
 
+def attachment_metadata_only(
+    message: Any,
+    *,
+    reason: str,
+) -> AttachmentDescription | None:
+    file = getattr(message, "file", None)
+    if file is None:
+        return None
+    filename = _safe_filename(getattr(file, "name", None))
+    mime_type = _resolve_mime_type(getattr(file, "mime_type", None), filename)
+    size = _safe_size(getattr(file, "size", None))
+    return _metadata_only(
+        _render_metadata(filename, mime_type, size),
+        reason,
+    )
+
+
 class TelegramAttachmentDescriber:
     MAX_FILE_BYTES = 5 * 1024 * 1024
     DEFAULT_DOWNLOAD_TIMEOUT = 30.0

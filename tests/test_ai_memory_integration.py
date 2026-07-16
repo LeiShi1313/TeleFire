@@ -366,6 +366,26 @@ class FakeTelegramIdentityMessage:
         )
 
 
+class FakeBroadcastChannelMessage:
+    async def get_sender(self):
+        return telegram_types.Channel(
+            id=2064685671,
+            title="Seele Leaks",
+            photo=telegram_types.ChatPhotoEmpty(),
+            date=None,
+            broadcast=True,
+        )
+
+    async def get_chat(self):
+        return telegram_types.Channel(
+            id=2064685671,
+            title="Seele Leaks",
+            photo=telegram_types.ChatPhotoEmpty(),
+            date=None,
+            broadcast=True,
+        )
+
+
 class FakeMentionClient:
     def __init__(self):
         self.entities = {
@@ -425,10 +445,26 @@ async def test_telegram_identity_resolver_uses_entity_display_names():
         FakeTelegramIdentityMessage()
     )
     assert identity == MessageIdentity(
+        subject_id="telegram:user:20",
         subject_display_name="Alice Example",
         scope_display_name="Engineering Group",
         is_human=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_telegram_identity_resolver_accepts_broadcast_channel_posts():
+    identity = await TelegramMessageIdentityResolver().resolve(
+        FakeBroadcastChannelMessage()
+    )
+
+    assert identity == MessageIdentity(
+        subject_id="telegram:channel:2064685671",
+        subject_display_name="Seele Leaks",
+        scope_display_name="Seele Leaks",
+        is_human=False,
+    )
+    assert identity.is_memory_source
 
 
 @pytest.mark.asyncio

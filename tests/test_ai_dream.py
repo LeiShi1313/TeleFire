@@ -186,6 +186,16 @@ class CountingIdentityResolver(FakeIdentityResolver):
         return await super().resolve(message)
 
 
+class BroadcastChannelIdentityResolver:
+    async def resolve(self, message):
+        return MessageIdentity(
+            subject_id="telegram:channel:2064685671",
+            subject_display_name="Seele Leaks",
+            scope_display_name="Seele Leaks",
+            is_human=False,
+        )
+
+
 class FakeAttachmentDescriber:
     async def describe(self, message):
         if message.file is None:
@@ -207,6 +217,7 @@ async def make_scanner(
     max_messages=100,
     lease_seconds=3_600,
     clock=lambda: NOW.timestamp(),
+    identity_resolver=None,
 ):
     store = await AIStateRepository(tmp_path / "ai.db").connect()
     await store.set_memory_enabled("telegram:chat:-1001", True, "Dream Group")
@@ -215,7 +226,7 @@ async def make_scanner(
         store=store,
         memory=memory,
         prompt_builder=PromptBuilder(
-            identity_resolver=FakeIdentityResolver(),
+            identity_resolver=identity_resolver or FakeIdentityResolver(),
             attachment_describer=attachment_describer,
         ),
         settings=DreamSettings(
@@ -1109,6 +1120,32 @@ async def test_dream_excludes_marked_messages_bots_and_keeps_attachment_text(tmp
         assert result.documents_created == 1
         assert memory.retain_calls[0]["episode"].events[0].text == (
             "Attachment description: launch-plan whiteboard sketch."
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_dream_retains_broadcast_channel_posts_with_channel_actor(tmp_path):
+    post = FakeMessage(
+        43,
+        "Version 3.4 preview notes",
+        sender_id=-1002064685671,
+    )
+    source = FakeSource([post])
+    memory = FakeMemory()
+    store, scanner = await make_scanner(
+        tmp_path,
+        source,
+        memory,
+        identity_resolver=BroadcastChannelIdentityResolver(),
+    )
+    try:
+        result = await scanner.run_scope(-1001)
+
+        assert result.messages_retained == 1
+        assert memory.retain_calls[0]["episode"].events[0].actor_id == (
+            "telegram:channel:2064685671"
         )
     finally:
         await store.close()

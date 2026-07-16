@@ -7,7 +7,7 @@ ChatPresentation = Literal["plain", "agent"]
 
 
 class SentMessage(Protocol):
-    id: int | str
+    id: int
     text: str | None
 
 

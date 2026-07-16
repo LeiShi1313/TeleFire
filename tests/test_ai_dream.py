@@ -360,10 +360,10 @@ async def test_manual_dream_retains_standalone_and_complete_reply_tree(tmp_path)
     store, scanner = await make_scanner(tmp_path, source, memory)
     await store.save_answer(
         AIAnswerMarker(
-            chat_id=-1001,
+            scope_id=TELEGRAM_IDENTITY_CODEC.scope_id(-1001),
             answer_message_id=ai_answer.id,
             trigger_message_id=999,
-            requester_id=20,
+            requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(20),
             prompt="old",
             answer_text=ai_answer.raw_text,
             parent_answer_message_id=None,
@@ -372,7 +372,11 @@ async def test_manual_dream_retains_standalone_and_complete_reply_tree(tmp_path)
             agent_entry_id="entry-old",
         )
     )
-    await store.mark_memory_excluded_message(-1001, control.id, "memory-control")
+    await store.mark_memory_excluded_message(
+        TELEGRAM_IDENTITY_CODEC.scope_id(-1001),
+        control.id,
+        "memory-control",
+    )
     try:
         result = await scanner.run_scope(-1001)
 
@@ -1162,7 +1166,11 @@ async def test_continuous_memory_skips_excluded_messages_without_stalling_cursor
         True,
         cursor_message_id=41,
     )
-    await store.mark_memory_excluded_message(-1001, 42, "memory-control")
+    await store.mark_memory_excluded_message(
+        TELEGRAM_IDENTITY_CODEC.scope_id(-1001),
+        42,
+        "memory-control",
+    )
     try:
         result = await scanner.run_continuous_scope(-1001)
 
@@ -1347,7 +1355,11 @@ async def test_dream_excludes_marked_messages_bots_and_keeps_attachment_text(tmp
         memory,
         attachment_describer=FakeAttachmentDescriber(),
     )
-    await store.mark_memory_excluded_message(-1001, excluded.id, "memory-control")
+    await store.mark_memory_excluded_message(
+        TELEGRAM_IDENTITY_CODEC.scope_id(-1001),
+        excluded.id,
+        "memory-control",
+    )
     try:
         result = await scanner.run_scope(-1001)
 

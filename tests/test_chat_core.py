@@ -4,12 +4,14 @@ import ast
 from collections.abc import AsyncIterator
 from dataclasses import fields
 from pathlib import Path
+import sqlite3
 
 import pytest
 
 from telefire.ai import (
     AIConversationHandler,
     AIResponder,
+    AIStateRepository,
     AgentEvent,
     AgentRunRequest,
     MemoryScopeState,
@@ -209,31 +211,31 @@ class FakeStore:
     def __init__(self):
         self.saved = []
 
-    async def get_answer(self, chat_id, answer_message_id):
+    async def get_answer(self, scope_id, answer_message_id):
         return None
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return None
 
     async def save_answer(self, marker):
         self.saved.append(marker)
 
-    async def is_allowed(self, user_id):
+    async def is_allowed(self, actor_id):
         return False
 
-    async def get_last_request_at(self, user_id):
+    async def get_last_request_at(self, actor_id):
         return None
 
-    async def set_last_request_at(self, user_id, timestamp):
+    async def set_last_request_at(self, actor_id, timestamp):
         return None
 
-    async def allow_user(self, user_id):
+    async def allow_user(self, actor_id):
         return None
 
-    async def deny_user(self, user_id):
+    async def deny_user(self, actor_id):
         return None
 
-    async def mark_memory_excluded_message(self, chat_id, message_id, kind):
+    async def mark_memory_excluded_message(self, scope_id, message_id, kind):
         return None
 
     async def get_memory_scope_state(self, scope_id):
@@ -296,7 +298,7 @@ async def test_attachment_detection_does_not_require_telegram_file_attributes():
     assert transport.updates[-1] == ("final", "agent", True)
 
 
-def test_shared_ai_module_has_no_telethon_imports():
+def test_shared_ai_module_has_no_telegram_adapter_imports():
     import telefire.ai as ai_module
 
     tree = ast.parse(Path(ai_module.__file__).read_text())
@@ -312,7 +314,13 @@ def test_shared_ai_module_has_no_telethon_imports():
         if isinstance(node, ast.ImportFrom)
     )
 
-    assert not any(name == "telethon" or name.startswith("telethon.") for name in imported)
+    assert not any(
+        name == "telethon"
+        or name.startswith("telethon.")
+        or name == "telefire.telegram"
+        or name.startswith("telefire.telegram.")
+        for name in imported
+    )
 
 
 @pytest.mark.asyncio
@@ -328,10 +336,11 @@ async def test_memory_coordinates_follow_the_injected_chat_identity_codec():
         transport=transport,
         identity_codec=qq,
     )
+    store = FakeStore()
     handler = AIConversationHandler(
         owner_id=42,
         responder=AIResponder(gateway, transport=transport),
-        store=FakeStore(),
+        store=store,
         prompt_builder=prompt_builder,
         transport=transport,
         memory=object(),
@@ -345,3 +354,68 @@ async def test_memory_coordinates_follow_the_injected_chat_identity_codec():
     assert memory is not None
     assert memory.scope_id == "qq:group:7"
     assert [anchor.identity for anchor in memory.anchors] == ["qq:user:42"]
+    assert store.saved[0].scope_id == "qq:group:7"
+    assert store.saved[0].requester_id == "qq:user:42"
+
+
+@pytest.mark.asyncio
+async def test_state_repository_migrates_legacy_telegram_identity_columns(tmp_path):
+    path = tmp_path / "ai.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE ai_answers (
+            chat_id INTEGER NOT NULL,
+            answer_message_id INTEGER NOT NULL,
+            trigger_message_id INTEGER NOT NULL,
+            requester_id INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            answer_text TEXT NOT NULL,
+            parent_answer_message_id INTEGER,
+            reference_context TEXT NOT NULL,
+            agent_session_id TEXT,
+            agent_entry_id TEXT,
+            PRIMARY KEY (chat_id, answer_message_id)
+        );
+        INSERT INTO ai_answers VALUES (
+            -1001, 100, 1, 20, 'question', 'answer', NULL, '', 's1', 'e1'
+        );
+        CREATE TABLE ai_whitelist (
+            user_id INTEGER PRIMARY KEY,
+            allowed_at REAL NOT NULL
+        );
+        INSERT INTO ai_whitelist VALUES (20, 1);
+        CREATE TABLE ai_usage (
+            user_id INTEGER PRIMARY KEY,
+            last_request_at REAL NOT NULL
+        );
+        INSERT INTO ai_usage VALUES (20, 2);
+        CREATE TABLE ai_memory_excluded_messages (
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            PRIMARY KEY (chat_id, message_id)
+        );
+        INSERT INTO ai_memory_excluded_messages VALUES (-1001, 101, 'ai-answer', 3);
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    store = await AIStateRepository(path).connect()
+    try:
+        marker = await store.get_answer("telegram:chat:-1001", 100)
+
+        assert marker is not None
+        assert marker.scope_id == "telegram:chat:-1001"
+        assert marker.requester_id == "telegram:user:20"
+        assert await store.is_allowed("telegram:user:20") is True
+        assert await store.is_allowed("qq:user:20") is False
+        assert await store.get_last_request_at("telegram:user:20") == 2
+        assert await store.is_memory_excluded_message(
+            "telegram:chat:-1001",
+            101,
+        )
+    finally:
+        await store.close()

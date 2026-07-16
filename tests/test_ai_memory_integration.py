@@ -156,15 +156,15 @@ class FakeStore:
         self.memory_labels = {}
         self.memory_scope_display_names = {}
 
-    async def get_answer(self, chat_id, answer_message_id):
-        return self.markers.get((chat_id, answer_message_id))
+    async def get_answer(self, scope_id, answer_message_id):
+        return self.markers.get((scope_id, answer_message_id))
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return next(
             (
                 marker
                 for marker in reversed(tuple(self.markers.values()))
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -172,22 +172,22 @@ class FakeStore:
         )
 
     async def save_answer(self, marker):
-        self.markers[(marker.chat_id, marker.answer_message_id)] = marker
+        self.markers[(marker.scope_id, marker.answer_message_id)] = marker
 
-    async def is_allowed(self, user_id):
-        return user_id in self.allowed
+    async def is_allowed(self, actor_id):
+        return actor_id in self.allowed
 
-    async def allow_user(self, user_id):
-        self.allowed.add(user_id)
+    async def allow_user(self, actor_id):
+        self.allowed.add(actor_id)
 
-    async def deny_user(self, user_id):
-        self.allowed.discard(user_id)
+    async def deny_user(self, actor_id):
+        self.allowed.discard(actor_id)
 
-    async def get_last_request_at(self, user_id):
-        return self.last_request.get(user_id)
+    async def get_last_request_at(self, actor_id):
+        return self.last_request.get(actor_id)
 
-    async def set_last_request_at(self, user_id, timestamp):
-        self.last_request[user_id] = timestamp
+    async def set_last_request_at(self, actor_id, timestamp):
+        self.last_request[actor_id] = timestamp
 
     async def get_memory_document_receipt(self, scope_id, document_id):
         return self.memory_documents.get((scope_id, document_id))
@@ -283,11 +283,13 @@ class FakeStore:
         if display_name:
             self.memory_scope_display_names[scope_id] = display_name
 
-    async def mark_memory_excluded_message(self, chat_id, message_id, kind):
-        self.memory_excluded.add((chat_id, message_id, kind))
+    async def mark_memory_excluded_message(self, scope_id, message_id, kind):
+        self.memory_excluded.add((scope_id, message_id, kind))
 
-    async def is_memory_excluded_message(self, chat_id, message_id):
-        return any(item[:2] == (chat_id, message_id) for item in self.memory_excluded)
+    async def is_memory_excluded_message(self, scope_id, message_id):
+        return any(
+            item[:2] == (scope_id, message_id) for item in self.memory_excluded
+        )
 
     async def get_memory_dream_state(self, scope_id):
         return self.memory_dream_state.get(scope_id, MemoryDreamState(scope_id))
@@ -846,11 +848,12 @@ async def test_ai_generated_chain_message_is_context_but_not_retained_evidence()
     human = FakeMessage("I prefer Rust", sender_id=20)
     ai_output = FakeMessage("Generated claim", sender_id=10, reply_to=human)
     store = FakeStore()
-    store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
-        chat_id=ai_output.chat_id,
+    scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(ai_output.chat_id)
+    store.markers[(scope_id, ai_output.id)] = AIAnswerMarker(
+        scope_id=scope_id,
         answer_message_id=ai_output.id,
         trigger_message_id=999,
-        requester_id=20,
+        requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(20),
         prompt="old prompt",
         answer_text=ai_output.raw_text,
         parent_answer_message_id=None,
@@ -1026,14 +1029,15 @@ async def test_revision_does_not_curate_when_correction_evidence_fails():
 @pytest.mark.asyncio
 async def test_revision_requires_direct_human_target_and_owner():
     memory = FakeMemory()
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     human = FakeMessage("I prefer Rust", sender_id=20)
     ai_output = FakeMessage("Generated answer", sender_id=10, reply_to=human)
-    store.markers[(ai_output.chat_id, ai_output.id)] = AIAnswerMarker(
-        chat_id=ai_output.chat_id,
+    scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(ai_output.chat_id)
+    store.markers[(scope_id, ai_output.id)] = AIAnswerMarker(
+        scope_id=scope_id,
         answer_message_id=ai_output.id,
         trigger_message_id=999,
-        requester_id=20,
+        requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(20),
         prompt="question",
         answer_text=ai_output.raw_text,
         parent_answer_message_id=None,
@@ -1602,7 +1606,7 @@ async def test_continuous_scope_skips_duplicate_ai_reply_chain_retain():
 
 @pytest.mark.asyncio
 async def test_enabled_scope_does_not_retain_non_human_ai_request():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     memory = FakeMemory()
     handler = make_handler(
         FakeGateway(["answer"]),
@@ -1630,7 +1634,7 @@ async def test_failed_agent_run_does_not_retain_enabled_scope():
 
 @pytest.mark.asyncio
 async def test_non_owner_cannot_change_scope_memory_state():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     resolver = FakeMemoryScopeResolver()
     handler = make_handler(
         FakeGateway(["unused"]),
@@ -1674,10 +1678,10 @@ async def test_outgoing_channel_post_can_enable_continuous_memory():
 
 @pytest.mark.asyncio
 async def test_post_answer_retain_does_not_hold_delegated_rate_lease():
-    store = FakeStore(allowed={20})
+    store = FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)})
     memory = BlockingRetainMemory()
     gateway = FakeGateway(["first answer", "second answer"])
-    handler = make_handler(gateway, memory, store=store, allowed={20})
+    handler = make_handler(gateway, memory, store=store)
 
     first = FakeMessage("/ai first", sender_id=20)
     first_task = asyncio.create_task(handler.handle(first))
@@ -1927,7 +1931,7 @@ async def test_invalid_and_non_owner_backfill_commands_do_not_start_work():
     handler = make_handler(
         FakeGateway(["unused"]),
         FakeMemory(),
-        store=FakeStore(allowed={20}),
+        store=FakeStore(allowed={TELEGRAM_IDENTITY_CODEC.actor_id(20)}),
         dream_runner=runner,
     )
     invalid = FakeMessage("/ai_memory_backfill days 31", sender_id=10)

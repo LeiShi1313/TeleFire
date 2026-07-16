@@ -21,6 +21,7 @@ from telefire.chat.commands import (
     parse_chat_command,
 )
 from telefire.plugins.base import command_registry
+from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
 from telefire.telegram.ai_transport import (
     TelegramChatTransport,
     select_telegram_response_format,
@@ -116,15 +117,15 @@ class FakeStore:
     def __init__(self):
         self.saved = []
 
-    async def get_answer(self, chat_id, answer_message_id):
+    async def get_answer(self, scope_id, answer_message_id):
         return None
 
-    async def get_turn_for_message(self, chat_id, message_id):
+    async def get_turn_for_message(self, scope_id, message_id):
         return next(
             (
                 marker
                 for marker in reversed(self.saved)
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -134,19 +135,19 @@ class FakeStore:
     async def save_answer(self, marker):
         self.saved.append(marker)
 
-    async def is_allowed(self, user_id):
+    async def is_allowed(self, actor_id):
         return False
 
-    async def get_last_request_at(self, user_id):
+    async def get_last_request_at(self, actor_id):
         return None
 
-    async def set_last_request_at(self, user_id, timestamp):
+    async def set_last_request_at(self, actor_id, timestamp):
         return None
 
-    async def allow_user(self, user_id):
+    async def allow_user(self, actor_id):
         return None
 
-    async def deny_user(self, user_id):
+    async def deny_user(self, actor_id):
         return None
 
 
@@ -155,7 +156,8 @@ def make_handler(owner_id, responder):
         owner_id=owner_id,
         responder=responder,
         store=FakeStore(),
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
 
 
@@ -535,7 +537,8 @@ async def test_owner_ai_requests_are_not_blocked_by_chat_scope():
         owner_id=10,
         responder=make_telegram_responder(gateway),
         store=FakeStore(),
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(identity_codec=TELEGRAM_IDENTITY_CODEC),
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     trigger = FakeMessage("/ai secret")
     trigger.chat_id = -1002

@@ -12,6 +12,11 @@ from telefire.ai import (
     AgentRunRequest,
     PromptBuilder,
 )
+from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
+
+
+def actor_id(user_id: int) -> str:
+    return TELEGRAM_IDENTITY_CODEC.actor_id(user_id)
 
 
 class FakeAnswer:
@@ -116,8 +121,11 @@ async def make_handler(path, gateway, *, clock=lambda: 100.0, cooldown=30.0):
         owner_id=10,
         responder=AIResponder(gateway),
         store=store,
-        prompt_builder=PromptBuilder(),
+        prompt_builder=PromptBuilder(
+            identity_codec=TELEGRAM_IDENTITY_CODEC,
+        ),
         rate_limiter=limiter,
+        identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     return handler, store
 
@@ -137,7 +145,7 @@ async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
         allow = FakeMessage("/ai_allow", sender_id=10, reply_to=target)
 
         assert await handler.handle(allow) is True
-        assert await store.is_allowed(20) is True
+        assert await store.is_allowed(actor_id(20)) is True
         assert allow.replies[0].text == "AI access allowed."
         assert allow.deleted is True
 
@@ -166,7 +174,7 @@ async def test_unauthorized_and_revoked_users_are_silent(tmp_path):
         assert unauthorized.replies == []
         assert gateway.requests == []
 
-        await store.allow_user(20)
+        await store.allow_user(actor_id(20))
         target = FakeMessage("target", sender_id=20)
         deny = FakeMessage("/ai_deny", sender_id=10, reply_to=target)
         assert await handler.handle(deny) is True
@@ -190,7 +198,7 @@ async def test_nonowner_has_one_inflight_request_and_persistent_cooldown(tmp_pat
         gateway,
         clock=lambda: now[0],
     )
-    await store.allow_user(20)
+    await store.allow_user(actor_id(20))
     try:
         first = FakeMessage("/ai first", sender_id=20)
         first_task = asyncio.create_task(handler.handle(first))
@@ -219,18 +227,18 @@ async def test_nonowner_has_one_inflight_request_and_persistent_cooldown(tmp_pat
             cooldown_seconds=30,
             clock=lambda: restarted_now[0],
         )
-        assert await restarted.is_allowed(20) is True
-        assert await limiter.acquire(user_id=20, is_owner=False) is False
+        assert await restarted.is_allowed(actor_id(20)) is True
+        assert await limiter.acquire(actor_id=actor_id(20), is_owner=False) is False
         restarted_now[0] = 131.0
-        assert await limiter.acquire(user_id=20, is_owner=False) is True
-        await limiter.release(user_id=20, is_owner=False)
-        await restarted.deny_user(20)
+        assert await limiter.acquire(actor_id=actor_id(20), is_owner=False) is True
+        await limiter.release(actor_id=actor_id(20), is_owner=False)
+        await restarted.deny_user(actor_id(20))
     finally:
         await restarted.close()
 
     final_store = await AIStateRepository(tmp_path / "state.db").connect()
     try:
-        assert await final_store.is_allowed(20) is False
+        assert await final_store.is_allowed(actor_id(20)) is False
     finally:
         await final_store.close()
 
@@ -245,7 +253,7 @@ async def test_owner_is_exempt_and_never_added_to_whitelist(tmp_path):
         assert await handler.handle(allow_owner) is True
         assert allow_owner.replies[0].text == "Owner access is always enabled."
         assert allow_owner.deleted is True
-        assert await store.is_allowed(10) is False
+        assert await store.is_allowed(actor_id(10)) is False
 
         first = FakeMessage("/ai first", sender_id=10)
         second = FakeMessage("/ai second", sender_id=10)
@@ -274,7 +282,7 @@ async def test_nonowner_access_command_is_not_executed_or_deleted(tmp_path):
         assert await handler.handle(command) is False
         assert command.deleted is False
         assert command.replies == []
-        assert await store.is_allowed(30) is False
+        assert await store.is_allowed(actor_id(30)) is False
     finally:
         await store.close()
 

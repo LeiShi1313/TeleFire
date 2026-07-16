@@ -1149,9 +1149,10 @@ class TelegramDreamScanner:
         messages: tuple[ReplyTarget, ...],
     ) -> dict[int, HumanObservation]:
         message_ids = tuple(message.id for message in messages)
+        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(chat_id)
         excluded_ids, answer_ids = await asyncio.gather(
-            self._store.get_memory_excluded_message_ids(chat_id, message_ids),
-            self._store.get_ai_answer_message_ids(chat_id, message_ids),
+            self._store.get_memory_excluded_message_ids(scope_id, message_ids),
+            self._store.get_ai_answer_message_ids(scope_id, message_ids),
         )
         semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
         identity_semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)

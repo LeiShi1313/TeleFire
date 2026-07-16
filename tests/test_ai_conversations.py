@@ -109,17 +109,17 @@ class FakeHistorySource:
 
 class FakeStore:
     def __init__(self):
-        self.markers: dict[tuple[int, int], AIAnswerMarker] = {}
+        self.markers: dict[tuple[str, int], AIAnswerMarker] = {}
 
-    async def get_answer(self, chat_id: int, answer_message_id: int):
-        return self.markers.get((chat_id, answer_message_id))
+    async def get_answer(self, scope_id: str, answer_message_id: int):
+        return self.markers.get((scope_id, answer_message_id))
 
-    async def get_turn_for_message(self, chat_id: int, message_id: int):
+    async def get_turn_for_message(self, scope_id: str, message_id: int):
         return next(
             (
                 marker
                 for marker in reversed(tuple(self.markers.values()))
-                if marker.chat_id == chat_id
+                if marker.scope_id == scope_id
                 and message_id
                 in {marker.answer_message_id, marker.trigger_message_id}
             ),
@@ -127,21 +127,21 @@ class FakeStore:
         )
 
     async def save_answer(self, marker: AIAnswerMarker):
-        self.markers[(marker.chat_id, marker.answer_message_id)] = marker
+        self.markers[(marker.scope_id, marker.answer_message_id)] = marker
 
-    async def is_allowed(self, user_id: int):
+    async def is_allowed(self, actor_id: str):
         return False
 
-    async def get_last_request_at(self, user_id: int):
+    async def get_last_request_at(self, actor_id: str):
         return None
 
-    async def set_last_request_at(self, user_id: int, timestamp: float):
+    async def set_last_request_at(self, actor_id: str, timestamp: float):
         return None
 
-    async def allow_user(self, user_id: int):
+    async def allow_user(self, actor_id: str):
         return None
 
-    async def deny_user(self, user_id: int):
+    async def deny_user(self, actor_id: str):
         return None
 
 
@@ -297,7 +297,9 @@ async def test_numbered_trigger_rejoins_nearest_ai_session():
 
     assert await handler.handle(rejoin) is True
 
-    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    root_marker = store.markers[
+        (TELEGRAM_IDENTITY_CODEC.scope_id(trigger.chat_id), first_answer.id)
+    ]
     request = gateway.requests[1]
     assert request.session_id == root_marker.agent_session_id
     assert request.parent_entry_id == root_marker.agent_entry_id
@@ -367,11 +369,18 @@ async def test_direct_reply_to_ai_answer_continues_without_ai_command():
     follow_up = FakeMessage("Give me an example", reply_to=first_answer)
     assert await handler.handle(follow_up) is True
 
-    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    root_marker = store.markers[
+        (TELEGRAM_IDENTITY_CODEC.scope_id(trigger.chat_id), first_answer.id)
+    ]
     assert gateway.requests[1].prompt == "Give me an example"
     assert gateway.requests[1].session_id == root_marker.agent_session_id
     assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
-    second_marker = store.markers[(follow_up.chat_id, follow_up.replies[0].id)]
+    second_marker = store.markers[
+        (
+            TELEGRAM_IDENTITY_CODEC.scope_id(follow_up.chat_id),
+            follow_up.replies[0].id,
+        )
+    ]
     assert second_marker.parent_answer_message_id == first_answer.id
 
 
@@ -386,11 +395,18 @@ async def test_explicit_ai_reply_to_trigger_continues_completed_turn():
     follow_up = FakeMessage("/ai Give me an example", reply_to=trigger)
     assert await handler.handle(follow_up) is True
 
-    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    root_marker = store.markers[
+        (TELEGRAM_IDENTITY_CODEC.scope_id(trigger.chat_id), first_answer.id)
+    ]
     assert gateway.requests[1].prompt == "Give me an example"
     assert gateway.requests[1].session_id == root_marker.agent_session_id
     assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
-    second_marker = store.markers[(follow_up.chat_id, follow_up.replies[0].id)]
+    second_marker = store.markers[
+        (
+            TELEGRAM_IDENTITY_CODEC.scope_id(follow_up.chat_id),
+            follow_up.replies[0].id,
+        )
+    ]
     assert second_marker.parent_answer_message_id == first_answer.id
 
 
@@ -406,10 +422,17 @@ async def test_explicit_ai_deeper_in_reply_branch_uses_nearest_answer():
     rejoin = FakeMessage("/ai Compare both explanations", reply_to=human_branch)
     assert await handler.handle(rejoin) is True
 
-    root_marker = store.markers[(trigger.chat_id, first_answer.id)]
+    root_marker = store.markers[
+        (TELEGRAM_IDENTITY_CODEC.scope_id(trigger.chat_id), first_answer.id)
+    ]
     assert gateway.requests[1].session_id == root_marker.agent_session_id
     assert gateway.requests[1].parent_entry_id == root_marker.agent_entry_id
-    rejoin_marker = store.markers[(rejoin.chat_id, rejoin.replies[0].id)]
+    rejoin_marker = store.markers[
+        (
+            TELEGRAM_IDENTITY_CODEC.scope_id(rejoin.chat_id),
+            rejoin.replies[0].id,
+        )
+    ]
     assert rejoin_marker.parent_answer_message_id == first_answer.id
 
 
@@ -465,10 +488,10 @@ async def test_answer_marker_survives_repository_restart(tmp_path):
     path = tmp_path / "ai-state.db"
     first_store = await AIStateRepository(path).connect()
     marker = AIAnswerMarker(
-        chat_id=-1001,
+        scope_id=TELEGRAM_IDENTITY_CODEC.scope_id(-1001),
         answer_message_id=50,
         trigger_message_id=40,
-        requester_id=10,
+        requester_id=TELEGRAM_IDENTITY_CODEC.actor_id(10),
         prompt="persisted question",
         answer_text="persisted answer",
         parent_answer_message_id=None,
@@ -533,9 +556,10 @@ async def test_state_repository_migrates_pre_pi_answer_rows(tmp_path):
 
     store = await AIStateRepository(path).connect()
     try:
-        marker = await store.get_answer(-1001, 50)
-        turn_from_answer = await store.get_turn_for_message(-1001, 50)
-        turn_from_trigger = await store.get_turn_for_message(-1001, 40)
+        scope_id = TELEGRAM_IDENTITY_CODEC.scope_id(-1001)
+        marker = await store.get_answer(scope_id, 50)
+        turn_from_answer = await store.get_turn_for_message(scope_id, 50)
+        turn_from_trigger = await store.get_turn_for_message(scope_id, 40)
     finally:
         await store.close()
 

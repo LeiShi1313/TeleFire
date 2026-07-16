@@ -58,6 +58,27 @@ class BlockingRecordingHandler(RecordingHandler):
         return True
 
 
+class BlockingMessageHandler(RecordingHandler):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def handle(self, message):
+        self.messages.append(message)
+        self.started.set()
+        await self.release.wait()
+        return True
+
+
+class RecordingContinuousScheduler:
+    def __init__(self):
+        self.notifications = 0
+
+    def notify(self):
+        self.notifications += 1
+
+
 class FakeStateRepository:
     def __init__(self):
         self.processed = set()
@@ -186,9 +207,31 @@ def make_plugin(*, handler, store, client, owner_id=10, edit_limiter=None):
     plugin._owner_id = owner_id
     plugin._saved_memory_lock = asyncio.Lock()
     plugin._edit_limiter = edit_limiter or RecordingEditLimiter()
+    plugin._continuous_memory_scheduler = None
     plugin.service = SimpleNamespace(client=client)
     plugin.logger = RecordingLogger()
     return plugin
+
+
+@pytest.mark.asyncio
+async def test_message_event_wakes_continuous_ingestion_before_and_after_handling():
+    handler = BlockingMessageHandler()
+    scheduler = RecordingContinuousScheduler()
+    message = FakeSavedMessage(forwarded=False, text="ordinary message")
+    plugin = make_plugin(
+        handler=handler,
+        store=FakeStateRepository(),
+        client=FakeTelegramClient(None),
+    )
+    plugin._continuous_memory_scheduler = scheduler
+
+    task = asyncio.create_task(plugin._on_message(SimpleNamespace(message=message)))
+    await handler.started.wait()
+    assert scheduler.notifications == 1
+
+    handler.release.set()
+    await task
+    assert scheduler.notifications == 2
 
 
 def assert_saved_memory_status(message, final_text):

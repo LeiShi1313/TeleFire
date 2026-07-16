@@ -27,6 +27,7 @@ from telefire.ai import (
     _telegram_memory_episode,
     _telegram_scope_id,
 )
+from telefire.ai_attachments import attachment_metadata_only, message_has_attachment
 from telefire.ai_memory import (
     MemoryClient,
     MemoryClientError,
@@ -51,6 +52,15 @@ class DreamMessageSource(Protocol):
         chat_id: int,
         message_id: int,
     ) -> ReplyTarget | None: ...
+
+    async def fetch_after(
+        self,
+        chat_id: int,
+        *,
+        after_message_id: int,
+        until: datetime,
+        limit: int,
+    ) -> tuple[ReplyTarget, ...]: ...
 
 
 class TelegramHistorySource:
@@ -119,6 +129,26 @@ class TelegramHistorySource:
         if isinstance(message, list):
             return message[0] if message else None
         return message
+
+    async def fetch_after(
+        self,
+        chat_id: int,
+        *,
+        after_message_id: int,
+        until: datetime,
+        limit: int,
+    ) -> tuple[ReplyTarget, ...]:
+        messages: list[ReplyTarget] = []
+        async for message in self._client.iter_messages(
+            chat_id,
+            min_id=after_message_id,
+            reverse=True,
+            limit=limit,
+        ):
+            if _message_datetime(message) > until:
+                break
+            messages.append(message)
+        return tuple(messages)
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +308,55 @@ class DreamScheduleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ContinuousMemoryResult:
+    messages_seen: int
+    messages_retained: int
+    documents_created: int
+    documents_unchanged: int
+    caught_up: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousMemorySchedulerSettings:
+    poll_interval_seconds: float = 10
+    concurrency: int = 2
+    scope_batch_size: int = 20
+
+    def __post_init__(self) -> None:
+        if (
+            self.poll_interval_seconds <= 0
+            or self.concurrency < 1
+            or self.scope_batch_size < 1
+        ):
+            raise ValueError("Continuous memory scheduler limits must be positive")
+
+    @classmethod
+    def from_env(cls) -> ContinuousMemorySchedulerSettings:
+        return cls(
+            poll_interval_seconds=float(
+                os.environ.get("TELEFIRE_MEMORY_CONTINUOUS_POLL_SECONDS", "10")
+            ),
+            concurrency=int(
+                os.environ.get("TELEFIRE_MEMORY_CONTINUOUS_CONCURRENCY", "2")
+            ),
+            scope_batch_size=int(
+                os.environ.get("TELEFIRE_MEMORY_CONTINUOUS_SCOPE_BATCH_SIZE", "20")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ContinuousMemoryScheduleResult:
+    scopes_seen: int
+    scopes_succeeded: int
+    scopes_failed: int
+    scopes_busy: int
+    scopes_pending: int
+    messages_seen: int
+    messages_retained: int
+
+
+@dataclass(frozen=True, slots=True)
 class _DreamDocument:
     episode: MemoryEpisode
     window_message_ids: frozenset[int]
@@ -308,6 +387,15 @@ def _dream_session_document_id(
         started_at = started_at.replace(tzinfo=UTC)
     stamp = started_at.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"telegram:dream-session:{chat_id}:{stamp}:{root_message_id}"
+
+
+def _channel_album_document_id(chat_id: int, message: ReplyTarget) -> str | None:
+    if not bool(getattr(message, "post", False)):
+        return None
+    grouped_id = getattr(message, "grouped_id", None)
+    if isinstance(grouped_id, int):
+        return f"telegram:channel-album:{chat_id}:{grouped_id}"
+    return None
 
 
 def _session_accepts(
@@ -436,11 +524,17 @@ class TelegramDreamScanner:
             lambda: self._run_backfill(chat_id, request),
         )
 
+    async def run_continuous_scope(self, chat_id: int) -> ContinuousMemoryResult:
+        return await self._run_exclusive(
+            chat_id,
+            lambda: self._run_continuous_scope(chat_id),
+        )
+
     async def _run_exclusive(
         self,
         chat_id: int,
-        operation: Callable[[], Awaitable[MemoryDreamResult]],
-    ) -> MemoryDreamResult:
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
         lock = self._locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             scope_id = _telegram_scope_id(chat_id)
@@ -476,6 +570,68 @@ class TelegramDreamScanner:
                     scope_id,
                     owner=self._lease_owner,
                 )
+
+    async def _run_continuous_scope(
+        self,
+        chat_id: int,
+    ) -> ContinuousMemoryResult:
+        scope_id = _telegram_scope_id(chat_id)
+        scope = await self._store.get_memory_scope_state(scope_id)
+        if not scope.continuous_enabled:
+            raise ValueError("Continuous memory is disabled for this chat")
+        if scope.continuous_cursor_message_id is None:
+            raise ValueError("Continuous memory cursor is not initialized")
+        attempted_at = self._clock()
+        await self._store.record_continuous_memory_attempt(scope_id, attempted_at)
+        until = (
+            datetime.fromtimestamp(attempted_at, UTC)
+            - self._settings.settlement_delay
+        )
+
+        async def checkpoint(
+            cursor_message_id: int | None,
+            _scanned_until_at: float,
+        ) -> None:
+            await self._store.record_continuous_memory_success(
+                scope_id,
+                cursor_message_id=cursor_message_id,
+                succeeded_at=self._clock(),
+            )
+
+        try:
+            messages = await self._retry_telegram(
+                lambda: self._source.fetch_after(
+                    chat_id,
+                    after_message_id=scope.continuous_cursor_message_id,
+                    until=until,
+                    limit=self._settings.max_messages,
+                )
+            )
+            result, _, complete = await self._retain_threads(
+                chat_id,
+                messages,
+                checkpoint=checkpoint,
+            )
+            if not messages:
+                await self._store.record_continuous_memory_success(
+                    scope_id,
+                    cursor_message_id=None,
+                    succeeded_at=self._clock(),
+                )
+            return ContinuousMemoryResult(
+                messages_seen=result.messages_seen,
+                messages_retained=result.messages_retained,
+                documents_created=result.documents_created,
+                documents_unchanged=result.documents_unchanged,
+                caught_up=complete and len(messages) < self._settings.max_messages,
+            )
+        except Exception as exc:
+            await self._store.record_continuous_memory_failure(
+                scope_id,
+                failed_at=self._clock(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
 
     async def _renew_lease(self, scope_id: str) -> None:
         interval = max(0.05, self._settings.lease_seconds / 3)
@@ -693,11 +849,24 @@ class TelegramDreamScanner:
         window_positions = {message.id: index for index, message in enumerate(messages)}
         known = {message.id: message for message in messages}
         root_groups: dict[int, dict[int, ReplyTarget]] = {}
+        fixed_document_ids: dict[int, str] = {}
+        album_roots: dict[int, int] = {}
         for message in messages:
             chain = await self._load_chain(chat_id, message, known)
             if not chain:
                 continue
-            root_id = chain[0].id
+            channel_document_id = (
+                _channel_album_document_id(chat_id, message)
+                if len(chain) == 1
+                else None
+            )
+            grouped_id = getattr(message, "grouped_id", None)
+            if channel_document_id is not None and isinstance(grouped_id, int):
+                root_id = album_roots.setdefault(grouped_id, message.id)
+            else:
+                root_id = chain[0].id
+            if channel_document_id is not None:
+                fixed_document_ids[root_id] = channel_document_id
             group = root_groups.setdefault(root_id, {})
             for item in chain:
                 group[item.id] = item
@@ -723,6 +892,8 @@ class TelegramDreamScanner:
                     document_id = source_documents.get(source_id)
                     if document_id is not None:
                         break
+            if document_id is None:
+                document_id = fixed_document_ids.get(root_id)
             if document_id is not None:
                 assigned_documents[root_id] = document_id
 
@@ -980,6 +1151,15 @@ class TelegramDreamScanner:
         semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
         identity_semaphore = asyncio.Semaphore(self._settings.preprocess_concurrency)
         identity_tasks: dict[int, asyncio.Task[Any]] = {}
+        album_attachment_representatives: dict[int, int] = {}
+        for message in messages:
+            grouped_id = getattr(message, "grouped_id", None)
+            if (
+                bool(getattr(message, "post", False))
+                and isinstance(grouped_id, int)
+                and message_has_attachment(message)
+            ):
+                album_attachment_representatives.setdefault(grouped_id, message.id)
 
         async def resolve_identity(message: ReplyTarget) -> Any:
             async with identity_semaphore:
@@ -1002,7 +1182,19 @@ class TelegramDreamScanner:
                 return None
             async with semaphore:
                 text = _memory_message_text(message.raw_text or "")
-                attachment = await self._prompt_builder.describe_attachment(message)
+                grouped_id = getattr(message, "grouped_id", None)
+                representative_id = (
+                    album_attachment_representatives.get(grouped_id)
+                    if isinstance(grouped_id, int)
+                    else None
+                )
+                if representative_id is not None and representative_id != message.id:
+                    attachment = attachment_metadata_only(
+                        message,
+                        reason="another item in this media album was analyzed",
+                    )
+                else:
+                    attachment = await self._prompt_builder.describe_attachment(message)
                 observation_text = self._prompt_builder.build_observation_text(
                     text,
                     attachment,
@@ -1228,3 +1420,147 @@ class DreamScheduler:
                         type(exc).__name__,
                         exc,
                     )
+
+
+class ContinuousMemoryScheduler:
+    def __init__(
+        self,
+        *,
+        scanner: Any,
+        store: AIStateRepository,
+        settings: ContinuousMemorySchedulerSettings = (
+            ContinuousMemorySchedulerSettings()
+        ),
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        logger: Any | None = None,
+    ):
+        self._scanner = scanner
+        self._store = store
+        self._settings = settings
+        self._sleep = sleep
+        self._logger = logger
+        self._wake = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(
+            self._run_forever(),
+            name="telefire-continuous-memory-scheduler",
+        )
+
+    def notify(self) -> None:
+        self._wake.set()
+
+    async def close(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    async def run_once(self) -> ContinuousMemoryScheduleResult:
+        scopes = await self._store.list_continuous_memory_scopes()
+        semaphore = asyncio.Semaphore(self._settings.concurrency)
+        succeeded = 0
+        failed = 0
+        busy = 0
+        pending = 0
+        messages_seen = 0
+        messages_retained = 0
+
+        async def run(scope_id: str) -> tuple[str, Any | None]:
+            prefix = "telegram:chat:"
+            if not scope_id.startswith(prefix):
+                return "failed", None
+            try:
+                chat_id = int(scope_id[len(prefix) :])
+            except ValueError:
+                return "failed", None
+            async with semaphore:
+                try:
+                    result = await self._scanner.run_continuous_scope(chat_id)
+                except DreamCycleBusyError:
+                    return "busy", None
+                except Exception as exc:
+                    if self._logger is not None:
+                        self._logger.warning(
+                            "Continuous memory ingestion failed "
+                            "(scope_id=%s, error=%s): %s",
+                            scope_id,
+                            type(exc).__name__,
+                            exc,
+                        )
+                    return "failed", None
+            return "succeeded", result
+
+        for start in range(0, len(scopes), self._settings.scope_batch_size):
+            results = await asyncio.gather(
+                *(
+                    run(scope_id)
+                    for scope_id in scopes[
+                        start : start + self._settings.scope_batch_size
+                    ]
+                )
+            )
+            for status, result in results:
+                succeeded += status == "succeeded"
+                failed += status == "failed"
+                busy += status == "busy"
+                if result is None:
+                    continue
+                messages_seen += result.messages_seen
+                messages_retained += result.messages_retained
+                pending += not result.caught_up
+
+        schedule_result = ContinuousMemoryScheduleResult(
+            scopes_seen=len(scopes),
+            scopes_succeeded=succeeded,
+            scopes_failed=failed,
+            scopes_busy=busy,
+            scopes_pending=pending,
+            messages_seen=messages_seen,
+            messages_retained=messages_retained,
+        )
+        if self._logger is not None:
+            self._logger.info(
+                "Continuous memory cycle complete "
+                "(scopes=%s, succeeded=%s, failed=%s, busy=%s, pending=%s, "
+                "messages=%s, retained=%s)",
+                schedule_result.scopes_seen,
+                schedule_result.scopes_succeeded,
+                schedule_result.scopes_failed,
+                schedule_result.scopes_busy,
+                schedule_result.scopes_pending,
+                schedule_result.messages_seen,
+                schedule_result.messages_retained,
+            )
+        return schedule_result
+
+    async def _run_forever(self) -> None:
+        while True:
+            self._wake.clear()
+            try:
+                result = await self.run_once()
+            except Exception as exc:
+                if self._logger is not None:
+                    self._logger.exception(
+                        "Continuous memory orchestration failed (error=%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                result = None
+            if result is not None and result.scopes_pending:
+                await self._sleep(0)
+                continue
+            try:
+                await asyncio.wait_for(
+                    self._wake.wait(),
+                    timeout=self._settings.poll_interval_seconds,
+                )
+            except TimeoutError:
+                pass

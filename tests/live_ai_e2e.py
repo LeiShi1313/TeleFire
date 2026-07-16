@@ -47,6 +47,8 @@ async def start_owner_userbot(account: str) -> TelegramAI:
 
 
 async def close_owner_userbot(userbot: TelegramAI) -> None:
+    if userbot._continuous_memory_scheduler is not None:
+        await userbot._continuous_memory_scheduler.close()
     if userbot._dream_scheduler is not None:
         await userbot._dream_scheduler.close()
     if userbot._memory is not None:
@@ -251,7 +253,7 @@ async def run() -> None:
             chat,
             enable,
             owner_identity.id,
-            expected_text="Automatic memory enabled",
+            expected_text="Continuous memory enabled",
         )
         print("scope_enable=ok")
 
@@ -274,25 +276,14 @@ async def run() -> None:
             os.environ.get("TELEFIRE_MEMORY_DREAM_SETTLEMENT_SECONDS", "30")
         )
         await asyncio.sleep(max(settlement, 0) + 1)
-        dream = await owner_request(owner_userbot, chat, "/ai_memory_dream")
-        await wait_for_reply(
-            owner, chat, dream, owner_identity.id, expected_text="Dream Cycle complete"
+        started_at = standalone.date.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        await wait_for_document(
+            hindsight_url,
+            scope_id,
+            f"telegram:dream-session:{chat_id}:{started_at}:{standalone.id}",
+            (standalone_token, thread_root_token, thread_reply_token),
         )
-        await asyncio.gather(
-            wait_for_document(
-                hindsight_url,
-                scope_id,
-                f"telegram:thread:{chat_id}:{thread_root.id}",
-                (thread_root_token, thread_reply_token),
-            ),
-            wait_for_document(
-                hindsight_url,
-                scope_id,
-                f"telegram:thread:{chat_id}:{standalone.id}",
-                (standalone_token,),
-            ),
-        )
-        print("standalone_and_thread_dream=ok")
+        print("standalone_and_thread_continuous_memory=ok")
 
         alias_token = f"ALIAS_{token}"
         preference_token = f"PREFERENCE_{token}"
@@ -502,7 +493,7 @@ async def run() -> None:
             chat,
             disable,
             owner_identity.id,
-            expected_text="Automatic memory disabled",
+            expected_text="Continuous memory disabled",
         )
         print(f"completed_at={datetime.now(UTC).isoformat()}")
     finally:

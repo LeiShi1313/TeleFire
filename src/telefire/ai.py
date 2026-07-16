@@ -820,7 +820,7 @@ def _memory_message_text(text: str) -> str:
     text = text.strip()
     if parse_memory_revision(text) is not None:
         return ""
-    if text.startswith("/ai_memory_") or text in {
+    if text.startswith(("/ai_memory_", "/ai_dream_")) or text in {
         "/ai_allow",
         "/ai_deny",
         "/ai_cancel",
@@ -1985,6 +1985,72 @@ class AIStateRepository:
         )
         return tuple([str(row["scope_id"]) async for row in cursor])
 
+    async def record_continuous_memory_attempt(
+        self,
+        scope_id: str,
+        attempted_at: float,
+    ) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            UPDATE ai_memory_scopes
+            SET continuous_last_attempt_at = ?, updated_at = ?
+            WHERE scope_id = ?
+            """,
+            (attempted_at, attempted_at, scope_id),
+        )
+        await connection.commit()
+
+    async def record_continuous_memory_success(
+        self,
+        scope_id: str,
+        *,
+        cursor_message_id: int | None,
+        succeeded_at: float,
+    ) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            UPDATE ai_memory_scopes
+            SET continuous_cursor_message_id = COALESCE(
+                    ?, continuous_cursor_message_id
+                ),
+                continuous_last_attempt_at = ?,
+                continuous_last_success_at = ?,
+                continuous_last_error = NULL,
+                updated_at = ?
+            WHERE scope_id = ?
+            """,
+            (
+                cursor_message_id,
+                succeeded_at,
+                succeeded_at,
+                succeeded_at,
+                scope_id,
+            ),
+        )
+        await connection.commit()
+
+    async def record_continuous_memory_failure(
+        self,
+        scope_id: str,
+        *,
+        failed_at: float,
+        error: str,
+    ) -> None:
+        connection = self._require_connection()
+        await connection.execute(
+            """
+            UPDATE ai_memory_scopes
+            SET continuous_last_attempt_at = ?,
+                continuous_last_error = ?,
+                updated_at = ?
+            WHERE scope_id = ?
+            """,
+            (failed_at, error[:1_000], failed_at, scope_id),
+        )
+        await connection.commit()
+
     async def get_memory_dream_state(self, scope_id: str) -> MemoryDreamState:
         connection = self._require_connection()
         cursor = await connection.execute(
@@ -2306,16 +2372,19 @@ class AIConversationHandler:
             return False
         command = (message.raw_text or "").strip()
         command_name = command.split(maxsplit=1)[0] if command else ""
+        is_owner_control = message.sender_id == self._owner_id or bool(
+            getattr(message, "out", False)
+        )
         memory_instruction = parse_memory_revision(message.raw_text)
         if memory_instruction is not None:
-            if message.sender_id != self._owner_id:
+            if not is_owner_control:
                 return False
             return await self._handle_memory_command(
                 message,
                 memory_instruction,
             )
         if command_name == "/ai_memory_backfill":
-            if message.sender_id != self._owner_id:
+            if not is_owner_control:
                 return False
             request = parse_memory_backfill(command)
             if request is None:
@@ -2335,7 +2404,7 @@ class AIConversationHandler:
             "/ai_dream_enable",
             "/ai_dream_disable",
         }:
-            if message.sender_id != self._owner_id:
+            if not is_owner_control:
                 return False
             if command == "/ai_memory_dream":
                 handled = await self._handle_memory_dream(message)
@@ -2343,7 +2412,7 @@ class AIConversationHandler:
                 handled = await self._handle_memory_scope_command(message, command)
             return handled
         if command in {"/ai_allow", "/ai_deny"}:
-            if message.sender_id != self._owner_id:
+            if not is_owner_control:
                 return False
             return await self._handle_access_command(message, command)
 
@@ -2671,6 +2740,12 @@ class AIConversationHandler:
                         if scope.continuous_cursor_message_id is not None
                         else "not started"
                     ),
+                    "Last continuous attempt: "
+                    f"{_format_memory_time(scope.continuous_last_attempt_at)}",
+                    "Last continuous success: "
+                    f"{_format_memory_time(scope.continuous_last_success_at)}",
+                    "Last continuous error: "
+                    f"{scope.continuous_last_error or 'none'}",
                     f"Last Dream attempt: {_format_memory_time(state.last_attempt_at)}",
                     f"Last Dream success: {_format_memory_time(state.last_success_at)}",
                     f"Last Dream error: {state.last_error or 'none'}",
@@ -3222,6 +3297,9 @@ def _message_datetime(message: ReplyTarget) -> datetime:
 def _telegram_memory_event_metadata(message: ReplyTarget) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     chat_id = getattr(message, "chat_id", None)
+    post_author = getattr(message, "post_author", None)
+    if isinstance(post_author, str) and post_author.strip():
+        metadata["post_author"] = post_author.strip()[:256]
     reply = getattr(message, "reply_to", None)
     quote_text = getattr(reply, "quote_text", None)
     if isinstance(quote_text, str) and quote_text.strip():

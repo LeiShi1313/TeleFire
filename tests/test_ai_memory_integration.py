@@ -79,6 +79,7 @@ class FakeMessage:
         date=None,
         file=None,
         is_human=True,
+        out=False,
     ):
         self.id = self.__class__.next_id
         self.__class__.next_id += 1
@@ -89,6 +90,7 @@ class FakeMessage:
         self.date = date or datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
         self.file = file
         self.is_human = is_human
+        self.out = out
         self._reply_to = reply_to
         self.replies = []
         self.deleted = False
@@ -1183,6 +1185,9 @@ async def test_owner_controls_continuous_and_dream_memory_independently():
         "Continuous memory: enabled\n"
         "Dream: disabled\n"
         f"Continuous cursor: {enable.id}\n"
+        "Last continuous attempt: never\n"
+        "Last continuous success: never\n"
+        "Last continuous error: none\n"
         "Last Dream attempt: never\n"
         "Last Dream success: never\n"
         "Last Dream error: none"
@@ -1338,6 +1343,27 @@ async def test_non_owner_cannot_change_scope_memory_state():
     assert command.deleted is False
     assert store.memory_continuous == set()
     assert store.memory_dream == set()
+
+
+@pytest.mark.asyncio
+async def test_outgoing_channel_post_can_enable_continuous_memory():
+    store = FakeStore()
+    handler = make_handler(
+        FakeGateway(["unused"]),
+        FakeMemory(),
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+    command = FakeMessage(
+        "/ai_memory_enable",
+        sender_id=-1002064685671,
+        is_human=False,
+        out=True,
+    )
+
+    assert await handler.handle(command) is True
+    assert store.memory_continuous == {"telegram:chat:-1001"}
+    assert command.deleted is True
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,8 @@ from telefire.ai import (
 )
 from telefire.ai_attachments import TelegramAttachmentDescriber
 from telefire.ai_dream import (
+    ContinuousMemoryScheduler,
+    ContinuousMemorySchedulerSettings,
     DreamScheduler,
     DreamSchedulerSettings,
     DreamSettings,
@@ -168,6 +170,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
         )
         self._handler: AIConversationHandler | None = None
         self._dream_scheduler: DreamScheduler | None = None
+        self._continuous_memory_scheduler: ContinuousMemoryScheduler | None = None
         self._owner_id: int | None = None
         self._saved_memory_lock = asyncio.Lock()
 
@@ -184,6 +187,8 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             await self._setup()
             await self.service.wait_until_disconnected()
         finally:
+            if self._continuous_memory_scheduler is not None:
+                await self._continuous_memory_scheduler.close()
             if self._dream_scheduler is not None:
                 await self._dream_scheduler.close()
             if self._memory is not None:
@@ -246,6 +251,12 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 settings=DreamSchedulerSettings.from_env(),
                 logger=self.logger,
             )
+            self._continuous_memory_scheduler = ContinuousMemoryScheduler(
+                scanner=dream_runner,
+                store=self._store,
+                settings=ContinuousMemorySchedulerSettings.from_env(),
+                logger=self.logger,
+            )
         self._handler = AIConversationHandler(
             owner_id=owner.id,
             responder=responder,
@@ -263,12 +274,21 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             logger=self.logger,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())
+        if self._continuous_memory_scheduler is not None:
+            self._continuous_memory_scheduler.start()
         if self._dream_scheduler is not None:
             self._dream_scheduler.start()
         self.logger.info("Telegram AI userbot started")
 
     async def _on_message(self, event) -> None:
         if self._handler is not None:
+            continuous_scheduler = getattr(
+                self,
+                "_continuous_memory_scheduler",
+                None,
+            )
+            if continuous_scheduler is not None:
+                continuous_scheduler.notify()
             try:
                 if await self._handle_saved_memory(event.message):
                     return
@@ -279,6 +299,9 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                     event.message.chat_id,
                     event.message.id,
                 )
+            finally:
+                if continuous_scheduler is not None:
+                    continuous_scheduler.notify()
 
     async def _handle_saved_memory(self, message) -> bool:
         if not self._is_saved_messages_message(message):

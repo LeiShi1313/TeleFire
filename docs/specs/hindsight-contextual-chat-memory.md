@@ -12,7 +12,12 @@ Telefire's current memory model stores independently extracted facts and episode
 
 The current capture path also makes reply participation look like a memory requirement. Ordinary standalone messages are not learned unless they later enter an AI or explicit memory flow, even though a single message can be meaningful evidence. The storage model loses the surrounding conversation that an extractor needs for attribution, quotation, coreference, uncertainty, and temporal interpretation.
 
-Users want memory to feel natural rather than profile-driven. In a memory-enabled chat, Telefire should remember eligible conversation, understand local names and relationships, recover relevant evidence when somebody asks `/ai`, and answer with calibrated confidence. It must do this without searching another chat, turning rumors or jokes into facts, storing model output as evidence, or giving the answer agent write access to memory.
+Users want memory to feel natural rather than profile-driven. In a chat with
+continuous capture or Dream enabled, Telefire should remember eligible
+conversation, understand local names and relationships, recover relevant evidence
+when somebody asks `/ai`, and answer with calibrated confidence. It must do this
+without searching another chat, turning rumors or jokes into facts, storing model
+output as evidence, or giving the answer agent write access to memory.
 
 The implementation must remain simple enough to operate in the existing local Docker Compose stack. It should use Hindsight as the selected memory engine instead of building a second graph, alias table, profile store, or fallback backend in Telefire.
 
@@ -22,7 +27,12 @@ Replace the subject-scoped Zvec runtime with Hindsight and map each chat, worksp
 
 Make capture opt-in per scope and independent from authorization to use `/ai`. Every eligible human message can be retained, including a standalone message with no reply. Reply structure only determines how messages are grouped into an episode document so the extractor receives useful context.
 
-Feed one idempotent episode pipeline from three entry points: successful `/ai` conversations in memory-enabled scopes, explicit owner `/ai_memory` operations, and a scheduled Telegram Dream Cycle over enabled scopes. Use stable document identities, content versions, ingestion receipts, cursor overlap, and settlement delay so retries, overlapping scans, edits, and later replies converge without duplicating memory.
+Feed one idempotent episode pipeline from four entry points: successful `/ai`
+conversations in any scope, explicit owner `/ai_memory` operations, continuous
+Telegram capture from a durable cursor, and scheduled Dream scans over
+Dream-enabled scopes. Use stable document identities, content versions, ingestion
+receipts, cursor overlap, and settlement delay so retries, overlapping scans,
+edits, and later replies converge without duplicating memory.
 
 For each AI Request, trusted Telefire code fixes the active bank and performs one bounded recall using the prompt, reply context, deterministic participants, and exact platform mentions. The Pi Agent Engine may use one bank-pinned, read-only reflection operation when implicit identity, changing state, or a relevant relationship requires additional reasoning. It can fetch bounded source evidence for memories it actually uses. It cannot select a bank, write or delete memory, enumerate banks, or raise retrieval budgets.
 
@@ -33,9 +43,12 @@ Deploy Hindsight alongside Telefire and the existing local embedding service. Re
 ## User Stories
 
 1. As a chat owner, I want to explicitly enable memory for a chat, so that ordinary conversation is captured only where participants should expect it.
-2. As a chat owner, I want to disable automatic memory capture for a chat, so that future background scans stop without disabling `/ai` answers.
+2. As a chat owner, I want to disable continuous capture or Dream independently,
+   so that background ingestion stops without disabling `/ai` answers.
 3. As a chat owner, I want memory enablement to be independent from AI access, so that I can control capture and invocation as separate policies.
-4. As an authorized user, I want `/ai` to work outside memory-enabled chats, so that memory consent does not become an AI allowed-chat gate.
+4. As an authorized user, I want `/ai` and its bounded request capture to work
+   outside background-memory-enabled chats, so that memory settings do not become
+   an AI allowed-chat gate.
 5. As a chat participant, I want a standalone human message to be eligible memory, so that useful evidence is not ignored merely because nobody replied to it.
 6. As a chat participant, I want replies to be retained with their bounded ancestors, so that pronouns, quotations, disagreement, and conversational context can be interpreted correctly.
 7. As a chat participant, I want a standalone message that later receives replies to become the root of the same evolving episode, so that the conversation is not split into unrelated memories.
@@ -109,19 +122,42 @@ Deploy Hindsight alongside Telefire and the existing local embedding service. Re
 - Hindsight remains a standalone service with its native HTTP API, storage, and UI. Telefire owns a thin client adapter and normalized episode serialization but does not publish a second general-purpose memory engine API merely to rename Hindsight operations.
 - One Memory Scope maps to one Hindsight bank. The canonical scope key is the stable bank identity; a current human-readable scope label is metadata. Private chats, groups, Saved Messages, workspaces, and future clients use distinct banks.
 - Trusted application code selects and pins the bank before an Agent Run. Neither prompt text nor model tool arguments can supply, enumerate, or broaden a bank identity. Hindsight tags may organize records inside a bank but are not an authorization boundary.
-- Memory enablement is a persisted, owner-controlled property of a scope. It controls automatic `/ai` capture and Dream scanning only. It does not control recall, one-shot `/ai_memory`, or permission to invoke `/ai`.
+- Continuous capture and Dream enablement are separate persisted,
+  owner-controlled properties of a scope. Continuous capture ingests eligible new
+  messages from a durable cursor and overrides Dream while both are enabled.
+  Neither setting controls recall, one-shot `/ai_memory`, successful `/ai`
+  capture, or permission to invoke `/ai`.
 - The deprecated AI allowed-chat configuration is removed. Per-user owner/whitelist authorization and delegated rate limits remain the invocation policy.
-- Owner-only memory control operations enable or disable the current scope, report its state, and permit a manual Dream Cycle. Their command names use the existing `/ai_memory_*` namespace, and successful control messages follow the existing low-noise deletion behavior.
+- Owner-only memory control operations independently enable or disable continuous
+  capture with `/ai_memory_enable` and `/ai_memory_disable`, enable or disable
+  scheduled Dream with `/ai_dream_enable` and `/ai_dream_disable`, report both
+  modes, and permit a manual Dream Cycle. Successful control messages follow the
+  existing low-noise deletion behavior.
 - The normalized ingestion unit is an Episode containing ordered source events. Each event can carry an optional opaque source event ID, stable actor key, display name, occurred time, mention time, text, generated attachment description, reply or quotation references, exact mentioned actor keys, and bounded integration metadata.
 - Source event IDs are provenance, not the portable identity contract. A client may provide an independent stable document identity for update semantics. For immutable one-shot episodes without a stable source identity, the adapter derives a deterministic content fingerprint and returns the resulting document identity.
 - Explicit capture derives a stable document identity from the canonical scope and bounded reply root. Dream packs nearby roots into deterministic message-ID-range segments while preserving each event's actor, timestamp, source ID, and reply reference. Existing reply-root receipts keep their original document identities; a late reply continues to update whichever document already owns its root evidence.
 - An exact content version is a no-op. Any new reply, edit, or explicit replay that changes a structured Episode replaces the complete bounded Hindsight document and permits re-extraction. Full replacement is required for idempotent crash recovery because the pinned Hindsight release cannot structurally append top-level Episode objects.
-- Telefire stores delivery state only: memory-enabled scopes, stable document mappings, content versions, ingestion receipts, successful Dream cursors, and operational timestamps. This state must not duplicate Hindsight facts, entities, relationships, observations, or relevance scores.
+- Telefire stores delivery state only: continuous and Dream scope settings,
+  stable document mappings, content versions, ingestion receipts, successful
+  cursors, and operational timestamps. This state must not duplicate Hindsight
+  facts, entities, relationships, observations, or relevance scores.
 - All three capture paths call the same episode serializer and retention client. Dream may combine nearby short conversation roots into one bounded Episode to amortize extraction. A later explicit capture appends to an existing Dream segment instead of creating a duplicate thread document, and the next Dream replacement canonicalizes the complete structured segment.
-- Successful `/ai` capture occurs after the answer has completed and only in a Memory-Enabled Scope. It retains the bounded human reply thread plus the current human prompt, excludes stored AI Answers and control commands, and does not hold a delegated user's request-rate lease while memory work finishes.
-- Bare owner `/ai_memory` retains the bounded human reply chain, Saved Messages source, or resolved message-link source even if the source scope is not memory-enabled. An instructed `/ai_memory` first retains the evidence, then applies an evidence-backed Revision to the directly targeted human Memory Subject.
+- Successful `/ai` capture occurs after the answer has completed in any scope. It
+  retains the bounded human reply thread plus the current human prompt, excludes
+  stored AI Answers and control commands, and does not hold a delegated user's
+  request-rate lease while memory work finishes. When continuous capture is
+  enabled, `/ai` skips this duplicate write while recall remains active.
+- Bare owner `/ai_memory` retains the bounded human reply chain, Saved Messages
+  source, or resolved message-link source regardless of the source scope's
+  background settings. An instructed `/ai_memory` first retains the evidence,
+  then applies an evidence-backed Revision to the directly targeted human Memory
+  Subject.
 - A Revision is represented through Hindsight-native evidence, temporal update, directive, or document correction capabilities selected during the Hindsight integration spike. It must suppress or supersede misleading current recall while preserving source history. Telefire must not recreate the old Markdown Subject Profile or a parallel suppression index. No hard-delete operation is exposed in this version.
-- The Telegram Dream Cycle runs on a configurable cron schedule inside the Telegram integration, not inside Hindsight and not inside the answer agent. It scans every enabled Telegram scope over a configured window with bounded concurrency, overlap, and settlement delay.
+- The Telegram continuous worker and Dream Cycle run inside the Telegram
+  integration, not inside Hindsight or the answer agent. Continuous capture polls
+  from a durable message cursor with bounded concurrency. Dream runs on a
+  configurable cron and scans every Dream-enabled scope that is not overridden by
+  continuous capture, using bounded concurrency, overlap, and settlement delay.
 - For each scanned message, Dream finds the bounded reply root, then groups nearby roots by a deterministic message-ID range. Reply and actor boundaries remain explicit inside the segment. Ancestors and previously retained sibling events may be fetched as context but are not counted as newly observed events.
 - Scheduled Dream fetches only the newest bounded messages in the current watermark window, including a bounded overlap for edits. After any non-error pass it advances the watermark to the current settlement boundary, even when the message cap or soft cycle budget drops some evidence. Historical completeness belongs only to explicit backfill. Failed retention keeps its partial checkpoint retryable, and a renewable per-scope lease prevents overlapping cycles.
 - Dream resolves exclusions and AI-answer markers in bulk, resolves each sender identity once per cycle, and retains segment documents with bounded same-bank concurrency. The default local profile uses 20-root segments, four retain workers, twelve preprocessing workers, and a 50-second soft cycle budget.
@@ -172,7 +208,9 @@ Deploy Hindsight alongside Telefire and the existing local embedding service. Re
 - Raw attachment, image, voice, video, PDF, or Telegram URL storage in memory.
 - Hard deletion or full legal erasure workflows in the first version. Revision and suppression preserve provenance.
 - Automatic synchronization of Telegram message deletion into retained memory.
-- Full historical backfill of every enabled chat. Initial capture uses an explicit bounded window; older history requires an intentional import operation.
+- Automatic full historical backfill of any background-enabled chat. Continuous
+  capture starts at its enablement cursor and Dream uses an explicit bounded
+  window; older history requires an intentional import operation.
 - Dream scanners for Matrix or other chat systems in the first implementation. The memory engine and Episode model remain client-neutral so those adapters can be added later.
 - Dashboard editing, graph manipulation, or record-by-record moderation. Inspection is read-only; explicit Revision remains the correction path.
 - Remote multi-tenant Hindsight hosting, external PostgreSQL, high availability, disaster-recovery automation, or public internet exposure.

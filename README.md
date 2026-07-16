@@ -335,27 +335,34 @@ Commands and reply behavior:
   intentionally retries ingestion. Other directly typed Saved Messages are not
   memory requests.
 - `/ai_cancel` cancels the requester's active Agent Run.
-- `/ai_memory_enable` opts the current chat into automatic memory capture after
-  successful AI requests. `/ai_memory_disable` stops future automatic capture,
-  `/ai_memory_dream` runs one bounded scan immediately, and `/ai_memory_status`
-  reports enablement plus the latest Dream attempt, success, and failure. Recall and one-shot
-  `/ai_memory` remain available while automatic capture is disabled. Accepted
-  owner memory-management commands delete on the same configured timer, without
-  waiting for Dream or backfill work to finish.
-- Enabled chats are scanned on `TELEFIRE_MEMORY_DREAM_CRON` (hourly by default).
+- Every successful `/ai` request retains its bounded human reply path plus the
+  current prompt. No chat-level memory switch is required. `/ai_memory_enable`
+  instead enables continuous capture of all eligible settled messages arriving
+  after the command; `/ai_memory_disable` stops that background capture.
+- `/ai_dream_enable` separately enables scheduled Dream scans and
+  `/ai_dream_disable` disables them. Continuous capture overrides Dream while both
+  settings are enabled, so the same chat is never scanned by both workers.
+  `/ai_memory_dream` runs one bounded Dream scan immediately when Dream is enabled
+  and continuous capture is disabled. `/ai_memory_status` reports both modes,
+  their cursor, and the latest Dream attempt, success, and failure. Recall and
+  one-shot `/ai_memory` do not depend on either mode. Accepted owner
+  memory-management commands delete on the configured timer.
+- Dream-enabled chats are scanned on `TELEFIRE_MEMORY_DREAM_CRON` (hourly by default).
   Lookback, overlap, settlement delay, concurrency, transport batch size, and
   bounded retry settings use the `TELEFIRE_MEMORY_DREAM_*` variables documented
-  in `.env.example`. Set the cron value to `off` to disable scheduled scans while
-  retaining manual Dream and post-`/ai` capture.
-- `/ai_memory_dream` manually scans the configured settled time window for an
-  enabled chat. Standalone messages become one-message Episodes; replies are
+  in `.env.example`. Continuous polling and scope concurrency use the
+  `TELEFIRE_MEMORY_CONTINUOUS_*` variables. Set the Dream cron value to `off` to
+  disable scheduled scans without changing per-chat settings.
+- `/ai_memory_dream` manually scans the configured settled time window for a
+  Dream-enabled chat. Standalone messages become one-message Episodes; replies are
   grouped by their bounded root. The fixed scan watermark advances only after all
   document updates are accepted. A window or thread over its configured bound fails
   without advancing, so the owner can narrow the lookback or raise the bound safely.
 - `/ai_memory_backfill days 7` performs a one-shot scan of the rolling seven-day
   window ending at the configured settlement cutoff. `/ai_memory_backfill messages
   500` instead scans the latest 500 settled seed messages. Both forms are owner-only,
-  operate on the current chat Bank, and work even when automatic memory is disabled.
+  operate on the current chat Bank, and work even when both background modes are
+  disabled.
   Reply ancestors may be added as context, so retained event count can exceed the
   requested seed count. Backfill shares the per-chat Dream lease and ingestion
   pipeline but never changes the scheduled Dream watermark. The first version

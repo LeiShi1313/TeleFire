@@ -14,6 +14,15 @@ from telefire.ai import (
     AgentRunRequest,
     PromptBuilder,
 )
+from telefire.telegram.ai_transport import TelegramChatTransport
+
+
+def make_telegram_responder(gateway, **kwargs):
+    return AIResponder(
+        gateway,
+        transport=TelegramChatTransport(edit_cadence=0),
+        **kwargs,
+    )
 
 
 class FakeAnswer:
@@ -186,7 +195,7 @@ async def test_tool_snapshot_is_replaced_by_the_streamed_final_answer():
                 answer="<b>Final answer</b>",
             )
 
-    responder = AIResponder(SnapshotGateway(), edit_cadence=0)
+    responder = make_telegram_responder(SnapshotGateway())
     trigger = FakeMessage("/ai search")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -244,7 +253,7 @@ async def test_repeated_tool_snapshot_does_not_fail_the_agent_run():
                 answer="Final answer",
             )
 
-    responder = AIResponder(ParallelSearchGateway(), edit_cadence=0)
+    responder = make_telegram_responder(ParallelSearchGateway())
     trigger = TelegramLikeMessage("/ai search")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -277,7 +286,7 @@ async def test_provider_rate_limit_gets_an_explicit_telegram_message():
                 message="Agent provider is temporarily rate limited",
             )
 
-    responder = AIResponder(RateLimitedGateway(), edit_cadence=0)
+    responder = make_telegram_responder(RateLimitedGateway())
     trigger = FakeMessage("/ai hello")
     request = AgentRunRequest(
         run_id="11111111-1111-4111-8111-111111111111",
@@ -303,7 +312,7 @@ async def test_handler_maps_answers_to_pi_sessions_and_forks_by_entry():
     store = FakeStore(allowed={20})
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=store,
         prompt_builder=PromptBuilder(),
     )
@@ -332,7 +341,7 @@ async def test_ai_cancel_aborts_only_the_requesters_active_run():
     store = FakeStore()
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=store,
         prompt_builder=PromptBuilder(),
     )

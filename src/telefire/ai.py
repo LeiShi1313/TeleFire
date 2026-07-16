@@ -5,7 +5,7 @@ import base64
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,9 +16,6 @@ import aiosqlite
 import aiohttp
 from telethon import helpers as telegram_helpers
 from telethon import utils as telegram_utils
-from telethon.errors import FloodWaitError, MessageNotModifiedError
-from telethon.extensions import html as telegram_html
-from telethon.tl import functions as telegram_functions
 from telethon.tl import types as telegram_types
 
 from telefire.ai_memory import (
@@ -34,47 +31,6 @@ from telefire.ai_attachments import (
 )
 from telefire.chat.attachments import AttachmentDescriber, AttachmentDescription
 from telefire.chat.transport import ChatTransport, ObjectChatTransport
-
-
-TelegramResponseFormat = Literal["regular_html", "rich_markdown"]
-TELEGRAM_REGULAR_HTML_FORMAT_GUIDE = """Response format: Telegram regular-message HTML.
-- Return only the answer. Do not wrap the whole response in a code block.
-- Use only these formatting tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>preformatted block</pre>, <blockquote>quoted text</blockquote>, and <a href="https://example.com">link text</a>.
-- Use a short <b>bold heading</b> on its own line instead of Markdown headings. Use plain hyphen or numbered lines for lists.
-- Telegram regular messages have no native table entity. Render a compact table as aligned text inside <pre>; render a wide table as labeled list rows.
-- Escape literal <, >, and & as &lt;, &gt;, and &amp;. Close every tag. Do not nest formatting inside <code> or <pre>.
-- Do not emit Markdown markers such as **, __, # headings, > quotes, backticks, or pipe-table syntax."""
-TELEGRAM_RICH_MARKDOWN_FORMAT_GUIDE = """Response format: Telegram Bot API rich-message Markdown.
-- Return only the answer. Use GitHub-Flavored Markdown where possible.
-- Use **bold**, *italic*, ~~strikethrough~~, `inline code`, fenced code blocks, # headings, > blockquotes, lists, and links.
-- Native tables use this structure:
-| Header 1 | Header 2 |
-|:---------|:---------|
-| Value 1  | Value 2  |
-- Keep tables compact, close every formatting delimiter and code fence, and do not wrap the whole response in a code block."""
-
-
-def select_telegram_response_format(
-    *,
-    is_bot_account: bool,
-    rich_messages_available: bool,
-) -> TelegramResponseFormat:
-    if is_bot_account and rich_messages_available:
-        return "rich_markdown"
-    return "regular_html"
-
-
-def _telegram_system_prompt(
-    base_prompt: str,
-    response_format: TelegramResponseFormat = "regular_html",
-) -> str:
-    if response_format == "regular_html":
-        guide = TELEGRAM_REGULAR_HTML_FORMAT_GUIDE
-    elif response_format == "rich_markdown":
-        guide = TELEGRAM_RICH_MARKDOWN_FORMAT_GUIDE
-    else:
-        raise ValueError(f"Unsupported Telegram response format: {response_format}")
-    return f"{base_prompt.rstrip()}\n\n{guide}".lstrip()
 
 
 ToolPolicy = Literal["owner", "delegated", "none"]
@@ -711,66 +667,6 @@ class AnswerResult:
     entry_id: str | None = None
 
 
-class TelegramEditLimiter:
-    def __init__(
-        self,
-        minimum_interval: float,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], Awaitable[None]] | None = None,
-        logger: Any | None = None,
-    ):
-        self._minimum_interval = max(0.0, minimum_interval)
-        self._clock = clock
-        self._sleep = sleep or asyncio.sleep
-        self._logger = logger
-        self._lock = asyncio.Lock()
-        self._next_edit_at = 0.0
-
-    async def run(
-        self,
-        operation: Callable[[], Awaitable[Any]],
-        *,
-        wait: bool,
-    ) -> bool:
-        if not wait and self._lock.locked():
-            return False
-
-        async with self._lock:
-            while True:
-                now = self._clock()
-                delay = self._next_edit_at - now
-                if delay > 0:
-                    if not wait:
-                        return False
-                    await self._sleep(delay)
-                    now = self._next_edit_at
-                    self._next_edit_at = 0.0
-
-                try:
-                    await operation()
-                except FloodWaitError as exc:
-                    seconds = max(0.0, float(exc.seconds))
-                    self._next_edit_at = now + seconds
-                    if self._logger is not None:
-                        self._logger.warning(
-                            "Telegram edit rate limited; waiting %.0f seconds",
-                            seconds,
-                        )
-                    if not wait:
-                        return False
-                    continue
-                except MessageNotModifiedError:
-                    self._next_edit_at = now + self._minimum_interval
-                    return True
-                except Exception:
-                    self._next_edit_at = now + self._minimum_interval
-                    raise
-
-                self._next_edit_at = now + self._minimum_interval
-                return True
-
-
 @dataclass(frozen=True, slots=True)
 class HumanObservation:
     message_id: int
@@ -915,36 +811,22 @@ class AIResponder:
         self,
         gateway: AgentGateway,
         *,
-        edit_cadence: float = 4.0,
         max_output_chars: int = 3_900,
-        response_format: TelegramResponseFormat = "regular_html",
-        clock: Callable[[], float] = time.monotonic,
-        edit_limiter: TelegramEditLimiter | None = None,
         transport: ChatTransport | None = None,
         logger: Any | None = None,
     ):
         self._gateway = gateway
-        self._transport = transport
-        self._response_format = response_format
-        self._edit_limiter = edit_limiter or TelegramEditLimiter(
-            edit_cadence,
-            clock=clock,
-            logger=logger,
-        )
+        self._transport = transport or ObjectChatTransport()
         self._max_output_chars = max(4, max_output_chars)
         self._logger = logger
 
     async def answer(
         self, trigger: ReplyTarget, request: AgentRunRequest
     ) -> AnswerResult:
-        answer = (
-            await self._transport.reply(
-                trigger,
-                "Thinking...",
-                presentation="plain",
-            )
-            if self._transport is not None
-            else await trigger.reply("Thinking...", parse_mode=None)
+        answer = await self._transport.reply(
+            trigger,
+            "Thinking...",
+            presentation="plain",
         )
         text = ""
         last_edited_source: str | None = None
@@ -961,7 +843,6 @@ class AIResponder:
                             answer,
                             event.summary,
                             wait=False,
-                            parse_mode=None,
                         )
                         if edited:
                             last_edited_source = None
@@ -980,7 +861,6 @@ class AIResponder:
                             answer,
                             cancelled,
                             wait=True,
-                            parse_mode=None,
                         )
                         return AnswerResult(
                             message=answer,
@@ -995,7 +875,6 @@ class AIResponder:
                             answer,
                             rate_limited,
                             wait=True,
-                            parse_mode=None,
                         )
                         return AnswerResult(
                             message=answer,
@@ -1018,7 +897,6 @@ class AIResponder:
                         answer,
                         final_text,
                         wait=True,
-                        parse_mode=None,
                     )
                     return AnswerResult(
                         message=answer,
@@ -1039,7 +917,6 @@ class AIResponder:
                 answer,
                 failure,
                 wait=True,
-                parse_mode=None,
             )
             return AnswerResult(message=answer, text=failure, succeeded=False)
 
@@ -1047,7 +924,7 @@ class AIResponder:
         return await self._gateway.cancel(run_id)
 
     @property
-    def transport(self) -> ChatTransport | None:
+    def transport(self) -> ChatTransport:
         return self._transport
 
     def _truncate(self, text: str) -> str:
@@ -1062,24 +939,11 @@ class AIResponder:
         *,
         wait: bool,
     ) -> bool:
-        if self._transport is not None:
-            return await self._transport.update(
-                answer,
-                text,
-                presentation="agent",
-                wait=wait,
-            )
-        if self._response_format == "rich_markdown":
-            return await self._edit_rich_markdown(answer, text, wait=wait)
-        rendered, entities = telegram_html.parse(text)
-        if not rendered.strip():
-            return False
-        return await self._edit_message(
+        return await self._transport.update(
             answer,
-            rendered,
+            text,
+            presentation="agent",
             wait=wait,
-            parse_mode=None,
-            formatting_entities=entities,
         )
 
     async def _edit_message(
@@ -1088,47 +952,13 @@ class AIResponder:
         text: str,
         *,
         wait: bool,
-        **kwargs: Any,
     ) -> bool:
-        if self._transport is not None:
-            return await self._transport.update(
-                answer,
-                text,
-                presentation="plain",
-                wait=wait,
-            )
-        return await self._edit_limiter.run(
-            lambda: answer.edit(text, **kwargs),
+        return await self._transport.update(
+            answer,
+            text,
+            presentation="plain",
             wait=wait,
         )
-
-    async def _edit_rich_markdown(
-        self,
-        answer: EditableMessage,
-        text: str,
-        *,
-        wait: bool,
-    ) -> bool:
-        if not text.strip().strip("*_~`#>|:-"):
-            return False
-        client = getattr(answer, "client", None)
-        get_input_chat = getattr(answer, "get_input_chat", None)
-        if client is None or not callable(get_input_chat):
-            raise RuntimeError("Telegram rich-message editing is unavailable")
-        peer = await get_input_chat()
-        if peer is None:
-            raise RuntimeError("Telegram rich-message peer is unavailable")
-
-        async def edit() -> None:
-            await client(
-                telegram_functions.messages.EditMessageRequest(
-                    peer=peer,
-                    id=answer.id,
-                    rich_message=telegram_types.InputRichMessageMarkdown(markdown=text),
-                )
-            )
-
-        return await self._edit_limiter.run(edit, wait=wait)
 
     def _log_failure(self, exc: Exception) -> None:
         if self._logger is not None:
@@ -1157,7 +987,6 @@ class PromptBuilder:
         system_prompt: str = AISettings.DEFAULT_SYSTEM_PROMPT,
         max_context_messages: int = 20,
         max_context_chars: int = 12_000,
-        response_format: TelegramResponseFormat = "regular_html",
         attachment_describer: AttachmentDescriber | None = None,
         identity_resolver: MessageIdentityResolver | None = None,
         mention_resolver: MessageMentionResolver | None = None,
@@ -1169,7 +998,7 @@ class PromptBuilder:
             raise ValueError("Context limits must be positive")
         if max_attachments < 0:
             raise ValueError("max_attachments cannot be negative")
-        self.system_prompt = _telegram_system_prompt(system_prompt, response_format)
+        self.system_prompt = system_prompt
         self.max_context_messages = max_context_messages
         self.max_context_chars = max_context_chars
         self.attachment_describer = attachment_describer

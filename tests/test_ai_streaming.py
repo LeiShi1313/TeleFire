@@ -19,6 +19,11 @@ from telefire.ai import (
     parse_memory_revision,
 )
 from telefire.plugins.base import command_registry
+from telefire.telegram.ai_transport import (
+    TelegramChatTransport,
+    select_telegram_response_format,
+    telegram_system_prompt,
+)
 import telefire.plugins.ai  # noqa: F401
 
 
@@ -82,6 +87,27 @@ class FakeGateway:
 
     async def cancel(self, run_id: str) -> bool:
         return True
+
+
+def make_telegram_responder(
+    gateway,
+    *,
+    edit_cadence=0,
+    clock=None,
+    response_format="regular_html",
+    **kwargs,
+):
+    transport_kwargs = {"edit_cadence": edit_cadence}
+    if clock is not None:
+        transport_kwargs["clock"] = clock
+    return AIResponder(
+        gateway,
+        transport=TelegramChatTransport(
+            response_format=response_format,
+            **transport_kwargs,
+        ),
+        **kwargs,
+    )
 
 
 class FakeStore:
@@ -233,7 +259,11 @@ def test_ai_command_is_registered_under_telegram():
 async def test_owner_gets_one_progressively_edited_answer():
     gateway = FakeGateway(["Hello", " ", "world"])
     times = iter([0.0, 1.0, 2.0, 3.0])
-    responder = AIResponder(gateway, edit_cadence=0.5, clock=lambda: next(times))
+    responder = make_telegram_responder(
+        gateway,
+        edit_cadence=0.5,
+        clock=lambda: next(times),
+    )
     handler = make_handler(owner_id=10, responder=responder)
     trigger = FakeMessage("/ai greet me")
 
@@ -257,9 +287,16 @@ async def test_edit_cadence_is_shared_across_answers(monkeypatch):
     async def fake_sleep(seconds):
         sleeps.append(seconds)
 
-    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "telefire.telegram.ai_transport.asyncio.sleep",
+        fake_sleep,
+    )
     gateway = FakeGateway(["answer"])
-    responder = AIResponder(gateway, edit_cadence=4, clock=lambda: 0.0)
+    responder = make_telegram_responder(
+        gateway,
+        edit_cadence=4,
+        clock=lambda: 0.0,
+    )
     first = FakeMessage("/ai first")
     second = FakeMessage("/ai second")
 
@@ -295,8 +332,11 @@ async def test_flood_wait_delays_final_edit_without_replacing_the_answer(monkeyp
             self.replies.append(answer)
             return answer
 
-    monkeypatch.setattr("telefire.ai.asyncio.sleep", fake_sleep)
-    responder = AIResponder(
+    monkeypatch.setattr(
+        "telefire.telegram.ai_transport.asyncio.sleep",
+        fake_sleep,
+    )
+    responder = make_telegram_responder(
         FakeGateway(["final answer"]),
         edit_cadence=0,
         clock=lambda: 0.0,
@@ -312,7 +352,9 @@ async def test_flood_wait_delays_final_edit_without_replacing_the_answer(monkeyp
 
 
 def test_prompt_builder_appends_the_regular_telegram_format_guard():
-    builder = PromptBuilder(system_prompt="Keep answers factual.")
+    builder = PromptBuilder(
+        system_prompt=telegram_system_prompt("Keep answers factual.")
+    )
 
     assert builder.system_prompt.startswith("Keep answers factual.")
     assert "Telegram regular-message HTML" in builder.system_prompt
@@ -324,8 +366,6 @@ def test_prompt_builder_appends_the_regular_telegram_format_guard():
 
 
 def test_response_format_switches_only_for_a_bot_rich_transport():
-    from telefire.ai import select_telegram_response_format
-
     assert (
         select_telegram_response_format(
             is_bot_account=False,
@@ -349,8 +389,10 @@ def test_response_format_switches_only_for_a_bot_rich_transport():
     )
 
     rich_builder = PromptBuilder(
-        system_prompt="Keep answers factual.",
-        response_format="rich_markdown",
+        system_prompt=telegram_system_prompt(
+            "Keep answers factual.",
+            "rich_markdown",
+        ),
     )
     assert "Telegram Bot API rich-message Markdown" in rich_builder.system_prompt
     assert "| Header 1 | Header 2 |" in rich_builder.system_prompt
@@ -381,7 +423,7 @@ async def test_bot_response_uses_telegram_rich_markdown_edit():
 
     formatted = "**Result**\n\n| Key | Value |\n|:----|:------|\n| Mode | Rich |"
     gateway = FakeGateway([formatted])
-    responder = AIResponder(
+    responder = make_telegram_responder(
         gateway,
         edit_cadence=0,
         response_format="rich_markdown",
@@ -408,7 +450,7 @@ async def test_streamed_html_is_sent_as_native_telegram_entities():
         "<pre>Team     Score\nNorway   1\nEngland  2</pre>"
     )
     gateway = FakeGateway([formatted])
-    responder = AIResponder(gateway, edit_cadence=0)
+    responder = make_telegram_responder(gateway)
     trigger = FakeMessage("/ai format this")
 
     result = await responder.answer(trigger, make_request("format this"))
@@ -431,7 +473,7 @@ async def test_streamed_html_is_sent_as_native_telegram_entities():
 @pytest.mark.asyncio
 async def test_streaming_waits_for_visible_text_when_an_html_tag_is_split():
     gateway = FakeGateway(["<b>", "Result", "</b>"])
-    responder = AIResponder(gateway, edit_cadence=0)
+    responder = make_telegram_responder(gateway)
     trigger = FakeMessage("/ai format this")
 
     result = await responder.answer(trigger, make_request("format this"))
@@ -451,7 +493,7 @@ async def test_unauthorized_trigger_is_silent_and_does_not_call_provider():
     gateway = FakeGateway(["must not be used"])
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai secret", sender_id=11)
 
@@ -465,7 +507,7 @@ async def test_owner_ai_requests_are_not_blocked_by_chat_scope():
     gateway = FakeGateway(["answer"])
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
         store=FakeStore(),
         prompt_builder=PromptBuilder(),
     )
@@ -482,7 +524,7 @@ async def test_empty_prompt_finishes_with_usage_without_calling_provider():
     gateway = FakeGateway(["must not be used"])
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai")
 
@@ -497,7 +539,7 @@ async def test_provider_failure_replaces_loading_message():
     gateway = FakeGateway(error=RuntimeError("provider secret detail"))
     handler = make_handler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=make_telegram_responder(gateway),
     )
     trigger = FakeMessage("/ai hello")
 
@@ -512,9 +554,8 @@ async def test_provider_failure_uses_standard_logging_format(caplog):
     import logging
 
     gateway = FakeGateway(error=RuntimeError("provider detail"))
-    responder = AIResponder(
+    responder = make_telegram_responder(
         gateway,
-        edit_cadence=0,
         logger=logging.getLogger("telefire-ai-test"),
     )
     trigger = FakeMessage("/ai hello")
@@ -527,7 +568,7 @@ async def test_provider_failure_uses_standard_logging_format(caplog):
 @pytest.mark.asyncio
 async def test_output_is_bounded_and_finalized():
     gateway = FakeGateway(["abcdefghijk"])
-    responder = AIResponder(gateway, edit_cadence=0, max_output_chars=10)
+    responder = make_telegram_responder(gateway, max_output_chars=10)
     trigger = FakeMessage("/ai long")
 
     await responder.answer(trigger, make_request("long"))

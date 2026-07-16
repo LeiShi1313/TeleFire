@@ -149,7 +149,7 @@ def make_handler(gateway, store=None, **builder_options):
     return (
         AIConversationHandler(
             owner_id=10,
-            responder=AIResponder(gateway, edit_cadence=0),
+            responder=AIResponder(gateway),
             store=store,
             prompt_builder=PromptBuilder(**builder_options),
         ),

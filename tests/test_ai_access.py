@@ -114,7 +114,7 @@ async def make_handler(path, gateway, *, clock=lambda: 100.0, cooldown=30.0):
     limiter = AIRateLimiter(store, cooldown_seconds=cooldown, clock=clock)
     handler = AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=AIResponder(gateway),
         store=store,
         prompt_builder=PromptBuilder(),
         rate_limiter=limiter,

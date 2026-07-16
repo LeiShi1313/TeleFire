@@ -488,7 +488,7 @@ def make_handler(
     store = store or FakeStore(allowed=allowed)
     return AIConversationHandler(
         owner_id=10,
-        responder=AIResponder(gateway, edit_cadence=0),
+        responder=AIResponder(gateway),
         store=store,
         prompt_builder=PromptBuilder(
             attachment_describer=attachment_describer,

@@ -16,11 +16,9 @@ from telefire.ai import (
     AIStateRepository,
     PiAgentGateway,
     PromptBuilder,
-    TelegramEditLimiter,
     TelegramMemoryScopeTargetResolver,
     TelegramMessageIdentityResolver,
     TelegramMessageMentionResolver,
-    select_telegram_response_format,
 )
 from telefire.ai_attachments import TelegramAttachmentDescriber
 from telefire.ai_dream import (
@@ -35,6 +33,12 @@ from telefire.ai_dream import (
 from telefire.ai_memory import HindsightMemoryClient
 from telefire.plugins.base import PluginMount
 from telefire.telegram import TelegramCommand
+from telefire.telegram.ai_transport import (
+    TelegramChatTransport,
+    TelegramEditLimiter,
+    select_telegram_response_format,
+    telegram_system_prompt,
+)
 
 
 class _SavedMemoryForwardSourceUnavailable(RuntimeError):
@@ -205,21 +209,27 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             is_bot_account=bool(getattr(owner, "bot", False)),
             rich_messages_available=True,
         )
+        transport = TelegramChatTransport(
+            response_format=response_format,
+            edit_limiter=self._edit_limiter,
+            logger=self.logger,
+        )
         responder = AIResponder(
             self._gateway,
             max_output_chars=self._settings.max_output_chars,
-            response_format=response_format,
-            edit_limiter=self._edit_limiter,
+            transport=transport,
             logger=self.logger,
         )
         self._responder = responder
         await self._store.connect()
         history_source = TelegramHistorySource(self.client)
         prompt_builder = PromptBuilder(
-            system_prompt=self._settings.system_prompt,
+            system_prompt=telegram_system_prompt(
+                self._settings.system_prompt,
+                response_format,
+            ),
             max_context_messages=self._settings.max_context_messages,
             max_context_chars=self._settings.max_context_chars,
-            response_format=response_format,
             attachment_describer=TelegramAttachmentDescriber(
                 self._gateway,
                 logger=self.logger,
@@ -232,6 +242,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
                 logger=self.logger,
             ),
             history_source=history_source,
+            transport=transport,
         )
         dream_runner = (
             TelegramDreamScanner(
@@ -276,6 +287,7 @@ class TelegramAI(TelegramCommand, metaclass=PluginMount):
             memory_command_delete_delay=(
                 self._settings.memory_command_delete_delay
             ),
+            transport=transport,
             logger=self.logger,
         )
         self.client.add_event_handler(self._on_message, events.NewMessage())

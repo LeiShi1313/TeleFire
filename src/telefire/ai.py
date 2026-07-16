@@ -294,9 +294,14 @@ class ReplyTarget(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class MessageIdentity:
+    subject_id: str | None = None
     subject_display_name: str | None = None
     scope_display_name: str | None = None
     is_human: bool = True
+
+    @property
+    def is_memory_source(self) -> bool:
+        return self.is_human or self.subject_id is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,13 +336,27 @@ class TelegramMessageIdentityResolver:
             self._load_entity(message, "get_sender"),
             self._load_entity(message, "get_chat"),
         )
+        is_human = (
+            isinstance(sender, telegram_types.User)
+            and not bool(getattr(sender, "bot", False))
+        )
+        is_broadcast_channel_post = (
+            isinstance(sender, telegram_types.Channel)
+            and isinstance(chat, telegram_types.Channel)
+            and bool(getattr(chat, "broadcast", False))
+            and sender.id == chat.id
+        )
         return MessageIdentity(
+            subject_id=(
+                _telegram_subject_id(sender.id)
+                if is_human
+                else _telegram_channel_subject_id(sender.id)
+                if is_broadcast_channel_post
+                else None
+            ),
             subject_display_name=_telegram_display_name(sender),
             scope_display_name=_telegram_display_name(chat),
-            is_human=(
-                isinstance(sender, telegram_types.User)
-                and not bool(getattr(sender, "bot", False))
-            ),
+            is_human=is_human,
         )
 
     async def _load_entity(self, message: ReplyTarget, method_name: str) -> Any | None:
@@ -1169,7 +1188,7 @@ class PromptBuilder:
                 if (
                     message.sender_id is not None
                     and observation_text
-                    and message_identity.is_human
+                    and message_identity.is_memory_source
                 ):
                     observation = HumanObservation(
                         message_id=message.id,
@@ -1246,7 +1265,13 @@ class PromptBuilder:
                 f"context={','.join(membership)}",
             ]
             if message.sender_id is not None:
-                attributes.append(f"actor_id=telegram:user:{message.sender_id}")
+                attributes.append(
+                    "actor_id="
+                    + (
+                        message.identity.subject_id
+                        or _telegram_subject_id(message.sender_id)
+                    )
+                )
             if message.identity.subject_display_name:
                 attributes.append(
                     "actor_label="
@@ -2392,7 +2417,7 @@ class AIConversationHandler:
                         authored_prompt,
                         current_attachment,
                     )
-                    if current_observation and current_identity.is_human:
+                    if current_observation and current_identity.is_memory_source:
                         retained_observations.append(
                             HumanObservation(
                                 message_id=message.id,
@@ -2705,22 +2730,28 @@ class AIConversationHandler:
     ) -> AgentMemoryTarget | None:
         if self._memory is None:
             return None
-        participants: dict[int, str | None] = {
-            requester_id: requester_identity.subject_display_name
+        participants: dict[str, str | None] = {
+            _telegram_subject_id(requester_id): requester_identity.subject_display_name
         }
         for observation in observations:
+            subject_id = (
+                observation.identity.subject_id
+                or _telegram_subject_id(observation.sender_id)
+            )
             display_name = observation.identity.subject_display_name
-            if observation.sender_id not in participants or display_name:
-                participants[observation.sender_id] = display_name
+            if subject_id not in participants or display_name:
+                participants[subject_id] = display_name
             for mention in observation.mentioned_users:
-                if mention.user_id not in participants or mention.display_name:
-                    participants[mention.user_id] = mention.display_name
+                subject_id = _telegram_subject_id(mention.user_id)
+                if subject_id not in participants or mention.display_name:
+                    participants[subject_id] = mention.display_name
         for mention in current_mentions:
-            if mention.user_id not in participants or mention.display_name:
-                participants[mention.user_id] = mention.display_name
+            subject_id = _telegram_subject_id(mention.user_id)
+            if subject_id not in participants or mention.display_name:
+                participants[subject_id] = mention.display_name
         anchors = tuple(
             AgentIdentityAnchor(
-                identity=_telegram_subject_id(subject_id),
+                identity=subject_id,
                 label=display_name,
             )
             for subject_id, display_name in list(participants.items())[
@@ -3076,6 +3107,10 @@ def _telegram_subject_id(user_id: int) -> str:
     return f"telegram:user:{user_id}"
 
 
+def _telegram_channel_subject_id(channel_id: int) -> str:
+    return f"telegram:channel:{channel_id}"
+
+
 def _telegram_scope_id(chat_id: int) -> str:
     return f"telegram:chat:{chat_id}"
 
@@ -3123,7 +3158,10 @@ def _telegram_memory_episode(
                     chat_id,
                     observation.message_id,
                 ),
-                actor_id=_telegram_subject_id(observation.sender_id),
+                actor_id=(
+                    observation.identity.subject_id
+                    or _telegram_subject_id(observation.sender_id)
+                ),
                 actor_display_name=observation.identity.subject_display_name,
                 occurred_at=observation.occurred_at,
                 text=observation.text,

@@ -1007,7 +1007,7 @@ class TelegramDreamScanner:
                 if not observation_text:
                     return None
                 identity = await identity_for(message)
-                if not identity.is_human:
+                if not identity.is_memory_source:
                     return None
                 mentioned_users = (
                     await self._prompt_builder.resolve_mentions(message)

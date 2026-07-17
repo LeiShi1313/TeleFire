@@ -7,6 +7,8 @@ services:
         HINDSIGHT_CONTROL_PLANE_IMAGE: ${HINDSIGHT_CONTROL_PLANE_IMAGE:-telefire-hindsight-control-plane:0.8.4-bank-name.1}
     image: telefire-hindsight:0.8.4-bank-name.1-hardened-r1
     container_name: memory-api
+    # pg0 uses 512 MB maintenance_work_mem while creating vector indexes.
+    shm_size: 1gb
     environment:
       HINDSIGHT_API_LLM_PROVIDER: openai
       HINDSIGHT_API_LLM_API_KEY: ${MEMORY_LLM_API_KEY}

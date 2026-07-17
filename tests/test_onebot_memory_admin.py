@@ -193,3 +193,28 @@ def test_onebot_quiet_dream_enable_prints_admin_result(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert '"scope_id": "qq:group:694769138"' in output
     assert '"display_name": "BetterGI v2"' in output
+
+
+def test_onebot_memory_cli_uses_configured_publish_address(monkeypatch):
+    captured = {}
+
+    class Client:
+        def __init__(self, base_url, **kwargs):
+            captured["base_url"] = base_url
+            captured.update(kwargs)
+
+    monkeypatch.setenv("TELEFIRE_ONEBOT_TOKEN", "secret")
+    monkeypatch.setenv("TELEFIRE_ONEBOT_SELF_ID", "329787230")
+    monkeypatch.setenv("TELEFIRE_ONEBOT_PUBLISH_HOST", "100.99.247.60")
+    monkeypatch.setenv("TELEFIRE_ONEBOT_PUBLISH_PORT", "18867")
+    monkeypatch.delenv("TELEFIRE_ONEBOT_ADMIN_URL", raising=False)
+    monkeypatch.setattr(onebot_plugin, "OneBotMemoryAdminClient", Client)
+
+    onebot_plugin._onebot_memory_admin_client()
+
+    assert captured == {
+        "base_url": "http://100.99.247.60:18867",
+        "token": "secret",
+        "self_id": 329787230,
+        "timeout": 900,
+    }

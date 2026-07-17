@@ -401,7 +401,13 @@ def _onebot_memory_admin_client(
             raise ValueError(
                 "TELEFIRE_ONEBOT_PUBLISH_PORT must be between 1 and 65535"
             )
-        resolved_url = f"http://127.0.0.1:{publish_port}"
+        publish_host = os.environ.get(
+            "TELEFIRE_ONEBOT_PUBLISH_HOST",
+            "127.0.0.1",
+        ).strip() or "127.0.0.1"
+        if publish_host == "0.0.0.0":
+            publish_host = "127.0.0.1"
+        resolved_url = f"http://{publish_host}:{publish_port}"
     return OneBotMemoryAdminClient(
         resolved_url,
         token=runtime.token,

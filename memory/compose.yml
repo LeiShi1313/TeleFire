@@ -3,7 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.hindsight
-    image: telefire-hindsight:0.8.4-hardened-r1
+      args:
+        HINDSIGHT_CONTROL_PLANE_IMAGE: ${HINDSIGHT_CONTROL_PLANE_IMAGE:-telefire-hindsight-control-plane:0.8.4-bank-name.1}
+    image: telefire-hindsight:0.8.4-bank-name.1-hardened-r1
     container_name: memory-api
     environment:
       HINDSIGHT_API_LLM_PROVIDER: openai
@@ -51,41 +53,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
-
-  memory-inspector:
-    build:
-      context: .
-    container_name: memory-inspector
-    command: ["--host", "0.0.0.0", "--port", "8765"]
-    depends_on:
-      memory-api:
-        condition: service_healthy
-    environment:
-      MEMORY_API_URL: http://memory-api:8888
-      MEMORY_API_TIMEOUT: ${MEMORY_API_TIMEOUT:-20}
-      VIRTUAL_HOST: memory.telefire.localhost
-      VIRTUAL_PORT: "8765"
-    expose:
-      - "8765"
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-    pids_limit: 128
-    restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=2).read()
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
 
 volumes:
   memory-data:

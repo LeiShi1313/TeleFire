@@ -190,8 +190,8 @@ uv run telefire telegram search_messages --chat=coder_ot --query='keyword'
 
 The local deployment is split into four independently owned Compose projects:
 
-- `memory/compose.yml` runs Hindsight and the read-only Memory Inspector. It has
-  no Telefire or Telegram dependency.
+- `memory/compose.yml` runs Hindsight with a locally built Control Plane. It has
+  no Telefire, Telegram, or QQ dependency.
 - `agent/compose.yml` runs the Pi service and Agent Playground. It depends only
   on the Memory Stack HTTP API.
 - `docker-compose.yml` runs the Telegram and QQ/OneBot adapters. They call Pi
@@ -224,6 +224,15 @@ memory commands remain visible and defaults to 3 seconds.
 
 ### Docker compose
 
+Clone Hindsight once, then build the pinned v0.8.4 Control Plane with the local
+bank-name patch. The source clone stays unchanged; the build script exports the
+exact upstream revision into a temporary build directory:
+
+```bash
+gh repo clone vectorize-io/hindsight "$HOME/workspace/cloned/hindsight"
+./memory/build-hindsight-control-plane.sh "$HOME/workspace/cloned/hindsight"
+```
+
 Start the Memory Stack first, then the Agent Stack, Telefire, and the dashboard
 proxy:
 
@@ -240,9 +249,8 @@ private data:
 - Memory API: `http://127.0.0.1:18888`
 - Private Pi API: `http://127.0.0.1:18790`
 
-All dashboards share port `18865` and are selected by hostname:
+Both dashboards share port `18865` and are selected by hostname:
 
-- Memory Inspector: `http://memory.telefire.localhost:18865`
 - Native Hindsight UI: `http://hindsight.telefire.localhost:18865`
 - Agent sessions and Playground: `http://sessions.telefire.localhost:18865`
 
@@ -477,7 +485,7 @@ docker run --rm \
   alpine sh -c 'cp -a /source/. /archive/'
 docker run --rm -v telefire-legacy-zvec:/archive:ro \
   alpine sh -c 'test -n "$(find /archive -mindepth 1 -print -quit)"'
-docker inspect telefire-ai pi-agent memory-api memory-inspector \
+docker inspect telefire-ai pi-agent memory-api \
   --format '{{range .Mounts}}{{.Name}} {{end}}'
 ```
 

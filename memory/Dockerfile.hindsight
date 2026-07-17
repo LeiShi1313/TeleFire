@@ -1,8 +1,17 @@
+ARG HINDSIGHT_CONTROL_PLANE_IMAGE=telefire-hindsight-control-plane:0.8.4-bank-name.1
+FROM ${HINDSIGHT_CONTROL_PLANE_IMAGE} AS control-plane
+
 FROM ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a560735aaf6f314e4b63c36c73159742dfa1a7
 
 USER root
 
 COPY patches/408d7c34-observation-history-fk-race.patch /tmp/
+
+RUN rm -rf /app/control-plane
+COPY --from=control-plane --chown=hindsight:hindsight /app/control-plane /app/control-plane
+
+LABEL io.telefire.hindsight.control-plane-source-revision="92f433c90409636804c0797071a4abbe141f76c5" \
+      io.telefire.hindsight.control-plane-patch="bee6f5d114c09a7bf51a2ef1d5357e0bdf0d9c2d"
 
 # Hindsight runs from its bundled virtualenv and invokes Node directly. Remove
 # package managers left by the upstream build, apply available OS fixes, and

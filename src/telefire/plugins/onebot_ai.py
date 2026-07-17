@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from collections import OrderedDict
@@ -26,6 +27,7 @@ from telefire.ai_dream import (
     DreamSettings,
 )
 from telefire.ai_memory import HindsightMemoryClient
+from telefire.memory_admin import MemoryAdminService
 from telefire.onebot.ai import (
     QQ_IDENTITY_CODEC,
     OneBotChatTransport,
@@ -39,6 +41,10 @@ from telefire.onebot.ai import (
     onebot_system_prompt,
 )
 from telefire.onebot.client import OneBotReverseWebSocket
+from telefire.onebot.memory_admin import (
+    OneBotMemoryAdminClient,
+    mount_onebot_memory_admin,
+)
 from telefire.onebot.message import OneBotMessage, OneBotMessageError
 from telefire.plugins.base import PluginMount
 from telefire.runtime import build_logger
@@ -194,6 +200,15 @@ class OneBotAI(metaclass=PluginMount):
             else None
         )
         if dream_runner is not None:
+            mount_onebot_memory_admin(
+                self._bridge,
+                MemoryAdminService(
+                    store=self._store,
+                    dream_runner=dream_runner,
+                    identity_codec=QQ_IDENTITY_CODEC,
+                ),
+                display_name_resolver=self._directory.scope_name,
+            )
             self._dream_scheduler = DreamScheduler(
                 scanner=dream_runner,
                 store=self._store,
@@ -280,6 +295,119 @@ class OneBotAI(metaclass=PluginMount):
                 message.chat_id,
                 message.id,
             )
+
+
+class _OneBotMemoryAdminCommand:
+    def __init__(self, admin_url: str = "", timeout: float = 900) -> None:
+        self._admin_url = admin_url
+        self._timeout = timeout
+
+    def _client(self) -> OneBotMemoryAdminClient:
+        return _onebot_memory_admin_client(
+            admin_url=self._admin_url,
+            timeout=self._timeout,
+        )
+
+    @staticmethod
+    def _print(result: dict[str, Any]) -> None:
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+class OneBotMemoryDreamEnable(
+    _OneBotMemoryAdminCommand,
+    metaclass=PluginMount,
+):
+    command_group = "onebot.memory"
+    command_name = "dream-enable"
+
+    def __call__(self, group_id: int, display_name: str = "") -> None:
+        """Quietly enable hourly Dream memory for a QQ group."""
+        self._print(
+            self._client().set_dream(
+                group_id,
+                enabled=True,
+                display_name=display_name.strip() or None,
+            )
+        )
+
+
+class OneBotMemoryDreamDisable(
+    _OneBotMemoryAdminCommand,
+    metaclass=PluginMount,
+):
+    command_group = "onebot.memory"
+    command_name = "dream-disable"
+
+    def __call__(self, group_id: int) -> None:
+        """Quietly disable hourly Dream memory for a QQ group."""
+        self._print(
+            self._client().set_dream(
+                group_id,
+                enabled=False,
+            )
+        )
+
+
+class OneBotMemoryStatus(
+    _OneBotMemoryAdminCommand,
+    metaclass=PluginMount,
+):
+    command_group = "onebot.memory"
+    command_name = "status"
+
+    def __call__(self, group_id: int) -> None:
+        """Show the quiet memory state for a QQ group."""
+        self._print(self._client().status(group_id))
+
+
+class OneBotMemoryBackfill(
+    _OneBotMemoryAdminCommand,
+    metaclass=PluginMount,
+):
+    command_group = "onebot.memory"
+    command_name = "backfill"
+
+    def __call__(
+        self,
+        group_id: int,
+        value: int,
+        mode: str = "messages",
+    ) -> None:
+        """Quietly backfill a bounded message count or day window."""
+        self._print(
+            self._client().backfill(
+                group_id,
+                mode=mode,
+                value=value,
+            )
+        )
+
+
+def _onebot_memory_admin_client(
+    *,
+    admin_url: str = "",
+    timeout: float = 900,
+) -> OneBotMemoryAdminClient:
+    runtime = OneBotRuntimeSettings.from_env()
+    resolved_url = admin_url.strip() or os.environ.get(
+        "TELEFIRE_ONEBOT_ADMIN_URL",
+        "",
+    ).strip()
+    if not resolved_url:
+        publish_port = _positive_int(
+            os.environ.get("TELEFIRE_ONEBOT_PUBLISH_PORT", "18867")
+        )
+        if publish_port is None or publish_port > 65_535:
+            raise ValueError(
+                "TELEFIRE_ONEBOT_PUBLISH_PORT must be between 1 and 65535"
+            )
+        resolved_url = f"http://127.0.0.1:{publish_port}"
+    return OneBotMemoryAdminClient(
+        resolved_url,
+        token=runtime.token,
+        self_id=runtime.self_id,
+        timeout=timeout,
+    )
 
 
 def _positive_int(value: Any) -> int | None:

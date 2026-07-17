@@ -11,6 +11,7 @@ from aiohttp import WSMsgType, web
 
 
 OneBotEventHandler = Callable[[dict[str, Any]], Awaitable[None]]
+OneBotHttpHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
 
 class OneBotActionError(RuntimeError):
@@ -66,6 +67,19 @@ class OneBotReverseWebSocket:
 
     def set_event_handler(self, handler: OneBotEventHandler) -> None:
         self._event_handler = handler
+
+    def add_authenticated_route(
+        self,
+        method: str,
+        path: str,
+        handler: OneBotHttpHandler,
+    ) -> None:
+        async def authenticated(request: web.Request) -> web.StreamResponse:
+            if not self._is_authenticated(request):
+                raise web.HTTPUnauthorized()
+            return await handler(request)
+
+        self.application.router.add_route(method, path, authenticated)
 
     async def start(self, host: str, port: int) -> None:
         if self._runner is not None:
@@ -141,13 +155,7 @@ class OneBotReverseWebSocket:
         )
 
     async def _handle_websocket(self, request: web.Request) -> web.StreamResponse:
-        authorization = request.headers.get("Authorization", "")
-        supplied_token = authorization.removeprefix("Bearer ")
-        supplied_self_id = request.headers.get("X-Self-ID", "")
-        if not (
-            hmac.compare_digest(supplied_token, self._token)
-            and hmac.compare_digest(supplied_self_id, str(self._self_id))
-        ):
+        if not self._is_authenticated(request):
             raise web.HTTPUnauthorized()
 
         websocket = web.WebSocketResponse(
@@ -179,6 +187,15 @@ class OneBotReverseWebSocket:
                     self._fail_pending(ConnectionError("NapCat disconnected"))
             self._log("warning", "NapCat OneBot connection closed")
         return websocket
+
+    def _is_authenticated(self, request: web.Request) -> bool:
+        authorization = request.headers.get("Authorization", "")
+        supplied_token = authorization.removeprefix("Bearer ")
+        supplied_self_id = request.headers.get("X-Self-ID", "")
+        return hmac.compare_digest(
+            supplied_token,
+            self._token,
+        ) and hmac.compare_digest(supplied_self_id, str(self._self_id))
 
     def _handle_payload(self, raw: str) -> None:
         try:

@@ -304,6 +304,22 @@ docker compose --env-file .env up -d --build onebot-ai
 curl http://127.0.0.1:${TELEFIRE_ONEBOT_PUBLISH_PORT:-18867}/healthz
 ```
 
+Memory administration can be run quietly from the local CLI. These commands use
+the running OneBot adapter and print JSON locally; they do not send or delete QQ
+messages:
+
+```bash
+uv run telefire onebot memory dream-enable 694769138 "BetterGI v2"
+uv run telefire onebot memory status 694769138
+uv run telefire onebot memory backfill 694769138 500
+uv run telefire onebot memory dream-disable 694769138
+```
+
+When running the command inside Compose, use
+`docker compose exec onebot-ai python -m telefire.cli ...` with the same
+arguments after `telefire`. Backfill defaults to message-count mode; pass
+`--mode=days` for a bounded day window.
+
 The standalone Ollama Compose stack joins the external `ollama-embedding` network.
 Point Hindsight at that service in `memory/.env`:
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import aiohttp
 import pytest
@@ -11,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from telefire.onebot.ai import (
     QQ_IDENTITY_CODEC,
     OneBotChatTransport,
+    OneBotDirectorySourceResolver,
     OneBotHistorySource,
     OneBotMessageIdentityResolver,
     OneBotMessageMentionResolver,
@@ -66,8 +66,7 @@ def group_event(
             "card": "Alice Card",
             "role": "member",
         },
-        "message": segments
-        or [{"type": "text", "data": {"text": text}}],
+        "message": segments or [{"type": "text", "data": {"text": text}}],
         "raw_message": text,
     }
 
@@ -107,6 +106,47 @@ def test_qq_identity_codec_separates_group_and_private_scopes():
     assert QQ_IDENTITY_CODEC.message_source_id(-42, 9) == "qq:message:private:42:9"
 
 
+@pytest.mark.asyncio
+async def test_qq_directory_resolves_current_and_numeric_groups():
+    client = RecordingActionClient(
+        responses=[
+            {"group_id": 700, "group_name": "Dog Food Filter"},
+            {"group_id": 800, "group_name": "Arch Linux"},
+        ]
+    )
+    resolver = OneBotDirectorySourceResolver(client)
+    message = OneBotMessage.from_payload(
+        group_event(group_id=700),
+        action_client=client,
+    )
+
+    current = await resolver.resolve_publication(message, "群内筛选信息")
+    explicit = await resolver.resolve_publication(message, "800 Linux 中文群")
+
+    assert current.source.bank_id == "qq:group:700"
+    assert current.source.display_name == "Dog Food Filter"
+    assert current.description == "群内筛选信息"
+    assert explicit.source.bank_id == "qq:group:800"
+    assert explicit.source.display_name == "Arch Linux"
+    assert explicit.description == "Linux 中文群"
+    assert [call[0] for call in client.calls] == ["get_group_info", "get_group_info"]
+
+
+@pytest.mark.asyncio
+async def test_qq_directory_rejects_private_and_nonnumeric_selectors():
+    client = RecordingActionClient()
+    resolver = OneBotDirectorySourceResolver(client)
+    private = OneBotMessage.from_payload(
+        private_event(),
+        action_client=client,
+    )
+
+    with pytest.raises(ValueError, match="QQ group"):
+        await resolver.resolve_publication(private, "")
+    with pytest.raises(ValueError, match="numeric QQ group"):
+        await resolver.resolve_bank(private, "@Seele_Leaks")
+
+
 def test_onebot_message_normalizes_reply_mentions_and_attachment_metadata():
     action_client = RecordingActionClient()
     payload = group_event(
@@ -143,9 +183,7 @@ def test_onebot_message_normalizes_reply_mentions_and_attachment_metadata():
 
 @pytest.mark.asyncio
 async def test_onebot_attachment_bytes_are_fetched_on_demand_only():
-    action_client = RecordingActionClient(
-        responses=[{"base64": "aGVsbG8="}]
-    )
+    action_client = RecordingActionClient(responses=[{"base64": "aGVsbG8="}])
     message = OneBotMessage.from_payload(
         group_event(
             segments=[
@@ -497,9 +535,7 @@ async def test_reverse_websocket_authenticates_and_correlates_actions():
             await websocket.send_json(group_event())
             await asyncio.wait_for(received.wait(), timeout=1)
 
-            pending = asyncio.create_task(
-                bridge.call("get_status", {}, timeout=1)
-            )
+            pending = asyncio.create_task(bridge.call("get_status", {}, timeout=1))
             action = await websocket.receive_json(timeout=1)
             await websocket.send_json(
                 {

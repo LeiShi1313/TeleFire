@@ -352,9 +352,7 @@ def test_shared_ai_module_has_no_telegram_adapter_imports():
         for alias in node.names
     }
     imported.update(
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
+        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     )
 
     assert not any(
@@ -395,7 +393,7 @@ async def test_memory_coordinates_follow_the_injected_chat_identity_codec():
 
     memory = gateway.requests[0].memory
     assert memory is not None
-    assert memory.scope_id == "qq:group:7"
+    assert memory.primary_bank_id == "qq:group:7"
     assert [anchor.identity for anchor in memory.anchors] == ["qq:user:42"]
     assert store.saved[0].scope_id == "qq:group:7"
     assert store.saved[0].requester_id == "qq:user:42"

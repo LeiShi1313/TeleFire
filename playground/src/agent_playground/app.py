@@ -241,7 +241,14 @@ class PlaygroundData:
         }
         if memory is not None:
             pi_request["memory"] = {
-                "scopeId": bank_id,
+                "primaryBankId": bank_id,
+                "requester": {
+                    "id": "playground:user:owner",
+                    "label": "Playground owner",
+                    "owner": True,
+                },
+                "grantedBankIds": [],
+                "participants": [],
                 "anchors": [],
             }
             pi_request["includeMemorySnapshot"] = True
@@ -340,9 +347,7 @@ class PlaygroundData:
     async def run_audit(self, run_id: str) -> dict[str, Any]:
         if not _RUN_ID_RE.fullmatch(run_id):
             raise InvalidRequest("Invalid run identity")
-        payload = await self._pi_json(
-            "GET", f"/v1/runs/{quote(run_id, safe='')}/audit"
-        )
+        payload = await self._pi_json("GET", f"/v1/runs/{quote(run_id, safe='')}/audit")
         return _parse_run_audit(payload, run_id)
 
     async def _pi_json(
@@ -533,7 +538,11 @@ def _parse_session_detail(
         raise UpstreamUnavailable("Pi agent returned mismatched history")
     entries = payload.get("entries")
     header = payload.get("header")
-    if not isinstance(entries, list) or len(entries) > 50_000 or not isinstance(header, dict):
+    if (
+        not isinstance(entries, list)
+        or len(entries) > 50_000
+        or not isinstance(header, dict)
+    ):
         raise UpstreamUnavailable("Pi agent returned malformed history")
     _validate_json_tree(header)
     _validate_json_tree(entries)
@@ -582,17 +591,13 @@ def _parse_audit_page(payload: dict[str, Any]) -> dict[str, Any]:
         items.append(
             {
                 "runId": value["runId"],
-                "sessionId": _history_identifier(
-                    value.get("sessionId"), optional=True
-                ),
+                "sessionId": _history_identifier(value.get("sessionId"), optional=True),
                 "entryId": _history_identifier(value.get("entryId"), optional=True),
                 "status": status,
                 "startedAt": _optional_history_string(value, "startedAt", 64),
                 "finishedAt": _optional_history_string(value, "finishedAt", 64),
                 "prompt": _optional_history_string(value, "prompt", 300) or "",
-                "memoryScopeId": _optional_history_string(
-                    value, "memoryScopeId", 512
-                ),
+                "memoryScopeId": _optional_history_string(value, "memoryScopeId", 512),
                 "eventCount": event_count,
             }
         )
@@ -736,17 +741,16 @@ def _parse_pi_event(raw: bytes) -> dict[str, Any]:
     if not isinstance(event_type, str):
         raise UpstreamUnavailable("Pi agent returned malformed events")
     if event_type == "memory_snapshot":
-        scope_id = value.get("scopeId")
+        primary_bank_id = value.get("primaryBankId")
         queries = value.get("queries")
         memories = value.get("memories")
         if (
-            not isinstance(scope_id, str)
-            or not _BANK_RE.fullmatch(scope_id)
+            not isinstance(primary_bank_id, str)
+            or not _BANK_RE.fullmatch(primary_bank_id)
             or not isinstance(queries, list)
             or len(queries) > 2
             or not all(
-                isinstance(query, str) and 1 <= len(query) <= 8_000
-                for query in queries
+                isinstance(query, str) and 1 <= len(query) <= 8_000 for query in queries
             )
             or not isinstance(memories, list)
             or len(memories) > 50
@@ -754,7 +758,7 @@ def _parse_pi_event(raw: bytes) -> dict[str, Any]:
             raise UpstreamUnavailable("Pi agent returned malformed events")
         return {
             "type": "memory_snapshot",
-            "scopeId": scope_id,
+            "primaryBankId": primary_bank_id,
             "queries": queries,
             "memories": [_parse_snapshot_memory(item) for item in memories],
         }
@@ -787,7 +791,9 @@ def _parse_snapshot_memory(value: Any) -> dict[str, Any]:
         or not 1 <= len(text) <= 16_000
         or not isinstance(entities, list)
         or len(entities) > 100
-        or not all(isinstance(entity, str) and len(entity) <= 256 for entity in entities)
+        or not all(
+            isinstance(entity, str) and len(entity) <= 256 for entity in entities
+        )
     ):
         raise UpstreamUnavailable("Pi agent returned malformed events")
     result: dict[str, Any] = {
@@ -946,7 +952,7 @@ async def _runs(request: web.Request) -> web.StreamResponse:
         await _write_event(response, prepared.event)
         async for event in request.app[DATA_KEY].stream(prepared):
             await _write_event(response, event)
-    except ConnectionError, asyncio.CancelledError:
+    except (ConnectionError, asyncio.CancelledError):
         raise
     except Exception:
         try:
@@ -978,9 +984,7 @@ async def _cancel(request: web.Request) -> web.Response:
         return _error_response(502, "AGENT_UNAVAILABLE", "Agent unavailable")
 
 
-def _history_query(
-    request: web.Request, *, allowed: set[str]
-) -> dict[str, str]:
+def _history_query(request: web.Request, *, allowed: set[str]) -> dict[str, str]:
     if any(key not in allowed for key in request.query):
         raise InvalidRequest("Invalid history query")
     values: dict[str, str] = {}
@@ -1023,7 +1027,9 @@ async def _sessions(request: web.Request) -> web.Response:
     except InvalidRequest as exc:
         return _error_response(400, "INVALID_REQUEST", str(exc))
     except Exception:
-        return _error_response(502, "HISTORY_UNAVAILABLE", "Session history unavailable")
+        return _error_response(
+            502, "HISTORY_UNAVAILABLE", "Session history unavailable"
+        )
 
 
 async def _session(request: web.Request) -> web.Response:
@@ -1036,14 +1042,14 @@ async def _session(request: web.Request) -> web.Response:
     except UpstreamNotFound:
         return _error_response(404, "SESSION_NOT_FOUND", "Session not found")
     except Exception:
-        return _error_response(502, "HISTORY_UNAVAILABLE", "Session history unavailable")
+        return _error_response(
+            502, "HISTORY_UNAVAILABLE", "Session history unavailable"
+        )
 
 
 async def _audits(request: web.Request) -> web.Response:
     try:
-        query = _history_query(
-            request, allowed={"limit", "cursor", "sessionId"}
-        )
+        query = _history_query(request, allowed={"limit", "cursor", "sessionId"})
         cursor = query.get("cursor")
         session_id = query.get("sessionId")
         if cursor is not None and not _RUN_ID_RE.fullmatch(cursor):

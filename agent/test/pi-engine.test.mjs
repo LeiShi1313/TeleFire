@@ -10,6 +10,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   PiEngine,
   buildRunPrompt,
+  continuationAccessWarning,
   toolNamesForPolicy,
 } from "../src/pi-engine.mjs";
 
@@ -150,6 +151,17 @@ function request(runId, overrides = {}) {
   };
 }
 
+function memoryTarget(overrides = {}) {
+  return {
+    primaryBankId: "workspace:engineering",
+    requester: { id: "chat:user:alice", label: "Alice", owner: false },
+    grantedBankIds: [],
+    participants: [],
+    anchors: [],
+    ...overrides,
+  };
+}
+
 async function fixture(handler, overrides = {}) {
   const provider = await fakeProvider(handler);
   const root = await mkdtemp(join(tmpdir(), "telefire-pi-test-"));
@@ -251,6 +263,9 @@ test("owns initial memory retrieval and injects recalled evidence", async () => 
       memoryUrl: "http://memory.internal:8888",
       memoryFetch: async (url, options) => {
         recalls.push({ url, body: JSON.parse(options.body) });
+        if (url.includes("system%3Aknowledge-directory")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
         return new Response(
           JSON.stringify({
             results: [
@@ -275,10 +290,9 @@ test("owns initial memory retrieval and injects recalled evidence", async () => 
       request("44444444-4444-4444-8444-444444444444", {
         prompt: "What did Richard say?",
         context: [{ kind: "reference", text: "A telecom discussion." }],
-        memory: {
-          scopeId: "workspace:engineering",
+        memory: memoryTarget({
           anchors: [{ id: "person:alice", label: "Alice" }],
-        },
+        }),
         includeMemorySnapshot: true,
       }),
     );
@@ -288,7 +302,7 @@ test("owns initial memory retrieval and injects recalled evidence", async () => 
     );
     assert.deepEqual(memorySnapshot, {
       type: "memory_snapshot",
-      scopeId: "workspace:engineering",
+      primaryBankId: "workspace:engineering",
       queries: [
         "Current request: What did Richard say?\nReference context:\nA telecom discussion.",
         "Current request: What did Richard say?\nReference context:\nA telecom discussion.\nIdentity anchors for resolving references: Alice (person:alice)",
@@ -306,12 +320,19 @@ test("owns initial memory retrieval and injects recalled evidence", async () => 
           chunkId: "chunk-7",
         },
       ],
+      directory: {
+        status: "available",
+        references: [],
+        allowedBankIds: ["workspace:engineering"],
+      },
     });
     assert.equal(events.at(-1).answer, "Richard favors lower prices.");
-    assert.equal(recalls.length, 2);
+    assert.equal(recalls.length, 3);
     assert(recalls.some(({ body }) => body.query.includes("Identity anchors")));
     assert(
-      recalls.every(({ url }) =>
+      recalls
+        .filter(({ url }) => !url.includes("system%3Aknowledge-directory"))
+        .every(({ url }) =>
         url.endsWith(
           "/v1/default/banks/workspace%3Aengineering/memories/recall",
         ),
@@ -332,6 +353,8 @@ test("owner and delegated runs receive the same restricted tools", () => {
     ...genericTools,
     "memory_reflect",
     "memory_get_sources",
+    "memory_query_source",
+    "memory_find_sources",
   ];
 
   assert.deepEqual(toolNamesForPolicy("owner"), genericTools);
@@ -340,6 +363,49 @@ test("owner and delegated runs receive the same restricted tools", () => {
   assert.deepEqual(toolNamesForPolicy("delegated", true), toolsWithMemory);
   assert.deepEqual(toolNamesForPolicy("none"), []);
   assert.deepEqual(toolNamesForPolicy("none", true), []);
+});
+
+test("detects persisted source evidence no longer allowed to a continuation requester", () => {
+  const messages = [
+    {
+      role: "toolResult",
+      toolName: "memory_query_source",
+      isError: false,
+      details: { bankId: "qq:group:686743769" },
+    },
+    {
+      role: "toolResult",
+      toolName: "memory_get_sources",
+      isError: false,
+      details: { bankIds: ["telegram:chat:-1002"] },
+    },
+    {
+      role: "toolResult",
+      toolName: "memory_query_source",
+      isError: false,
+      details: { bankId: "chat:bank:failed", unavailable: true },
+    },
+  ];
+
+  assert.deepEqual(
+    continuationAccessWarning(
+      messages,
+      memoryTarget({ grantedBankIds: ["telegram:chat:-1002"] }),
+    ),
+    {
+      historicalBankIds: ["qq:group:686743769", "telegram:chat:-1002"],
+      unavailableBankIds: ["qq:group:686743769"],
+    },
+  );
+  assert.equal(
+    continuationAccessWarning(
+      messages,
+      memoryTarget({
+        requester: { id: "chat:user:owner", label: "Owner", owner: true },
+      }),
+    ),
+    null,
+  );
 });
 
 test("persists a session tree and branches from mapped entries", async () => {
@@ -498,7 +564,7 @@ test("records a correlated run audit with memory, model, and tool details", asyn
       app.engine,
       request(runId, {
         prompt: "Who owns deployment, and what is 6 * 7?",
-        memory: { scopeId: "workspace:engineering", anchors: [] },
+        memory: memoryTarget(),
       }),
     );
     const result = events.at(-1);
@@ -512,6 +578,9 @@ test("records a correlated run audit with memory, model, and tool details", asyn
       "memory.http.request",
       "memory.http.response",
       "memory.context",
+      "memory.directory.policy",
+      "memory.directory.result",
+      "memory.capabilities.issued",
       "session.opened",
       "model.input",
       "model.turn.started",
@@ -525,7 +594,10 @@ test("records a correlated run audit with memory, model, and tool details", asyn
     const requestEvent = audit.events.find((event) => event.type === "run.request");
     assert.equal(requestEvent.data.prompt, "Who owns deployment, and what is 6 * 7?");
     assert.equal(requestEvent.data.systemPrompt, "Answer directly.");
-    assert.equal(requestEvent.data.memory.scopeId, "workspace:engineering");
+    assert.equal(
+      requestEvent.data.memory.primaryBankId,
+      "workspace:engineering",
+    );
     const memoryRequest = audit.events.find(
       (event) => event.type === "memory.http.request",
     );

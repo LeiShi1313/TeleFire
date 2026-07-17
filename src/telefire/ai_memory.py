@@ -10,6 +10,18 @@ from urllib.parse import quote
 
 import aiohttp
 
+from telefire.memory_directory import (
+    KNOWLEDGE_DIRECTORY_BANK_ID,
+    KNOWLEDGE_DIRECTORY_BANK_NAME,
+    DirectoryEvidence,
+    DirectoryPublication,
+    DirectoryRecall,
+    DirectoryReference,
+    bank_reference_tag,
+    directory_metadata,
+    parse_reference_metadata,
+)
+
 
 MemoryUpdateMode = Literal["replace", "append"]
 
@@ -222,6 +234,20 @@ class MemoryClient(Protocol):
         instruction: str,
     ) -> MemoryRevisionResult: ...
 
+    async def publish_directory(
+        self,
+        publication: DirectoryPublication,
+    ) -> MemoryRetainResult: ...
+
+    async def recall_directory(
+        self,
+        *,
+        query: str,
+        allowed_bank_ids: tuple[str, ...] | None = None,
+    ) -> DirectoryRecall: ...
+
+    async def is_directory_source_published(self, bank_id: str) -> bool: ...
+
 
 class MemoryReceiptStore(Protocol):
     async def get_memory_document_receipt(
@@ -322,6 +348,138 @@ class HindsightMemoryClient:
             operation_id=operation_id,
             items_count=len(episodes),
         )
+
+    async def publish_directory(
+        self,
+        publication: DirectoryPublication,
+    ) -> MemoryRetainResult:
+        await self._ensure_bank_name(
+            KNOWLEDGE_DIRECTORY_BANK_ID,
+            KNOWLEDGE_DIRECTORY_BANK_NAME,
+        )
+        await self._ensure_bank_name(
+            publication.source.bank_id,
+            publication.source.display_name,
+        )
+        tag = bank_reference_tag(publication.source.bank_id)
+        payload = await self._request(
+            "POST",
+            self._bank_path(KNOWLEDGE_DIRECTORY_BANK_ID, "/memories"),
+            {
+                "items": [
+                    {
+                        "content": publication.content,
+                        "context": (
+                            "Owner-published knowledge source directory evidence"
+                        ),
+                        "timestamp": publication.published_at.isoformat().replace(
+                            "+00:00", "Z"
+                        ),
+                        "document_id": publication.document_id,
+                        "update_mode": "replace",
+                        "metadata": directory_metadata(publication.source),
+                        "tags": [tag],
+                        "observation_scopes": [[tag]],
+                    }
+                ],
+                "async": False,
+            },
+        )
+        if (
+            payload.get("success") is not True
+            or payload.get("bank_id") != KNOWLEDGE_DIRECTORY_BANK_ID
+            or payload.get("items_count") != 1
+        ):
+            raise MemoryClientError("Hindsight directory retain response is malformed")
+        operation_id = payload.get("operation_id")
+        if operation_id is not None and not isinstance(operation_id, str):
+            raise MemoryClientError("Hindsight directory retain response is malformed")
+        return MemoryRetainResult(
+            accepted=True,
+            operation_id=operation_id,
+            items_count=1,
+        )
+
+    async def recall_directory(
+        self,
+        *,
+        query: str,
+        allowed_bank_ids: tuple[str, ...] | None = None,
+    ) -> DirectoryRecall:
+        query = query.strip()
+        if not query:
+            return DirectoryRecall(references=())
+        allowed: tuple[str, ...] | None = None
+        if allowed_bank_ids is not None:
+            allowed = tuple(dict.fromkeys(allowed_bank_ids))
+            if not allowed:
+                return DirectoryRecall(references=())
+            if len(allowed) > 64:
+                raise ValueError("Directory recall has too many allowed banks")
+        request: dict[str, Any] = {
+            "query": query[:8_000],
+            "budget": "mid",
+            "max_tokens": 2_000,
+            "types": ["world", "experience", "observation"],
+            "prefer_observations": True,
+            "include": {
+                "entities": {"max_tokens": 500},
+                "source_facts": {"max_tokens": 4_000},
+            },
+        }
+        if allowed is not None:
+            request["tag_groups"] = [
+                {
+                    "or": [
+                        {
+                            "tags": [bank_reference_tag(bank_id)],
+                            "match": "exact",
+                        }
+                        for bank_id in allowed
+                    ]
+                }
+            ]
+        payload = await self._request(
+            "POST",
+            self._bank_path(KNOWLEDGE_DIRECTORY_BANK_ID, "/memories/recall"),
+            request,
+        )
+        return self._parse_directory_recall(
+            payload,
+            allowed_bank_ids=set(allowed) if allowed is not None else None,
+        )
+
+    async def is_directory_source_published(self, bank_id: str) -> bool:
+        tag = bank_reference_tag(bank_id)
+        payload = await self._request(
+            "GET",
+            self._bank_path(KNOWLEDGE_DIRECTORY_BANK_ID, "/documents"),
+            params=[
+                ("tags", tag),
+                ("tags_match", "all_strict"),
+                ("limit", "10"),
+                ("offset", "0"),
+            ],
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) > 10:
+            raise MemoryClientError("Hindsight directory documents are malformed")
+        for item in items:
+            if not isinstance(item, dict) or item.get("tags") != [tag]:
+                continue
+            document_id = item.get("id")
+            if not isinstance(document_id, str) or not document_id:
+                continue
+            document = await self._request(
+                "GET",
+                self._bank_path(
+                    KNOWLEDGE_DIRECTORY_BANK_ID,
+                    f"/documents/{quote(document_id, safe='')}",
+                ),
+            )
+            if self._is_matching_directory_document(document, bank_id, tag):
+                return True
+        return False
 
     async def _ensure_bank_name(self, scope_id: str, name: str) -> None:
         if self._bank_names.get(scope_id) == name:
@@ -513,6 +671,8 @@ class HindsightMemoryClient:
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
+        *,
+        params: list[tuple[str, str]] | None = None,
     ) -> dict[str, Any]:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
@@ -520,6 +680,7 @@ class HindsightMemoryClient:
             method,
             f"{self._base_url}{path}",
             json=payload,
+            params=params,
         ) as response:
             if response.status < 200 or response.status >= 300:
                 retry_after = response.headers.get("Retry-After")
@@ -588,6 +749,145 @@ class HindsightMemoryClient:
             f"cited memory clearly matches.\nTarget actor: {subject_id}\n"
             f"Instruction: {instruction}"
         )
+
+    @staticmethod
+    def _parse_directory_recall(
+        payload: dict[str, Any],
+        *,
+        allowed_bank_ids: set[str] | None,
+    ) -> DirectoryRecall:
+        results = payload.get("results")
+        source_facts = payload.get("source_facts") or {}
+        if (
+            not isinstance(results, list)
+            or len(results) > 1_000
+            or not isinstance(source_facts, dict)
+        ):
+            raise MemoryClientError("Hindsight directory recall response is malformed")
+        grouped: dict[
+            str,
+            tuple[str, str, str, list[DirectoryEvidence]],
+        ] = {}
+        for item in results:
+            if not isinstance(item, dict):
+                raise MemoryClientError("Malformed directory reference")
+            memory_id = item.get("id")
+            text = item.get("text")
+            if not isinstance(memory_id, str) or not isinstance(text, str):
+                raise MemoryClientError("Malformed directory reference")
+            try:
+                provenance = HindsightMemoryClient._directory_provenance(
+                    item,
+                    source_facts,
+                )
+                if provenance is None:
+                    continue
+                metadata, tags = provenance
+                bank_id, display_name, platform, source_kind = parse_reference_metadata(
+                    metadata=metadata,
+                    tags=tags,
+                    allowed_bank_ids=allowed_bank_ids,
+                )
+            except ValueError as exc:
+                raise MemoryClientError("Malformed directory reference") from exc
+            evidence = DirectoryEvidence(
+                memory_id=memory_id,
+                text=text,
+                memory_type=_optional_string(item, "type"),
+                document_id=_optional_string(item, "document_id"),
+            )
+            previous = grouped.get(bank_id)
+            if previous is None:
+                grouped[bank_id] = (
+                    display_name,
+                    platform,
+                    source_kind,
+                    [evidence],
+                )
+                continue
+            if previous[:3] != (display_name, platform, source_kind):
+                raise MemoryClientError("Malformed directory reference")
+            previous[3].append(evidence)
+        return DirectoryRecall(
+            references=tuple(
+                DirectoryReference(
+                    bank_id=bank_id,
+                    display_name=display_name,
+                    platform=platform,
+                    source_kind=source_kind,
+                    evidence=tuple(evidence),
+                )
+                for bank_id, (
+                    display_name,
+                    platform,
+                    source_kind,
+                    evidence,
+                ) in grouped.items()
+            )
+        )
+
+    @staticmethod
+    def _directory_provenance(
+        item: dict[str, Any],
+        source_facts: dict[str, Any],
+    ) -> tuple[Any, Any] | None:
+        metadata = item.get("metadata")
+        tags = item.get("tags")
+        source_ids = item.get("source_fact_ids")
+        if source_ids is None:
+            if metadata is None:
+                return None
+            return metadata, tags
+        if (
+            not isinstance(source_ids, list)
+            or not 1 <= len(source_ids) <= 50
+            or any(not isinstance(source_id, str) for source_id in source_ids)
+            or len(set(source_ids)) != len(source_ids)
+        ):
+            raise ValueError("Malformed directory source provenance")
+        candidates = [source_facts.get(source_id) for source_id in source_ids]
+        if any(candidate is None for candidate in candidates):
+            return None
+        valid = [candidate for candidate in candidates if isinstance(candidate, dict)]
+        if len(valid) != len(source_ids):
+            raise ValueError("Malformed directory source provenance")
+        first_metadata = valid[0].get("metadata")
+        first_tags = valid[0].get("tags")
+        if (
+            any(
+                candidate.get("metadata") != first_metadata
+                or candidate.get("tags") != first_tags
+                for candidate in valid[1:]
+            )
+            or tags != first_tags
+        ):
+            raise ValueError("Conflicting directory source provenance")
+        return first_metadata, first_tags
+
+    @staticmethod
+    def _is_matching_directory_document(
+        document: dict[str, Any],
+        bank_id: str,
+        tag: str,
+    ) -> bool:
+        metadata = document.get("document_metadata")
+        if (
+            document.get("bank_id") != KNOWLEDGE_DIRECTORY_BANK_ID
+            or document.get("observation_scopes") != [[tag]]
+            or not isinstance(metadata, dict)
+            or metadata.get("client") != "telefire"
+            or metadata.get("source") != "knowledge-directory"
+        ):
+            return False
+        try:
+            parsed_bank_id, _, _, _ = parse_reference_metadata(
+                metadata=metadata,
+                tags=document.get("tags"),
+                allowed_bank_ids={bank_id},
+            )
+        except ValueError:
+            return False
+        return parsed_bank_id == bank_id
 
     @staticmethod
     def _bank_path(scope_id: str, suffix: str) -> str:

@@ -150,6 +150,9 @@ textarea:focus, select:focus, input:focus, button:focus-visible { outline: 2px s
 .audit-events { min-height: 0; overflow: auto; padding-bottom: 24px; }
 .audit-event { border-bottom: 1px solid #d9dfe1; padding: 11px 14px; }
 .audit-event.memory { box-shadow: inset 3px 0 #98702f; }
+.audit-event.warning { box-shadow: inset 4px 0 #b42318; background: #fff2f0; }
+.audit-event.warning .audit-type { color: #8f1d14; }
+.audit-event.warning .audit-description { color: #6f211a; font-weight: 650; }
 .audit-event.tool { box-shadow: inset 3px 0 #b15c1b; }
 .audit-event.model { box-shadow: inset 3px 0 #317a74; }
 .audit-event.run { box-shadow: inset 3px 0 #526b82; }

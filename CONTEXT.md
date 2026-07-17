@@ -109,8 +109,60 @@ A memory entity used as the focus of a particular recall or correction operation
 _Avoid_: Message author, memory owner
 
 **Memory Scope**:
-A chat, workspace, project, or equivalent trust boundary mapped to exactly one Hindsight bank. Trusted application code selects it before agent execution; the model cannot broaden it, and another scope is never searched implicitly.
+A chat, workspace, project, shared knowledge source, or equivalent trust boundary mapped to exactly one Hindsight bank. Trusted application code selects the Primary Bank before agent execution. Additional banks may be consulted only through bounded Bank References recalled from the Knowledge Directory Bank.
 _Avoid_: Relevance filter, model-selected namespace
+
+**Primary Bank**:
+The Hindsight bank selected from the current chat, workspace, or other request origin. It is always recalled for an AI request and remains distinct from any additional knowledge source consulted while answering.
+_Avoid_: Active bank, attached bank
+
+**Knowledge Directory Bank**:
+The deployment-wide, platform-neutral, always-consulted Hindsight bank containing ordinary memory about available knowledge sources, what they represent, how people refer to them, and how they relate. Telegram, QQ, and non-chat knowledge sources publish into the same directory. It may contain Bank References, but it is not an alias table or a store for arbitrary globally visible subject matter.
+_Avoid_: Global Bank, alias bank, bank registry
+
+**Bank Reference**:
+Evidence in the Knowledge Directory Bank that describes a knowledge source and carries a trusted, machine-readable reference to its Hindsight bank. Natural-language description supplies meaning; the reference permits bounded traversal without letting prompt text choose an arbitrary bank. It is routing evidence rather than an access grant; requester policy separately decides whether the referenced bank may be consulted.
+_Avoid_: Alias, attachment, raw bank ID
+
+**Directory Publication**:
+An explicit, owner-authorized evidence submission to the Knowledge Directory Bank describing exactly one knowledge source and carrying exactly one trusted Bank Reference. Its evidence consists only of adapter-resolved source metadata and the owner's description; publication never samples messages or recalls the referenced bank. Each `/ai_directory` invocation adds timestamped evidence and never silently replaces earlier evidence, so a correction or change must be stated explicitly in the description. Publication idempotently ensures the referenced bank exists but never changes cross-chat eligibility or enables capture, Dream, or backfill for it. Hindsight extracts ordinary facts and observations from the submitted description; every derived directory memory remains associated with exactly that one Bank Reference and never consolidates evidence from another source. The publication is not itself a pre-extracted fact or source profile.
+_Avoid_: Alias registration, bank attachment, global memory update
+
+**Directory Source Policy**:
+The adapter-specific rules governing which external resources may become Directory Publications and how their identities are verified. Telegram may resolve accessible chats and channels through native identities, forwards, or message links; QQ resolves only groups accessible through the connected OneBot account. Private QQ conversations cannot be published as shared knowledge sources.
+_Avoid_: Directory schema, memory visibility
+
+**Referenced Bank**:
+A Memory Scope identified by a Bank Reference recalled during an AI request. Identification alone does not mean its memory was loaded.
+_Avoid_: Attached bank, secondary scope
+
+**Consulted Bank**:
+A Referenced Bank that the Agent Run actually queried because directory evidence showed it was relevant to the current request. It is transient to the current AI Conversation branch and does not become permanently attached to the Primary Bank. An AI Answer may name its human-readable source when attribution matters, but canonical bank identities remain internal diagnostics.
+_Avoid_: Enabled bank, mounted bank
+
+**Cross-Bank Retrieval**:
+A bounded recall of a Consulted Bank reached through relevant Bank Reference evidence from the Knowledge Directory Bank. The owner may consult any relevant bank. A Whitelisted User may always use the Primary Bank but needs an explicit per-bank grant before another bank can be consulted. A Consulted Bank may suggest another source, but only a subsequent filtered directory lookup can resolve it into another Bank Capability. One Agent Run permits at most one additional directory lookup and two non-primary Consulted Banks; ambiguity, cycles, missing grants, or exhausted budgets stop traversal. Banks are not enumerated or searched collectively, and raw IDs in prompts cannot select one.
+_Avoid_: Bank permission, global search, automatic attachment
+
+**Bank Grant**:
+An owner-controlled authorization allowing one specific Whitelisted User to consult one specific non-primary bank through Cross-Bank Retrieval. The grantee is the exact platform-qualified actor identity, such as `telegram:user:<id>` or `qq:user:<id>`; accounts on different platforms are never inferred to be the same person and must be granted separately. The authorization is deployment-wide for that `(actor identity, target bank)` pair and is not restricted to the chat where its command was issued. A grant can be issued only while that user is whitelisted, neither exposes the bank to other whitelisted users nor enables capture, and is deleted when the user's AI whitelist access is revoked. It controls who may trigger retrieval, not who may read an AI Answer delivered into a shared chat. Grant commands may use an adapter-native source selector only when the command and source belong to the same chat platform, such as a Telegram `@username` or a QQ group number. Selecting a source on another platform requires its full canonical bank ID; this avoids ambiguous cross-platform name resolution. In either case trusted host code resolves and validates the selector against a Directory Publication, while source-like text in an ordinary AI prompt grants no authority.
+_Avoid_: Directory Publication, bank attachment, group membership
+
+**Effective Bank Access**:
+The Primary Bank plus the non-primary banks the current requester may consult during one Agent Run. It is recalculated for every run and supplied to the agent as advisory policy context, while trusted tools enforce it for new retrieval. In v1, an Agent Session continued by another requester may still contain earlier evidence outside their Effective Bank Access; prompt policy reduces but does not eliminate disclosure risk.
+_Avoid_: Bank Capability, permanent permission, secure session boundary
+
+**Participant Access Context**:
+Hidden advisory context regenerated for each Agent Run that identifies the current requester and summarizes which non-owner human authors represented in the bounded reply or chat context may use each knowledge source already present in the conversation or offered during the run. Mentions alone do not reveal a person's grants. The context omits the unrestricted owner and unrelated grants. Only the current requester's Effective Bank Access controls tool capabilities; another participant's Bank Grant never expands the current run.
+_Avoid_: Complete grant directory, shared permission, authorization boundary
+
+**Bank Capability**:
+An opaque, run-scoped handle issued by trusted application code after a recalled Bank Reference passes the requester's Bank Grant policy. Initial Primary Bank and filtered Knowledge Directory recall happen automatically, but the Agent Run must explicitly choose a capability before the referenced bank is consulted. The agent may reformulate the downstream query but never receives authority from a raw bank ID, and the capability is not persisted as access in the Agent Session.
+_Avoid_: Bank Grant, raw bank ID, permanent attachment
+
+**Shared Knowledge Bank**:
+A non-chat Memory Scope containing a reusable body of subject matter, such as project documentation, a news source, or a topical archive. It is discoverable through the Knowledge Directory Bank and remains independently ingested, configured, and governed.
+_Avoid_: Global Bank, directory bank
 
 **Memory-Enabled Scope**:
 A memory scope explicitly configured for automatic capture. In Telefire this permits successful AI reply threads and scheduled dream scans to ingest chat evidence; it is independent from who may invoke `/ai`, and an explicit `/ai_memory` does not enable the scope automatically.
@@ -157,7 +209,7 @@ An explicit or evidence-backed change that supersedes, retracts, suppresses, or 
 _Avoid_: Hard delete, silent overwrite
 
 **Whitelisted User**:
-A non-owner Telegram user who is explicitly allowed to make AI requests under the restricted tool policy. Owner and whitelisted runs receive the same constrained web, code, and bank-pinned memory boundaries; the owner is always allowed and does not need to be whitelisted.
+A non-owner chat user who is explicitly allowed to make AI requests under the restricted tool policy. Whitelisting permits use of the current Primary Bank but does not grant Cross-Bank Retrieval; each additional bank requires an explicit grant. The owner is always allowed and does not need to be whitelisted.
 _Avoid_: Allowed user, approved user
 
 **Whitelist Command**:

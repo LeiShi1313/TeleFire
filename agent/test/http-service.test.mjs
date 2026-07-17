@@ -137,7 +137,21 @@ test("accepts a bounded memory target and rejects scope injection", async () => 
     },
   });
   const memory = {
-    scopeId: "telegram:chat:-1001",
+    primaryBankId: "telegram:chat:-1001",
+    requester: {
+      id: "telegram:user:40",
+      label: "Alice",
+      owner: false,
+    },
+    grantedBankIds: ["qq:group:686743769"],
+    participants: [
+      {
+        id: "telegram:user:41",
+        label: "Bob",
+        allowed: true,
+        bankIds: ["telegram:chat:-1002"],
+      },
+    ],
     query: "What does Alice prefer?",
     anchors: [
       {
@@ -186,10 +200,23 @@ test("accepts a bounded memory target and rejects scope injection", async () => 
       },
       body: JSON.stringify({
         ...validRun,
-        memory: { ...memory, scopeId: "../../other-bank" },
+        memory: { ...memory, primaryBankId: "../../other-bank" },
       }),
     });
     assert.equal(rejected.status, 400);
+
+    const rejectedNumericBank = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        memory: { ...memory, primaryBankId: 1001 },
+      }),
+    });
+    assert.equal(rejectedNumericBank.status, 400);
 
     const rejectedInjectedReferences = await fetch(`${app.baseUrl}/v1/runs`, {
       method: "POST",
@@ -201,11 +228,50 @@ test("accepts a bounded memory target and rejects scope injection", async () => 
         ...validRun,
         memory: {
           ...memory,
-          references: [{ memoryId: "caller-chosen-memory" }],
+          sourceCapabilities: [{ handle: "source_1" }],
         },
       }),
     });
     assert.equal(rejectedInjectedReferences.status, 400);
+
+    const rejectedNumericRequester = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        memory: {
+          ...memory,
+          requester: { ...memory.requester, id: 40 },
+        },
+      }),
+    });
+    assert.equal(rejectedNumericRequester.status, 400);
+
+    const rejectedParticipantGrants = await fetch(`${app.baseUrl}/v1/runs`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer test-agent-token-that-is-long-enough",
+      },
+      body: JSON.stringify({
+        ...validRun,
+        memory: {
+          ...memory,
+          participants: [
+            {
+              id: "telegram:user:41",
+              label: "Bob",
+              allowed: false,
+              bankIds: ["telegram:chat:-1002"],
+            },
+          ],
+        },
+      }),
+    });
+    assert.equal(rejectedParticipantGrants.status, 400);
   } finally {
     await app.close();
   }

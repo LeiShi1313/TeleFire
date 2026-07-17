@@ -90,7 +90,7 @@ async def dependencies() -> tuple[list[web.AppRunner], str, str, dict]:
         events = (
             {
                 "type": "memory_snapshot",
-                "scopeId": payload["memory"]["scopeId"],
+                "primaryBankId": payload["memory"]["primaryBankId"],
                 "queries": ["Who owns deploys?"],
                 "memories": [
                     {
@@ -358,7 +358,14 @@ async def test_agent_run_accepts_proxy_origin_and_streams_pi_events():
         pi_request = received["runs"][0]
         assert pi_request["toolPolicy"] == "owner"
         assert pi_request["memory"] == {
-            "scopeId": "chat:engineering",
+            "primaryBankId": "chat:engineering",
+            "requester": {
+                "id": "playground:user:owner",
+                "label": "Playground owner",
+                "owner": True,
+            },
+            "grantedBankIds": [],
+            "participants": [],
             "anchors": [],
         }
         assert pi_request["includeMemorySnapshot"] is True
@@ -432,9 +439,7 @@ async def test_session_history_and_run_audits_are_proxied_without_exposing_token
             ) as response:
                 audits = await response.json()
                 assert response.status == 200
-            async with session.get(
-                f"{playground_url}/api/audits/{run_id}"
-            ) as response:
+            async with session.get(f"{playground_url}/api/audits/{run_id}") as response:
                 audit = await response.json()
                 assert response.status == 200
 
@@ -445,13 +450,9 @@ async def test_session_history_and_run_audits_are_proxied_without_exposing_token
         assert audit["events"][0]["data"]["request"]["body"]["query"] == (
             "Who owns deployment?"
         )
-        assert audit["events"][1]["data"]["result"]["content"][0]["text"] == (
-            "Alice"
-        )
+        assert audit["events"][1]["data"]["result"]["content"][0]["text"] == ("Alice")
         assert received["session_queries"] == [{"limit": "20", "q": "deploy"}]
-        assert received["audit_queries"] == [
-            {"limit": "10", "sessionId": "session-1"}
-        ]
+        assert received["audit_queries"] == [{"limit": "10", "sessionId": "session-1"}]
         assert "private-pi-token" not in json.dumps(
             {"sessions": sessions, "detail": detail, "audits": audits, "audit": audit}
         )
@@ -546,6 +547,8 @@ async def test_playground_rejects_invalid_input_and_untrusted_hosts():
                     "state.sessionId = event.sessionId || state.sessionId" not in script
                 )
                 assert "elements.newChat.disabled = running" in script
+                assert 'event.type === "memory.access.warning"' in script
+                assert "non-disclosure safeguard is advisory" in script
     finally:
         assert received["runs"] == []
         await playground_runner.cleanup()
@@ -559,7 +562,7 @@ async def test_playground_rejects_invalid_input_and_untrusted_hosts():
         {},
         {
             "type": "memory_snapshot",
-            "scopeId": "chat:engineering",
+            "primaryBankId": "chat:engineering",
             "queries": ["Who owns deploys?"],
             "memories": [
                 {

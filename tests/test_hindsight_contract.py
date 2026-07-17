@@ -7,7 +7,9 @@ from uuid import uuid4
 import aiohttp
 import pytest
 
+import telefire.ai_memory as ai_memory_module
 from telefire.ai_memory import HindsightMemoryClient, MemoryEpisode, MemoryEvent
+from telefire.memory_directory import DirectoryPublication, DirectorySource
 
 
 HINDSIGHT_URL = os.environ.get("TELEFIRE_HINDSIGHT_URL", "").rstrip("/")
@@ -39,6 +41,57 @@ async def _request(
 async def _delete_bank(session: aiohttp.ClientSession, bank_id: str) -> None:
     async with session.delete(f"{HINDSIGHT_URL}/v1/default/banks/{bank_id}"):
         pass
+
+
+@pytest.mark.asyncio
+async def test_hindsight_directory_publication_and_filtered_recall_contract(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    suffix = uuid4().hex[:10]
+    directory_bank_id = f"contract-directory-{suffix}"
+    source_bank_id = f"telegram:chat:-100{suffix}"
+    hidden_bank_id = f"telegram:chat:-200{suffix}"
+    monkeypatch.setattr(
+        ai_memory_module,
+        "KNOWLEDGE_DIRECTORY_BANK_ID",
+        directory_bank_id,
+    )
+    publication = DirectoryPublication(
+        publication_id=f"telegram:message:-1001:{suffix}",
+        publisher_id="telegram:user:49001",
+        published_at=datetime.now(UTC),
+        source=DirectorySource(
+            bank_id=source_bank_id,
+            display_name=f"Contract Source {suffix}",
+            platform="telegram",
+            source_kind="group",
+        ),
+        description=f"Discusses Project Directory-{suffix} release planning.",
+    )
+    client = HindsightMemoryClient(HINDSIGHT_URL, timeout=300)
+    async with aiohttp.ClientSession() as session:
+        try:
+            retained = await client.publish_directory(publication)
+            assert retained.accepted is True
+            assert await client.is_directory_source_published(source_bank_id) is True
+
+            recalled = await client.recall_directory(
+                query=f"Where is Project Directory-{suffix} discussed?",
+                allowed_bank_ids=(source_bank_id,),
+            )
+            assert len(recalled.references) == 1
+            assert recalled.references[0].bank_id == source_bank_id
+            assert recalled.references[0].display_name == f"Contract Source {suffix}"
+
+            forbidden = await client.recall_directory(
+                query=f"Where is Project Directory-{suffix} discussed?",
+                allowed_bank_ids=(hidden_bank_id,),
+            )
+            assert forbidden.references == ()
+        finally:
+            await client.close()
+            await _delete_bank(session, directory_bank_id)
+            await _delete_bank(session, source_bank_id)
 
 
 @pytest.mark.asyncio

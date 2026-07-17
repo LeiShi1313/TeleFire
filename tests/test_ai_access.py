@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 
@@ -10,8 +11,11 @@ from telefire.ai import (
     AIStateRepository,
     AgentEvent,
     AgentRunRequest,
+    DirectoryPublicationTarget,
     PromptBuilder,
 )
+from telefire.ai_memory import MemoryRetainResult
+from telefire.memory_directory import DirectorySource
 from telefire.telegram.ai_identity import TELEGRAM_IDENTITY_CODEC
 
 
@@ -51,6 +55,7 @@ class FakeMessage:
         self.sender_id = sender_id
         self.chat_id = chat_id
         self.reply_to_msg_id = reply_to.id if reply_to else None
+        self.date = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
         self._reply_to = reply_to
         self.replies = []
         self.deleted = False
@@ -114,7 +119,47 @@ class BlockingGateway:
         return True
 
 
-async def make_handler(path, gateway, *, clock=lambda: 100.0, cooldown=30.0):
+class FakeDirectoryMemory:
+    def __init__(self, published=()):
+        self.published = set(published)
+        self.publications = []
+
+    async def publish_directory(self, publication):
+        self.publications.append(publication)
+        self.published.add(publication.source.bank_id)
+        return MemoryRetainResult(accepted=True)
+
+    async def is_directory_source_published(self, bank_id):
+        return bank_id in self.published
+
+
+class FakeDirectorySourceResolver:
+    def __init__(self, source):
+        self.source = source
+        self.publication_calls = []
+        self.bank_calls = []
+
+    async def resolve_publication(self, message, arguments):
+        self.publication_calls.append((message, arguments))
+        return DirectoryPublicationTarget(
+            source=self.source,
+            description="Owner supplied description",
+        )
+
+    async def resolve_bank(self, message, selector):
+        self.bank_calls.append((message, selector))
+        return self.source
+
+
+async def make_handler(
+    path,
+    gateway,
+    *,
+    clock=lambda: 100.0,
+    cooldown=30.0,
+    memory=None,
+    directory_source_resolver=None,
+):
     store = await AIStateRepository(path).connect()
     limiter = AIRateLimiter(store, cooldown_seconds=cooldown, clock=clock)
     handler = AIConversationHandler(
@@ -125,6 +170,9 @@ async def make_handler(path, gateway, *, clock=lambda: 100.0, cooldown=30.0):
             identity_codec=TELEGRAM_IDENTITY_CODEC,
         ),
         rate_limiter=limiter,
+        memory=memory,
+        directory_source_resolver=directory_source_resolver,
+        memory_command_delete_delay=0,
         identity_codec=TELEGRAM_IDENTITY_CODEC,
     )
     return handler, store
@@ -165,6 +213,166 @@ async def test_owner_can_allow_user_who_can_start_continue_and_fork(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_owner_publishes_one_resolved_directory_source(tmp_path):
+    source = DirectorySource(
+        bank_id="telegram:chat:-100123",
+        display_name="Coder Offtopic",
+        platform="telegram",
+        source_kind="group",
+    )
+    memory = FakeDirectoryMemory()
+    resolver = FakeDirectorySourceResolver(source)
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway([]),
+        memory=memory,
+        directory_source_resolver=resolver,
+    )
+    try:
+        command = FakeMessage(
+            "/ai_directory @CoderOfftopic owner notes",
+            sender_id=10,
+        )
+
+        assert await handler.handle(command) is True
+
+        assert resolver.publication_calls == [(command, "@CoderOfftopic owner notes")]
+        assert len(memory.publications) == 1
+        publication = memory.publications[0]
+        assert publication.source == source
+        assert publication.description == "Owner supplied description"
+        assert publication.publisher_id == actor_id(10)
+        assert publication.publication_id == f"telegram:message:-1001:{command.id}"
+        assert command.replies[0].text == "Knowledge source published: Coder Offtopic."
+        assert command.deleted is True
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_grants_and_revokes_published_source_for_whitelisted_user(
+    tmp_path,
+):
+    source = DirectorySource(
+        bank_id="telegram:chat:-100123",
+        display_name="Coder Offtopic",
+        platform="telegram",
+        source_kind="group",
+    )
+    memory = FakeDirectoryMemory((source.bank_id,))
+    resolver = FakeDirectorySourceResolver(source)
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway([]),
+        memory=memory,
+        directory_source_resolver=resolver,
+    )
+    try:
+        target = FakeMessage("hello", sender_id=20)
+        await store.allow_user(actor_id(20))
+        allow = FakeMessage(
+            "/ai_bank_allow @CoderOfftopic",
+            sender_id=10,
+            reply_to=target,
+        )
+
+        assert await handler.handle(allow) is True
+        assert await store.list_bank_grants(actor_id(20)) == (source.bank_id,)
+        assert (
+            allow.replies[0].text == "Knowledge source access allowed: Coder Offtopic."
+        )
+        assert allow.deleted is True
+
+        memory.published.clear()
+        handler._memory = None
+        deny = FakeMessage(
+            "/ai_bank_deny @CoderOfftopic",
+            sender_id=10,
+            reply_to=target,
+        )
+        assert await handler.handle(deny) is True
+        assert await store.list_bank_grants(actor_id(20)) == ()
+        assert deny.replies[0].text == "Knowledge source access denied: Coder Offtopic."
+        assert deny.deleted is True
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_cross_platform_grant_uses_only_published_canonical_bank_id(tmp_path):
+    qq_bank = "qq:group:686743769"
+    local_source = DirectorySource(
+        bank_id="telegram:chat:-100123",
+        display_name="Local Group",
+        platform="telegram",
+        source_kind="group",
+    )
+    memory = FakeDirectoryMemory((qq_bank,))
+    resolver = FakeDirectorySourceResolver(local_source)
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway([]),
+        memory=memory,
+        directory_source_resolver=resolver,
+    )
+    try:
+        target = FakeMessage("hello", sender_id=20)
+        await store.allow_user(actor_id(20))
+        command = FakeMessage(
+            f"/ai_bank_allow {qq_bank}",
+            sender_id=10,
+            reply_to=target,
+        )
+
+        assert await handler.handle(command) is True
+        assert resolver.bank_calls == []
+        assert await store.list_bank_grants(actor_id(20)) == (qq_bank,)
+        assert command.replies[0].text == "Knowledge source access allowed."
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_grant_rejects_unpublished_source_and_unwhitelisted_user(tmp_path):
+    source = DirectorySource(
+        bank_id="telegram:chat:-100123",
+        display_name="Coder Offtopic",
+        platform="telegram",
+        source_kind="group",
+    )
+    memory = FakeDirectoryMemory()
+    resolver = FakeDirectorySourceResolver(source)
+    handler, store = await make_handler(
+        tmp_path / "state.db",
+        FakeGateway([]),
+        memory=memory,
+        directory_source_resolver=resolver,
+    )
+    try:
+        target = FakeMessage("hello", sender_id=20)
+        unpublished = FakeMessage(
+            "/ai_bank_allow @CoderOfftopic",
+            sender_id=10,
+            reply_to=target,
+        )
+        assert await handler.handle(unpublished) is True
+        assert unpublished.replies[0].text == "Publish that knowledge source first."
+        assert await store.list_bank_grants(actor_id(20)) == ()
+
+        memory.published.add(source.bank_id)
+        unwhitelisted = FakeMessage(
+            "/ai_bank_allow @CoderOfftopic",
+            sender_id=10,
+            reply_to=target,
+        )
+        assert await handler.handle(unwhitelisted) is True
+        assert unwhitelisted.replies[0].text == "Allow AI access for that user first."
+        assert await store.list_bank_grants(actor_id(20)) == ()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_unauthorized_and_revoked_users_are_silent(tmp_path):
     gateway = FakeGateway(["must not be called"])
     handler, store = await make_handler(tmp_path / "state.db", gateway)
@@ -185,6 +393,55 @@ async def test_unauthorized_and_revoked_users_are_silent(tmp_path):
         assert await handler.handle(revoked) is False
         assert revoked.replies == []
         assert gateway.requests == []
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_bank_grants_require_whitelist_and_survive_restart(tmp_path):
+    path = tmp_path / "state.db"
+    actor = actor_id(20)
+    telegram_bank = "telegram:chat:-100123"
+    qq_bank = "qq:group:686743769"
+    store = await AIStateRepository(path).connect()
+    try:
+        assert await store.grant_bank(actor, telegram_bank) is False
+        await store.allow_user(actor)
+        assert await store.grant_bank(actor, telegram_bank) is True
+        assert await store.grant_bank(actor, qq_bank) is True
+        assert await store.grant_bank(actor, telegram_bank) is True
+        assert await store.list_bank_grants(actor) == (qq_bank, telegram_bank)
+    finally:
+        await store.close()
+
+    restarted = await AIStateRepository(path).connect()
+    try:
+        assert await restarted.list_bank_grants(actor) == (qq_bank, telegram_bank)
+        await restarted.revoke_bank(actor, telegram_bank)
+        assert await restarted.list_bank_grants(actor) == (qq_bank,)
+    finally:
+        await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_deny_atomically_clears_usage_and_all_bank_grants(tmp_path):
+    path = tmp_path / "state.db"
+    actor = actor_id(20)
+    store = await AIStateRepository(path).connect()
+    try:
+        await store.allow_user(actor)
+        await store.set_last_request_at(actor, 123.0)
+        assert await store.grant_bank(actor, "telegram:chat:-100123") is True
+        assert await store.grant_bank(actor, "qq:group:686743769") is True
+
+        await store.deny_user(actor)
+
+        assert await store.is_allowed(actor) is False
+        assert await store.get_last_request_at(actor) is None
+        assert await store.list_bank_grants(actor) == ()
+
+        await store.allow_user(actor)
+        assert await store.list_bank_grants(actor) == ()
     finally:
         await store.close()
 

@@ -3,15 +3,26 @@ import { randomUUID } from "node:crypto";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import {
+  recallDirectory,
+  recallMemories,
+  renderRecalledMemories,
+} from "./memory-context.mjs";
+
 export const MEMORY_TOOL_NAMES = Object.freeze([
   "memory_reflect",
   "memory_get_sources",
+  "memory_query_source",
+  "memory_find_sources",
 ]);
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_REFLECT_CHARS = 6_000;
 const MAX_SOURCE_CHARS = 6_000;
 const MAX_SOURCE_ITEMS = 3;
+const MAX_CONSULTED_BANKS = 2;
+const MAX_SOURCE_QUERY_CALLS = 4;
+const MAX_SOURCE_CAPABILITIES = 32;
 
 function bounded(value, max) {
   const text = String(value ?? "").trim();
@@ -20,6 +31,7 @@ function bounded(value, max) {
 
 function referenceFrom(value) {
   return {
+    bankId: value.bankId,
     memoryId: value.memoryId,
     documentId: value.documentId ?? null,
     chunkId: value.chunkId ?? null,
@@ -60,15 +72,51 @@ export function createMemoryTools({
   observe = null,
 }) {
   if (!baseUrl || !access) return [];
-  const bankPath = encodeURIComponent(access.bankId);
-  const allowed = new Map(
-    access.references.map((reference) => [
-      reference.memoryId,
-      referenceFrom(reference),
-    ]),
-  );
+  const primaryBankPath = encodeURIComponent(access.primaryBankId);
+  const allowed = new Map();
+  const ambiguousMemoryIds = new Set();
+  const sourceByHandle = new Map();
+  const sourceByBank = new Map();
+  let nextSourceNumber = 1;
+  for (const capability of access.sourceCapabilities) {
+    sourceByHandle.set(capability.handle, capability);
+    sourceByBank.set(capability.bankId, capability);
+    const match = /^source_(\d+)$/.exec(capability.handle);
+    if (match) nextSourceNumber = Math.max(nextSourceNumber, Number(match[1]) + 1);
+  }
+  function registerReference(reference) {
+    const normalized = referenceFrom(reference);
+    const previous = allowed.get(normalized.memoryId);
+    if (previous && previous.bankId !== normalized.bankId) {
+      allowed.delete(normalized.memoryId);
+      ambiguousMemoryIds.add(normalized.memoryId);
+      return;
+    }
+    if (!ambiguousMemoryIds.has(normalized.memoryId)) {
+      allowed.set(normalized.memoryId, normalized);
+    }
+  }
+  for (const reference of access.references) registerReference(reference);
+
+  function issueCapability(reference) {
+    const existing = sourceByBank.get(reference.bankId);
+    if (existing) return existing;
+    if (sourceByHandle.size >= MAX_SOURCE_CAPABILITIES) return null;
+    const capability = {
+      handle: `source_${nextSourceNumber}`,
+      ...reference,
+    };
+    nextSourceNumber += 1;
+    sourceByHandle.set(capability.handle, capability);
+    sourceByBank.set(capability.bankId, capability);
+    access.sourceCapabilities.push(capability);
+    return capability;
+  }
   let reflectCalls = 0;
   let sourceCalls = 0;
+  let sourceQueryCalls = 0;
+  let directoryLookupCalls = 0;
+  const consultedBanks = new Set();
 
   async function request(path, options = {}, metadata = {}) {
     const url = `${baseUrl.replace(/\/$/, "")}${path}`;
@@ -153,7 +201,7 @@ export function createMemoryTools({
       let payload;
       try {
         payload = await request(
-          `/v1/default/banks/${bankPath}/reflect`,
+          `/v1/default/banks/${primaryBankPath}/reflect`,
           {
             method: "POST",
             body: JSON.stringify({
@@ -197,7 +245,8 @@ export function createMemoryTools({
       const evidenceIds = [];
       for (const item of evidence) {
         if (!item || typeof item.id !== "string") continue;
-        allowed.set(item.id, {
+        registerReference({
+          bankId: access.primaryBankId,
           memoryId: item.id,
           documentId:
             typeof item.document_id === "string" ? item.document_id : null,
@@ -214,7 +263,10 @@ export function createMemoryTools({
       }
       return {
         content: [{ type: "text", text: output.join("\n") }],
-        details: { evidenceMemoryIds: evidenceIds },
+        details: {
+          bankId: access.primaryBankId,
+          evidenceMemoryIds: evidenceIds,
+        },
       };
     },
   });
@@ -236,12 +288,20 @@ export function createMemoryTools({
       if (sourceCalls >= 2) throw new Error("Memory source limit reached");
       sourceCalls += 1;
       const uniqueIds = [...new Set(memoryIds)];
-      if (uniqueIds.some((memoryId) => !allowed.has(memoryId))) {
+      if (
+        uniqueIds.some(
+          (memoryId) =>
+            !allowed.has(memoryId) || ambiguousMemoryIds.has(memoryId),
+        )
+      ) {
         throw new Error("Memory source reference was not returned in this run");
       }
       const sections = [];
+      const bankIds = new Set();
       for (const memoryId of uniqueIds) {
         const reference = allowed.get(memoryId);
+        const bankPath = encodeURIComponent(reference.bankId);
+        bankIds.add(reference.bankId);
         try {
           const memory = await request(
             `/v1/default/banks/${bankPath}/memories/${encodeURIComponent(memoryId)}`,
@@ -257,6 +317,13 @@ export function createMemoryTools({
           if (!documentId) {
             sections.push(`[${memoryId}] Source document unavailable.`);
             continue;
+          }
+          if (
+            memory?.id !== memoryId ||
+            (typeof memory?.bank_id === "string" &&
+              memory.bank_id !== reference.bankId)
+          ) {
+            throw new Error("Memory source identity mismatch");
           }
           const documentPath = encodeURIComponent(documentId);
           let sourceText = "";
@@ -275,7 +342,7 @@ export function createMemoryTools({
                   (item) =>
                     item?.chunk_id === chunkId &&
                     item?.document_id === documentId &&
-                    item?.bank_id === access.bankId,
+                    item?.bank_id === reference.bankId,
                 )
               : null;
             if (chunk && typeof chunk.chunk_text === "string") {
@@ -293,7 +360,7 @@ export function createMemoryTools({
               },
             );
             if (
-              document?.bank_id === access.bankId &&
+              document?.bank_id === reference.bankId &&
               document?.id === documentId &&
               typeof document.original_text === "string"
             ) {
@@ -316,10 +383,176 @@ export function createMemoryTools({
             text: bounded(sections.join("\n\n"), MAX_SOURCE_CHARS),
           },
         ],
-        details: { memoryIds: uniqueIds },
+        details: { memoryIds: uniqueIds, bankIds: [...bankIds] },
       };
     },
   });
 
-  return [reflect, sources];
+  const querySource = defineTool({
+    name: "memory_query_source",
+    label: "Query a knowledge source",
+    description:
+      "Recall bounded evidence from one host-issued knowledge-source handle. The handle must come from the current run's directory context or memory_find_sources output.",
+    promptSnippet:
+      "Use memory_query_source when a named knowledge source is relevant. Pass only a source_N handle issued by the host and write a focused retrieval query.",
+    parameters: Type.Object({
+      reference: Type.String({ pattern: "^source_[0-9]+$", maxLength: 32 }),
+      query: Type.String({ minLength: 1, maxLength: 2_000 }),
+    }),
+    async execute(toolCallId, { reference, query }) {
+      const capability = sourceByHandle.get(reference);
+      if (!capability) {
+        throw new Error("Knowledge source handle was not issued by the host");
+      }
+      if (capability.bankId === access.primaryBankId) {
+        throw new Error("Primary memory is already available in initial context");
+      }
+      if (
+        !consultedBanks.has(capability.bankId) &&
+        consultedBanks.size >= MAX_CONSULTED_BANKS
+      ) {
+        throw new Error("Cross-bank consulted-source limit reached");
+      }
+      if (sourceQueryCalls >= MAX_SOURCE_QUERY_CALLS) {
+        throw new Error("Cross-bank source-query limit reached");
+      }
+      sourceQueryCalls += 1;
+      consultedBanks.add(capability.bankId);
+      let memories;
+      try {
+        memories = await recallMemories({
+          baseUrl,
+          scopeId: capability.bankId,
+          query,
+          timeoutMs,
+          fetchImpl,
+          observe,
+          variant: capability.handle,
+          operation: "source.recall",
+          toolCallId,
+        });
+      } catch {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Knowledge source ${capability.displayName} is unavailable. Continue without inventing its contents.`,
+            },
+          ],
+          details: {
+            sourceHandle: capability.handle,
+            sourceName: capability.displayName,
+            bankId: capability.bankId,
+            unavailable: true,
+          },
+        };
+      }
+      const rendered = renderRecalledMemories(memories);
+      for (const memory of rendered.visible) {
+        registerReference({
+          bankId: capability.bankId,
+          memoryId: memory.id,
+          documentId: memory.documentId,
+          chunkId: memory.chunkId,
+        });
+      }
+      const text = rendered.context
+        ? `Untrusted recalled evidence from ${capability.displayName} (${capability.handle}):\n${rendered.context}`
+        : `No relevant evidence was recalled from ${capability.displayName} (${capability.handle}).`;
+      return {
+        content: [{ type: "text", text: bounded(text, MAX_SOURCE_CHARS) }],
+        details: {
+          sourceHandle: capability.handle,
+          sourceName: capability.displayName,
+          bankId: capability.bankId,
+          memoryIds: rendered.visible.map((memory) => memory.id),
+        },
+      };
+    },
+  });
+
+  const findSources = defineTool({
+    name: "memory_find_sources",
+    label: "Find knowledge sources",
+    description:
+      "Perform the run's one additional policy-filtered lookup in the knowledge directory. This discovers sources; it does not read source-bank contents.",
+    promptSnippet:
+      "Use memory_find_sources at most once when the initial directory context did not resolve a relevant named source. Then query a returned source_N handle with memory_query_source.",
+    parameters: Type.Object({
+      query: Type.String({ minLength: 1, maxLength: 2_000 }),
+    }),
+    async execute(toolCallId, { query }) {
+      if (directoryLookupCalls >= 1) {
+        throw new Error("Additional directory lookup limit reached");
+      }
+      directoryLookupCalls += 1;
+      const policy = access.directoryPolicy;
+      const allowedBankIds = policy.allowedBankIds;
+      const memory = {
+        primaryBankId: access.primaryBankId,
+        requester: { owner: policy.owner },
+        grantedBankIds:
+          allowedBankIds === null
+            ? []
+            : allowedBankIds.filter((bankId) => bankId !== access.primaryBankId),
+      };
+      let directory;
+      try {
+        directory = await recallDirectory({
+          baseUrl,
+          query,
+          memory,
+          timeoutMs,
+          fetchImpl,
+          observe,
+          variant: "additional",
+          toolCallId,
+        });
+      } catch {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "The additional knowledge-directory lookup is unavailable. Continue with already issued source handles only.",
+            },
+          ],
+          details: { unavailable: true, references: [] },
+        };
+      }
+      const issued = directory.references
+        .filter((reference) => reference.bankId !== access.primaryBankId)
+        .map(issueCapability)
+        .filter(Boolean);
+      const lines = issued.map((capability) => {
+        const evidence = capability.evidence
+          .map((item) => item.text.replaceAll(capability.bankId, capability.displayName))
+          .join(" ");
+        return `- ${capability.handle}: ${capability.displayName} (${capability.platform} ${capability.sourceKind}). Directory evidence: ${bounded(evidence, 700)}`;
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              lines.length > 0
+                ? bounded(
+                    "Additional host-approved knowledge sources:\n" +
+                      lines.join("\n"),
+                    MAX_SOURCE_CHARS,
+                  )
+                : "No additional policy-approved knowledge source was found.",
+          },
+        ],
+        details: {
+          references: issued.map((capability) => ({
+            handle: capability.handle,
+            bankId: capability.bankId,
+            displayName: capability.displayName,
+          })),
+        },
+      };
+    },
+  });
+
+  return [reflect, sources, querySource, findSources];
 }

@@ -14,6 +14,7 @@ from telefire.ai import (
     AIRateLimiter,
     AIResponder,
     AgentEvent,
+    AgentParticipantAccess,
     AgentRunRequest,
     MessageIdentity,
     MentionedUser,
@@ -144,6 +145,7 @@ class FailingGateway(FakeGateway):
 class FakeStore:
     def __init__(self, allowed=()):
         self.allowed = set(allowed)
+        self.bank_grants = {}
         self.markers = {}
         self.last_request = {}
         self.memory_documents = {}
@@ -165,8 +167,7 @@ class FakeStore:
                 marker
                 for marker in reversed(tuple(self.markers.values()))
                 if marker.scope_id == scope_id
-                and message_id
-                in {marker.answer_message_id, marker.trigger_message_id}
+                and message_id in {marker.answer_message_id, marker.trigger_message_id}
             ),
             None,
         )
@@ -182,6 +183,19 @@ class FakeStore:
 
     async def deny_user(self, actor_id):
         self.allowed.discard(actor_id)
+        self.bank_grants.pop(actor_id, None)
+
+    async def grant_bank(self, actor_id, bank_id):
+        if actor_id not in self.allowed:
+            return False
+        self.bank_grants.setdefault(actor_id, set()).add(bank_id)
+        return True
+
+    async def revoke_bank(self, actor_id, bank_id):
+        self.bank_grants.get(actor_id, set()).discard(bank_id)
+
+    async def list_bank_grants(self, actor_id):
+        return tuple(sorted(self.bank_grants.get(actor_id, ())))
 
     async def get_last_request_at(self, actor_id):
         return self.last_request.get(actor_id)
@@ -287,9 +301,7 @@ class FakeStore:
         self.memory_excluded.add((scope_id, message_id, kind))
 
     async def is_memory_excluded_message(self, scope_id, message_id):
-        return any(
-            item[:2] == (scope_id, message_id) for item in self.memory_excluded
-        )
+        return any(item[:2] == (scope_id, message_id) for item in self.memory_excluded)
 
     async def get_memory_dream_state(self, scope_id):
         return self.memory_dream_state.get(scope_id, MemoryDreamState(scope_id))
@@ -736,7 +748,9 @@ async def test_ai_request_delegates_scope_and_identity_anchors_to_agent():
     assert [item.kind for item in request.context] == ["reference"]
     assert "Untrusted chat context" in request.context[0].text
     assert request.memory is not None
-    assert request.memory.scope_id == "telegram:chat:-1001"
+    assert request.memory.primary_bank_id == "telegram:chat:-1001"
+    assert request.memory.requester_id == "telegram:user:10"
+    assert request.memory.requester_is_owner is True
     assert [(item.identity, item.label) for item in request.memory.anchors] == [
         ("telegram:user:10", "User 10"),
         ("telegram:user:20", "User 20"),
@@ -771,6 +785,44 @@ async def test_recent_chat_participants_become_memory_identity_anchors():
         ("telegram:user:10", "User 10"),
         ("telegram:user:20", "User 20"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_agent_memory_target_has_fresh_requester_and_participant_grants():
+    store = FakeStore(
+        allowed=("telegram:user:20", "telegram:user:30"),
+    )
+    assert await store.grant_bank("telegram:user:20", "qq:group:686743769")
+    assert await store.grant_bank("telegram:user:30", "telegram:chat:-1002")
+    ancestor = FakeMessage("News from another group", sender_id=30)
+    trigger = FakeMessage(
+        "/ai what changed?",
+        sender_id=20,
+        reply_to=ancestor,
+    )
+    gateway = FakeGateway(["answer"])
+    handler = make_handler(
+        gateway,
+        FakeMemory(),
+        store=store,
+        identity_resolver=FakeIdentityResolver(),
+    )
+
+    assert await handler.handle(trigger) is True
+
+    target = gateway.requests[0].memory
+    assert target is not None
+    assert target.requester_id == "telegram:user:20"
+    assert target.requester_is_owner is False
+    assert target.granted_bank_ids == ("qq:group:686743769",)
+    assert target.participants == (
+        AgentParticipantAccess(
+            identity="telegram:user:30",
+            label="User 30",
+            allowed=True,
+            bank_ids=("telegram:chat:-1002",),
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -819,7 +871,8 @@ async def test_ai_request_bounds_identity_anchors_for_agent_contract():
 
 @pytest.mark.asyncio
 async def test_out_of_chain_exact_mention_enters_agent_anchors_and_episode_entities():
-    store = FakeStore()
+    store = FakeStore(allowed=("telegram:user:40",))
+    assert await store.grant_bank("telegram:user:40", "telegram:chat:-1002")
     memory = FakeMemory()
     trigger = FakeMessage("/ai what does @alice prefer?", sender_id=10)
     trigger.entities = (SimpleNamespace(user_id=40),)
@@ -838,6 +891,7 @@ async def test_out_of_chain_exact_mention_enters_agent_anchors_and_episode_entit
     assert ("telegram:user:40", "User 40") in [
         (item.identity, item.label) for item in target.anchors
     ]
+    assert target.participants == ()
     event = memory.retain_calls[0]["episode"].events[0]
     assert event.mentioned_actors == (("telegram:user:40", "User 40"),)
     assert "telegram:user:40" in memory.retain_calls[0]["episode"].actor_ids
@@ -1208,7 +1262,7 @@ async def test_telegram_handler_retains_through_hindsight_and_delegates_recall()
         assert received["recall"] == []
         target = gateway.requests[0].memory
         assert target is not None
-        assert target.scope_id == "telegram:chat:-1001"
+        assert target.primary_bank_id == "telegram:chat:-1001"
     finally:
         await client.close()
         await runner.cleanup()
@@ -1404,9 +1458,7 @@ async def test_remote_memory_commands_reject_extra_arguments():
 
     assert resolver.calls == []
     assert command.deleted is False
-    assert command.replies[0].text == (
-        "Usage: /ai_dream_enable [chat target]"
-    )
+    assert command.replies[0].text == ("Usage: /ai_dream_enable [chat target]")
 
 
 @pytest.mark.asyncio
@@ -1465,12 +1517,8 @@ async def test_remote_memory_command_reports_inaccessible_target():
 @pytest.mark.asyncio
 async def test_owner_can_list_all_enabled_memory_scopes():
     store = FakeStore()
-    store.memory_continuous.update(
-        {"telegram:chat:-1001", "telegram:chat:-3003"}
-    )
-    store.memory_dream.update(
-        {"telegram:chat:-1001", "telegram:chat:-2002"}
-    )
+    store.memory_continuous.update({"telegram:chat:-1001", "telegram:chat:-3003"})
+    store.memory_dream.update({"telegram:chat:-1001", "telegram:chat:-2002"})
     store.memory_scope_display_names.update(
         {
             "telegram:chat:-1001": "Engineering Group",
@@ -1581,9 +1629,10 @@ async def test_ai_retains_reply_chain_without_scope_enablement():
     assert gateway.requests[0].memory is not None
     assert memory.recall_calls == []
     assert len(memory.retain_calls) == 1
-    assert [(event.actor_id, event.text) for event in memory.retain_calls[0][
-        "episode"
-    ].events] == [
+    assert [
+        (event.actor_id, event.text)
+        for event in memory.retain_calls[0]["episode"].events
+    ] == [
         ("telegram:user:20", "I use PostgreSQL"),
         ("telegram:user:10", "answer from memory"),
     ]

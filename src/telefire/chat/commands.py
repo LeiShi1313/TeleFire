@@ -29,6 +29,21 @@ class AccessCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class DirectoryPublishCommand:
+    arguments: str
+
+
+@dataclass(frozen=True, slots=True)
+class BankGrantCommand:
+    allowed: bool
+    source: str
+
+    @property
+    def name(self) -> str:
+        return "/ai_bank_allow" if self.allowed else "/ai_bank_deny"
+
+
+@dataclass(frozen=True, slots=True)
 class MemoryRememberCommand:
     instruction: str
 
@@ -85,6 +100,8 @@ ChatCommand: TypeAlias = (
     AIAskCommand
     | AICancelCommand
     | AccessCommand
+    | DirectoryPublishCommand
+    | BankGrantCommand
     | MemoryRememberCommand
     | MemoryBackfillCommand
     | MemoryModeCommand
@@ -98,6 +115,10 @@ ChatCommand: TypeAlias = (
 def parse_chat_command(text: str | None) -> ChatCommand | None:
     if text is None or not text.startswith("/"):
         return None
+
+    directory = _parse_directory_control(text)
+    if directory is not None:
+        return directory
 
     ai = _parse_ai(text)
     if ai is not None:
@@ -121,6 +142,25 @@ def parse_chat_command(text: str | None) -> ChatCommand | None:
     return None
 
 
+def _parse_directory_control(text: str) -> ChatCommand | None:
+    commands: tuple[tuple[str, type[DirectoryPublishCommand] | bool], ...] = (
+        ("/ai_directory", DirectoryPublishCommand),
+        ("/ai_bank_allow", True),
+        ("/ai_bank_deny", False),
+    )
+    for name, command in commands:
+        if text == name:
+            arguments = ""
+        elif text.startswith((f"{name} ", f"{name}\n", f"{name}\t")):
+            arguments = text[len(name) :].strip()
+        else:
+            continue
+        if command is DirectoryPublishCommand:
+            return DirectoryPublishCommand(arguments=arguments)
+        return BankGrantCommand(allowed=bool(command), source=arguments)
+    return None
+
+
 def _parse_ai(text: str) -> AIAskCommand | None:
     if not text.casefold().startswith("/ai"):
         return None
@@ -128,9 +168,7 @@ def _parse_ai(text: str) -> AIAskCommand | None:
     digit_start = cursor
     while cursor < len(text) and text[cursor].isascii() and text[cursor].isdigit():
         cursor += 1
-    recent_messages = (
-        int(text[digit_start:cursor]) if cursor > digit_start else None
-    )
+    recent_messages = int(text[digit_start:cursor]) if cursor > digit_start else None
     if cursor < len(text) and text[cursor] == "@":
         cursor += 1
         mention_start = cursor
@@ -152,9 +190,7 @@ def _parse_memory_revision(text: str) -> MemoryRememberCommand | None:
     if text == "/ai_memory":
         return MemoryRememberCommand(instruction="")
     if text.startswith(("/ai_memory ", "/ai_memory\n", "/ai_memory\t")):
-        return MemoryRememberCommand(
-            instruction=text[len("/ai_memory") :].strip()
-        )
+        return MemoryRememberCommand(instruction=text[len("/ai_memory") :].strip())
     return None
 
 

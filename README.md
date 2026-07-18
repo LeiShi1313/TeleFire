@@ -216,6 +216,12 @@ space; changing either requires explicit re-ingestion and re-embedding. Reasonin
 effort accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` when
 supported by the selected model.
 
+`MEMORY_LLM_MODEL` is Hindsight's global model and the fallback for every
+operation. Optional `MEMORY_RETAIN_LLM_MODEL`,
+`MEMORY_CONSOLIDATION_LLM_MODEL`, and `MEMORY_REFLECT_LLM_MODEL` values select
+different primary models for those workloads. Hindsight v0.8.4 still uses the
+single `MEMORY_LLM_REASONING_EFFORT` value across all three operations.
+
 `TELEFIRE_AI_EDIT_CADENCE` is the account-wide minimum interval between Telegram
 message edits and defaults to 4 seconds. Intermediate stream updates are skipped
 when the edit slot is busy; final answers wait for the next slot.

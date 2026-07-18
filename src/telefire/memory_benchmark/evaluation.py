@@ -270,7 +270,10 @@ async def _grade_recall_once(
     contexts: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
     backends = sorted(contexts)
-    if int(case.case_id[-1], 16) % 2:
+    seed = int(hashlib.sha256(case.case_id.encode()).hexdigest()[:8], 16)
+    offset = seed % len(backends)
+    backends = backends[offset:] + backends[:offset]
+    if (seed // len(backends)) % 2:
         backends.reverse()
     labels = {chr(65 + index): backend for index, backend in enumerate(backends)}
     payload = {

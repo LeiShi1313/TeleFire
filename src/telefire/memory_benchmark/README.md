@@ -23,6 +23,11 @@ directory, but benchmark artifacts must still not be uploaded, pasted into a
 pull request, or served on a public interface. Review a report before sharing
 it because the lowest-scoring examples include source evidence.
 
+Corpus, timeline, checkpoint, and report writers set files to mode `0600`.
+`profile_cli export-telegram --session-path` resolves an explicit relative path
+from the current directory and rejects an existing session that is accessible
+to group or other users.
+
 ## Requirements
 
 - Python 3.14 and the repository's `uv` environment
@@ -227,6 +232,60 @@ uv run python -m telefire.memory_benchmark.cli report \
 ```
 
 Open the HTML locally. It is self-contained and does not need a web server.
+
+## Ingestion Profile Experiment
+
+`profile_cli` compares different materializations of one frozen Telegram
+timeline while keeping the source-event digest, recall request, question set,
+and agent-visible 4,000-character context budget fixed:
+
+| Profile | Source boundaries | Hindsight extraction | Observations |
+| --- | --- | --- | --- |
+| `conversation` | reply-aware, time-bounded sessions | concise | enabled |
+| `atomic` | original source items | concise | disabled |
+| `timeline` | original source items | verbatim | disabled |
+| `reference` | original source items | chunks | disabled |
+
+`atomic` is an experimental ablation, not a proposed public bank type. It
+separates the value of concise fact extraction from conversation grouping and
+observation consolidation.
+
+Start by exporting an authenticated Telegram channel into an ignored local
+corpus and raw JSONL ledger:
+
+```bash
+uv run python -m telefire.memory_benchmark.profile_cli export-telegram \
+  --channel @example \
+  --limit 1000 \
+  --session-path .benchmark-data/example.session \
+  --source-output .benchmark-data/profile/source.json \
+  --timeline-output .benchmark-data/profile/timeline.jsonl
+```
+
+Use `sample`, `prepare`, and `ingest` to create isolated banks for each
+profile. Profile ingestion refuses a bank that already contains documents or
+derived memories. Generate and independently validate recall cases with the
+main benchmark CLI, then score every profile together:
+
+```bash
+uv run python -m telefire.memory_benchmark.profile_cli quality \
+  --source .benchmark-data/profile/source-sample.json \
+  --cases .benchmark-data/profile/recall-cases-validated.json \
+  --url http://127.0.0.1:18889 \
+  --profile-bank conversation=benchmark:conversation \
+  --profile-bank atomic=benchmark:atomic \
+  --profile-bank timeline=benchmark:timeline \
+  --profile-bank reference=benchmark:reference \
+  --env-file .env \
+  --model gpt-5.6-sol \
+  --reasoning-effort low \
+  --output .benchmark-data/profile/quality.json
+```
+
+The command checkpoints each judged case and binds it to the live document,
+derived-memory, and effective-configuration manifests. `report` produces a
+Markdown table, exploratory paired bootstrap intervals, and the largest
+per-question differences.
 
 ## Metrics
 

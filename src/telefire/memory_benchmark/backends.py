@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -59,6 +60,9 @@ async def ingest_hindsight(
     *,
     batch_size: int = 1,
     concurrency: int = 4,
+    config_updates: dict[str, Any] | None = None,
+    require_empty: bool = False,
+    verify_corpus: bool = False,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     if batch_size < 1 or concurrency < 1:
@@ -67,6 +71,7 @@ async def ingest_hindsight(
     encoded_bank = quote(bank_id, safe="")
     started = perf_counter()
     operations = []
+    transient_retries = 0
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await _json_request(
             session,
@@ -74,43 +79,86 @@ async def ingest_hindsight(
             f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}",
             json={"name": bank_name},
         )
+        if require_empty:
+            existing_documents = await _list_hindsight_document_summaries(
+                session,
+                base_url,
+                bank_id,
+            )
+            existing_stats = await _json_request(
+                session,
+                "GET",
+                f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/stats",
+                params={"refresh": "true"},
+            )
+            existing_nodes = existing_stats.get("total_nodes")
+            if not isinstance(existing_nodes, int):
+                raise ValueError("Hindsight returned malformed bank stats")
+            if existing_documents or existing_nodes:
+                raise RuntimeError(
+                    f"Benchmark bank {bank_id!r} is not empty; use a fresh bank ID"
+                )
+        applied_config: dict[str, Any] = {}
+        if config_updates:
+            config_response = await _json_request(
+                session,
+                "PATCH",
+                f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/config",
+                json={"updates": config_updates},
+            )
+            overrides = config_response.get("overrides")
+            if not isinstance(overrides, dict) or overrides != config_updates:
+                raise RuntimeError("Hindsight did not apply the requested bank profile")
+            applied_config = {
+                name: overrides[name] for name in sorted(config_updates)
+            }
         batches = [
             corpus.documents[index : index + batch_size]
             for index in range(0, len(corpus.documents), batch_size)
         ]
 
         async def retain_batch(index: int) -> dict[str, Any]:
+            nonlocal transient_retries
             documents = batches[index]
-            payload = await _json_request(
-                session,
-                "POST",
-                f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/memories",
-                json={
-                    "async": False,
-                    "items": [
-                        {
-                            "content": document.content,
-                            "context": document.context,
-                            "timestamp": document.timestamp,
-                            "document_id": document.document_id,
-                            "update_mode": "replace",
-                            "metadata": {
-                                "client": "telefire-memory-benchmark",
-                                "source": "telegram",
-                                "scope_id": corpus.bank_id,
-                                "content_hash": document.content_hash,
-                            },
-                            "entities": [
-                                {"text": actor_id, "type": "PERSON"}
-                                for actor_id in sorted(
-                                    {event.actor_id for event in document.events}
-                                )
-                            ],
-                        }
-                        for document in documents
-                    ],
-                },
-            )
+            request = {
+                "async": False,
+                "items": [
+                    {
+                        "content": document.content,
+                        "context": document.context,
+                        "timestamp": document.timestamp,
+                        "document_id": document.document_id,
+                        "update_mode": "replace",
+                        "metadata": {
+                            "client": "telefire-memory-benchmark",
+                            "source": "telegram",
+                            "scope_id": corpus.bank_id,
+                            "content_hash": document.content_hash,
+                        },
+                        "entities": [
+                            {"text": actor_id, "type": "PERSON"}
+                            for actor_id in sorted(
+                                {event.actor_id for event in document.events}
+                            )
+                        ],
+                    }
+                    for document in documents
+                ],
+            }
+            for attempt in range(4):
+                try:
+                    payload = await _json_request(
+                        session,
+                        "POST",
+                        f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/memories",
+                        json=request,
+                    )
+                    break
+                except RuntimeError as exc:
+                    if attempt >= 3 or not _is_transient_hindsight_write(exc):
+                        raise
+                    transient_retries += 1
+                    await asyncio.sleep(0.25 * (2**attempt))
             if payload.get("success") is not True:
                 raise RuntimeError(f"Hindsight rejected batch {index}")
             return payload
@@ -126,15 +174,37 @@ async def ingest_hindsight(
             if progress is not None:
                 progress(completed_documents, len(corpus.documents))
 
-        stats = await wait_for_hindsight_idle(session, base_url, bank_id)
+        stats = await wait_for_hindsight_idle(
+            session,
+            base_url,
+            bank_id,
+            wait_for_consolidation=(
+                config_updates is None
+                or config_updates.get("enable_observations") is not False
+            ),
+        )
+        bank_manifest = (
+            await _verify_hindsight_bank_state(
+                session,
+                base_url,
+                bank_id,
+                corpus,
+                config_updates or {},
+            )
+            if verify_corpus
+            else None
+        )
     return {
         "backend": "hindsight-fresh",
         "elapsed_seconds": perf_counter() - started,
         "documents": len(corpus.documents),
         "batch_size": batch_size,
         "concurrency": concurrency,
+        "config_updates": applied_config,
         "operations": len(operations),
+        "transient_retries": transient_retries,
         "stats": stats,
+        "bank_manifest": bank_manifest,
     }
 
 
@@ -144,6 +214,7 @@ async def wait_for_hindsight_idle(
     bank_id: str,
     *,
     timeout_seconds: float = 7_200,
+    wait_for_consolidation: bool = True,
 ) -> dict[str, Any]:
     encoded_bank = quote(bank_id, safe="")
     deadline = asyncio.get_running_loop().time() + timeout_seconds
@@ -156,9 +227,9 @@ async def wait_for_hindsight_idle(
             f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/stats",
             params={"refresh": "true"},
         )
-        pending = int(latest.get("pending_operations", 0)) + int(
-            latest.get("pending_consolidation", 0)
-        )
+        pending = int(latest.get("pending_operations", 0))
+        if wait_for_consolidation:
+            pending += int(latest.get("pending_consolidation", 0))
         failed = int(latest.get("failed_operations", 0)) + int(
             latest.get("failed_consolidation", 0)
         )
@@ -250,6 +321,23 @@ async def list_hindsight_memories(
         )
         for item in all_items
     )
+
+
+async def verify_hindsight_bank(
+    base_url: str,
+    bank_id: str,
+    corpus: SourceCorpus,
+    config_updates: dict[str, Any],
+) -> dict[str, Any]:
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        return await _verify_hindsight_bank_state(
+            session,
+            base_url,
+            bank_id,
+            corpus,
+            config_updates,
+        )
 
 
 async def recall_hindsight(
@@ -473,6 +561,131 @@ def _tencent_l0_content(document: SourceDocument) -> str:
     )
 
 
+async def _verify_hindsight_bank_state(
+    session: aiohttp.ClientSession,
+    base_url: str,
+    bank_id: str,
+    corpus: SourceCorpus,
+    config_updates: dict[str, Any],
+) -> dict[str, Any]:
+    encoded_bank = quote(bank_id, safe="")
+    summaries = await _list_hindsight_document_summaries(
+        session,
+        base_url,
+        bank_id,
+    )
+    config_payload = await _json_request(
+        session,
+        "GET",
+        f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/config",
+    )
+    return validate_hindsight_bank_state(
+        bank_id=bank_id,
+        corpus=corpus,
+        config_updates=config_updates,
+        document_summaries=summaries,
+        config_payload=config_payload,
+    )
+
+
+async def _list_hindsight_document_summaries(
+    session: aiohttp.ClientSession,
+    base_url: str,
+    bank_id: str,
+) -> list[dict[str, Any]]:
+    encoded_bank = quote(bank_id, safe="")
+    summaries: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        payload = await _json_request(
+            session,
+            "GET",
+            f"{base_url.rstrip('/')}/v1/default/banks/{encoded_bank}/documents",
+            params={"limit": "100", "offset": str(offset)},
+        )
+        items = payload.get("items")
+        total = payload.get("total")
+        if not isinstance(items, list) or not isinstance(total, int):
+            raise ValueError("Hindsight returned a malformed document page")
+        if not all(isinstance(item, dict) for item in items):
+            raise ValueError("Hindsight returned malformed document summaries")
+        summaries.extend(items)
+        offset += len(items)
+        if offset >= total:
+            return summaries
+        if not items:
+            raise ValueError("Hindsight document pagination stopped early")
+
+
+def validate_hindsight_bank_state(
+    *,
+    bank_id: str,
+    corpus: SourceCorpus,
+    config_updates: dict[str, Any],
+    document_summaries: list[dict[str, Any]],
+    config_payload: dict[str, Any],
+) -> dict[str, Any]:
+    expected_documents = {
+        document.document_id: document for document in corpus.documents
+    }
+    if len(expected_documents) != len(corpus.documents):
+        raise ValueError("Benchmark corpus contains duplicate document IDs")
+
+    actual_documents: dict[str, dict[str, Any]] = {}
+    for summary in document_summaries:
+        document_id = _string(summary, "id")
+        if document_id in actual_documents:
+            raise ValueError(f"Hindsight bank contains duplicate document {document_id}")
+        actual_documents[document_id] = summary
+    if set(actual_documents) != set(expected_documents):
+        missing = len(set(expected_documents) - set(actual_documents))
+        stale = len(set(actual_documents) - set(expected_documents))
+        raise RuntimeError(
+            f"Hindsight bank document set differs from corpus: {missing} missing, "
+            f"{stale} stale"
+        )
+
+    for document_id, expected in expected_documents.items():
+        summary = actual_documents[document_id]
+        if _string(summary, "content_hash") != expected.content_hash:
+            raise RuntimeError(f"Hindsight document hash differs for {document_id}")
+        metadata = summary.get("document_metadata")
+        retain = summary.get("retain_params")
+        if not isinstance(metadata, dict) or not isinstance(retain, dict):
+            raise ValueError(f"Hindsight document metadata is malformed for {document_id}")
+        if (
+            metadata.get("content_hash") != expected.content_hash
+            or metadata.get("scope_id") != corpus.bank_id
+            or retain.get("context") != expected.context
+        ):
+            raise RuntimeError(f"Hindsight document metadata differs for {document_id}")
+
+    overrides = config_payload.get("overrides")
+    effective = config_payload.get("config")
+    if not isinstance(overrides, dict) or not isinstance(effective, dict):
+        raise ValueError("Hindsight returned malformed bank configuration")
+    if overrides != config_updates or any(
+        effective.get(name) != value for name, value in config_updates.items()
+    ):
+        raise RuntimeError("Hindsight bank configuration differs from benchmark profile")
+
+    serialized_documents = json.dumps(
+        sorted(
+            (document_id, document.content_hash)
+            for document_id, document in expected_documents.items()
+        ),
+        separators=(",", ":"),
+    )
+    return {
+        "bank_id": bank_id,
+        "documents": len(expected_documents),
+        "document_manifest_sha256": hashlib.sha256(
+            serialized_documents.encode("utf-8")
+        ).hexdigest(),
+        "config_overrides": dict(sorted(overrides.items())),
+    }
+
+
 async def _json_request(
     session: aiohttp.ClientSession,
     method: str,
@@ -555,3 +768,8 @@ def _optional(payload: dict[str, Any], name: str) -> str | None:
     if value is not None and not isinstance(value, str):
         raise ValueError(f"Invalid {name}")
     return value
+
+
+def _is_transient_hindsight_write(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return "deadlock detected" in message or "serialization failure" in message

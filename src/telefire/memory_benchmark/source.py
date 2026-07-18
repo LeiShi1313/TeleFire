@@ -193,6 +193,7 @@ def write_corpus(corpus: SourceCorpus, path: Path) -> None:
         json.dumps(corpus.to_dict(), ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
+    path.chmod(0o600)
 
 
 def read_corpus(path: Path) -> SourceCorpus:

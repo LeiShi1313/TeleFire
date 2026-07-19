@@ -428,6 +428,48 @@ test("owner directory recall is unfiltered while malformed references fail close
   assert.deepEqual(result.access.sourceCapabilities, []);
 });
 
+test("participant access cannot revoke an owner's issued source capability", async () => {
+  const sourceBank = "telegram:chat:-1002";
+  const result = await retrieveMemoryContext({
+    baseUrl: "http://memory.internal:8888",
+    prompt: "What did Bob discuss in the other group today?",
+    context: [],
+    memory: memoryTarget({
+      requester: { id: "chat:user:owner", label: "Owner", owner: true },
+      participants: [
+        {
+          id: "chat:user:bob",
+          label: "Bob",
+          allowed: false,
+          bankIds: [],
+        },
+      ],
+    }),
+    fetchImpl: async (url) =>
+      url.includes("system%3Aknowledge-directory")
+        ? response([
+            directoryResult(
+              sourceBank,
+              "Other group",
+              "Other group contains today's discussion.",
+            ),
+          ])
+        : response([]),
+  });
+
+  assert.equal(result.access.directoryPolicy.owner, true);
+  assert.equal(result.access.sourceCapabilities[0].handle, "source_1");
+  assert.match(
+    result.directoryContext,
+    /every listed source handle is authorized for the current requester/i,
+  );
+  assert.match(
+    result.directoryContext,
+    /participant access.*does not revoke.*current requester/i,
+  );
+  assert.match(result.directoryContext, /Bob.*no offered source access/i);
+});
+
 test("skips an observation whose source fact was omitted by the recall budget", async () => {
   const validBank = "telegram:chat:-1002";
   const omittedBank = "telegram:chat:-1003";

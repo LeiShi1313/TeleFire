@@ -240,6 +240,7 @@ test("queries only a host-issued source handle and exposes no bank ID to the mod
 
   assert.match(result.content[0].text, /Coder Offtopic/);
   assert.match(result.content[0].text, /cross-memory-1/);
+  assert.doesNotMatch(result.content[0].text, /current primary memory bank/i);
   assert.doesNotMatch(result.content[0].text, /qq:group:686743769/);
   assert.equal(result.details.bankId, bankId);
   await assert.rejects(
@@ -249,6 +250,85 @@ test("queries only a host-issued source handle and exposes no bank ID to the mod
     }),
     /not issued by the host/,
   );
+});
+
+test("refines recall against only the current primary memory bank", async () => {
+  const observed = [];
+  const app = fixture(
+    (url, options, callNumber) => {
+      assert.match(
+        url,
+        /banks\/telegram%3Achat%3A-1001\/memories\/recall$/,
+      );
+      if (callNumber === 1) {
+        assert.equal(
+          JSON.parse(options.body).query,
+          "2026-07-19 今天群里聊了什么？",
+        );
+      }
+      return jsonResponse({
+        results: [
+          {
+            id: "today-1",
+            text: "群里今天讨论了 Linux 录屏方案。",
+            mentioned_at: "2026-07-19T09:55:30+00:00",
+          },
+        ],
+      });
+    },
+    async (event) => observed.push(event),
+    {
+      sourceCapabilities: [
+        {
+          handle: "source_1",
+          bankId: "telegram:chat:-2002",
+          displayName: "Another group",
+          platform: "telegram",
+          sourceKind: "group",
+          evidence: [],
+        },
+      ],
+    },
+  );
+  const queryCurrent = app.byName.get("memory_query_current");
+
+  assert(queryCurrent);
+  const result = await queryCurrent.execute("call-current-1", {
+    query: "2026-07-19 今天群里聊了什么？",
+  });
+
+  assert.match(result.content[0].text, /current primary memory bank/i);
+  assert.match(result.content[0].text, /今天讨论了 Linux 录屏方案/);
+  assert.equal(result.details.bankId, "telegram:chat:-1001");
+  assert.deepEqual(
+    observed.map(({ type, data }) => ({
+      type,
+      operation: data.operation,
+      variant: data.variant,
+      toolCallId: data.toolCallId,
+    })),
+    [
+      {
+        type: "memory.http.request",
+        operation: "current.recall",
+        variant: "current_1",
+        toolCallId: "call-current-1",
+      },
+      {
+        type: "memory.http.response",
+        operation: "current.recall",
+        variant: "current_1",
+        toolCallId: "call-current-1",
+      },
+    ],
+  );
+
+  await queryCurrent.execute("call-current-2", { query: "再查一次" });
+  await assert.rejects(
+    queryCurrent.execute("call-current-3", { query: "第三次" }),
+    /current memory query limit/i,
+  );
+  assert.equal(app.calls.length, 2);
 });
 
 test("limits cross-bank traversal to two distinct consulted sources", async () => {

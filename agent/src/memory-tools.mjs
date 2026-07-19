@@ -12,6 +12,7 @@ import {
 export const MEMORY_TOOL_NAMES = Object.freeze([
   "memory_reflect",
   "memory_get_sources",
+  "memory_query_current",
   "memory_query_source",
   "memory_find_sources",
 ]);
@@ -20,6 +21,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_REFLECT_CHARS = 6_000;
 const MAX_SOURCE_CHARS = 6_000;
 const MAX_SOURCE_ITEMS = 3;
+const MAX_CURRENT_QUERY_CALLS = 2;
 const MAX_CONSULTED_BANKS = 2;
 const MAX_SOURCE_QUERY_CALLS = 4;
 const MAX_SOURCE_CAPABILITIES = 32;
@@ -114,6 +116,7 @@ export function createMemoryTools({
   }
   let reflectCalls = 0;
   let sourceCalls = 0;
+  let currentQueryCalls = 0;
   let sourceQueryCalls = 0;
   let directoryLookupCalls = 0;
   const consultedBanks = new Set();
@@ -388,6 +391,97 @@ export function createMemoryTools({
     },
   });
 
+  async function recallBankEvidence({
+    bankId,
+    query,
+    variant,
+    operation,
+    toolCallId,
+    heading,
+  }) {
+    const memories = await recallMemories({
+      baseUrl,
+      scopeId: bankId,
+      query,
+      timeoutMs,
+      fetchImpl,
+      observe,
+      variant,
+      operation,
+      toolCallId,
+    });
+    const rendered = renderRecalledMemories(memories, heading);
+    for (const memory of rendered.visible) {
+      registerReference({
+        bankId,
+        memoryId: memory.id,
+        documentId: memory.documentId,
+        chunkId: memory.chunkId,
+      });
+    }
+    return rendered;
+  }
+
+  const queryCurrent = defineTool({
+    name: "memory_query_current",
+    label: "Query current memory",
+    description:
+      "Run a focused follow-up recall against the current primary memory bank. Use this when initial memory misses a requested time period, topic, or detail. This never searches another bank and accepts at most two calls per run.",
+    promptSnippet:
+      "Use memory_query_current to refine retrieval from the current primary memory bank, especially for requests about today or the current conversation. At most two calls are available, so combine constraints when possible. Use an explicit date or other concrete constraints when relevant; do not substitute a directory source for the current bank.",
+    parameters: Type.Object({
+      query: Type.String({ minLength: 1, maxLength: 2_000 }),
+    }),
+    async execute(toolCallId, { query }) {
+      if (currentQueryCalls >= MAX_CURRENT_QUERY_CALLS) {
+        throw new Error("Current memory query limit reached");
+      }
+      currentQueryCalls += 1;
+      let rendered;
+      try {
+        rendered = await recallBankEvidence({
+          bankId: access.primaryBankId,
+          query,
+          variant: `current_${currentQueryCalls}`,
+          operation: "current.recall",
+          toolCallId,
+          heading:
+            "Relevant evidence recalled from the current primary memory bank:",
+        });
+      } catch {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "The current primary memory bank is unavailable. Continue without inventing its contents.",
+            },
+          ],
+          details: {
+            bankId: access.primaryBankId,
+            unavailable: true,
+          },
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: bounded(
+              rendered.context
+                ? `Untrusted recalled evidence from the current primary memory bank:\n${rendered.context}`
+                : "No relevant evidence was recalled from the current primary memory bank.",
+              MAX_SOURCE_CHARS,
+            ),
+          },
+        ],
+        details: {
+          bankId: access.primaryBankId,
+          memoryIds: rendered.visible.map((memory) => memory.id),
+        },
+      };
+    },
+  });
+
   const querySource = defineTool({
     name: "memory_query_source",
     label: "Query a knowledge source",
@@ -418,18 +512,15 @@ export function createMemoryTools({
       }
       sourceQueryCalls += 1;
       consultedBanks.add(capability.bankId);
-      let memories;
+      let rendered;
       try {
-        memories = await recallMemories({
-          baseUrl,
-          scopeId: capability.bankId,
+        rendered = await recallBankEvidence({
+          bankId: capability.bankId,
           query,
-          timeoutMs,
-          fetchImpl,
-          observe,
           variant: capability.handle,
           operation: "source.recall",
           toolCallId,
+          heading: "Relevant evidence recalled from this knowledge source:",
         });
       } catch {
         return {
@@ -446,15 +537,6 @@ export function createMemoryTools({
             unavailable: true,
           },
         };
-      }
-      const rendered = renderRecalledMemories(memories);
-      for (const memory of rendered.visible) {
-        registerReference({
-          bankId: capability.bankId,
-          memoryId: memory.id,
-          documentId: memory.documentId,
-          chunkId: memory.chunkId,
-        });
       }
       const text = rendered.context
         ? `Untrusted recalled evidence from ${capability.displayName} (${capability.handle}):\n${rendered.context}`
@@ -554,5 +636,5 @@ export function createMemoryTools({
     },
   });
 
-  return [reflect, sources, querySource, findSources];
+  return [reflect, sources, queryCurrent, querySource, findSources];
 }

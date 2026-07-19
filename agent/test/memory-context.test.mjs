@@ -221,6 +221,41 @@ test("keeps the surviving recall variant when the other one fails", async () => 
   assert.match(result.context, /Rocket is Alice/);
 });
 
+test("accepts recalled memories when Hindsight omits optional entities", async () => {
+  const result = await retrieveMemoryContext({
+    baseUrl: "http://memory.internal:8888",
+    prompt: "What happened today?",
+    context: [],
+    memory: memoryTarget(),
+    fetchImpl: async (url) =>
+      url.includes("system%3Aknowledge-directory")
+        ? response([])
+        : response([
+            {
+              id: "memory-without-entities",
+              text: "The group discussed a Linux recording tool today.",
+              type: "world",
+              mentioned_at: "2026-07-19T09:55:30+00:00",
+            },
+          ]),
+  });
+
+  assert.deepEqual(result.memories, [
+    {
+      id: "memory-without-entities",
+      text: "The group discussed a Linux recording tool today.",
+      type: "world",
+      entities: [],
+      occurredStart: null,
+      occurredEnd: null,
+      mentionedAt: "2026-07-19T09:55:30+00:00",
+      documentId: null,
+      chunkId: null,
+    },
+  ]);
+  assert.match(result.context, /current primary memory bank/i);
+});
+
 test("disables memory tools when every initial recall attempt fails", async () => {
   const result = await retrieveMemoryContext({
     baseUrl: "http://memory.internal:8888",

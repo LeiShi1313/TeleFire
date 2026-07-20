@@ -119,6 +119,18 @@ class MemoryEpisode:
         return tuple(actors)
 
     @property
+    def document_entity_ids(self) -> tuple[str, ...]:
+        # Hindsight associates top-level entities with every fact from a document.
+        if len(self.events) != 1:
+            return ()
+        event = self.events[0]
+        return tuple(
+            dict.fromkeys(
+                (event.actor_id, *(actor_id for actor_id, _ in event.mentioned_actors))
+            )
+        )
+
+    @property
     def event_versions(self) -> tuple[tuple[str, str], ...]:
         versions: list[tuple[str, str]] = []
         for index, event in enumerate(self.events):
@@ -731,7 +743,8 @@ class HindsightMemoryClient:
                 "content_hash": episode.content_hash,
             },
             "entities": [
-                {"text": actor_id, "type": "PERSON"} for actor_id in episode.actor_ids
+                {"text": actor_id, "type": "PERSON"}
+                for actor_id in episode.document_entity_ids
             ],
         }
 

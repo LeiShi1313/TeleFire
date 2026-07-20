@@ -380,6 +380,7 @@ test("owner and delegated runs receive the same restricted tools", () => {
     ...genericTools,
     "memory_reflect",
     "memory_get_sources",
+    "memory_query_current",
     "memory_query_source",
     "memory_find_sources",
   ];

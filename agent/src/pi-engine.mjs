@@ -283,6 +283,7 @@ function toolStartSummary(name, args) {
   if (name === "code_exec") return "Running calculation";
   if (name === "memory_reflect") return "Reasoning over memory";
   if (name === "memory_get_sources") return "Checking memory sources";
+  if (name === "memory_query_current") return "Querying current memory";
   if (name === "memory_query_source") return "Querying a knowledge source";
   if (name === "memory_find_sources") return "Finding knowledge sources";
   return `Using tool: ${boundedText(name, 80)}`;
@@ -301,6 +302,7 @@ function toolEndSummary(name, result, isError) {
   if (name === "fetch_content") return "Web page retrieved";
   if (name === "memory_reflect") return "Memory reflection completed";
   if (name === "memory_get_sources") return "Memory sources retrieved";
+  if (name === "memory_query_current") return "Current memory queried";
   if (name === "memory_query_source") return "Knowledge source queried";
   if (name === "memory_find_sources") return "Knowledge sources found";
   return `${boundedText(name, 80)} completed`;

@@ -52,6 +52,19 @@ def episode() -> MemoryEpisode:
     )
 
 
+def test_document_entities_only_cover_a_single_event():
+    item = episode()
+
+    assert item.actor_ids == ("telegram:user:10", "telegram:user:20")
+    assert item.document_entity_ids == ()
+
+    single_event = replace(item, events=(item.events[1],))
+    assert single_event.document_entity_ids == (
+        "telegram:user:20",
+        "telegram:user:10",
+    )
+
+
 async def start_server(configure):
     app = web.Application()
     configure(app)
@@ -138,10 +151,7 @@ async def test_hindsight_client_retains_episode_and_renders_bank_recall():
         assert request_item["document_id"] == item.document_id
         assert request_item["update_mode"] == "replace"
         assert request_item["metadata"]["content_hash"] == item.content_hash
-        assert request_item["entities"] == [
-            {"text": "telegram:user:10", "type": "PERSON"},
-            {"text": "telegram:user:20", "type": "PERSON"},
-        ]
+        assert request_item["entities"] == []
         retained_content = json.loads(request_item["content"])
         assert retained_content["schema"] == "telefire.memory.episode.v1"
         assert retained_content["events"][1]["actor"] == {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol
@@ -24,6 +25,10 @@ from telefire.memory_directory import (
 
 
 MemoryUpdateMode = Literal["replace", "append"]
+
+
+def _normalize_entity_alias(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,16 +124,41 @@ class MemoryEpisode:
         return tuple(actors)
 
     @property
-    def document_entity_ids(self) -> tuple[str, ...]:
-        # Hindsight associates top-level entities with every fact from a document.
-        if len(self.events) != 1:
-            return ()
-        event = self.events[0]
-        return tuple(
-            dict.fromkeys(
-                (event.actor_id, *(actor_id for actor_id, _ in event.mentioned_actors))
+    def fact_entity_hints(
+        self,
+    ) -> tuple[tuple[str, tuple[str, ...] | None], ...]:
+        if len(self.events) == 1:
+            return tuple((actor_id, None) for actor_id in self.actor_ids)
+
+        aliases_by_actor: dict[str, dict[str, str]] = {}
+
+        def add_actor(actor_id: str, display_name: str | None) -> None:
+            aliases = aliases_by_actor.setdefault(actor_id, {})
+            if display_name:
+                normalized = _normalize_entity_alias(display_name)
+                if normalized:
+                    aliases.setdefault(normalized, display_name)
+
+        for event in self.events:
+            add_actor(event.actor_id, event.actor_display_name)
+            for actor_id, display_name in event.mentioned_actors:
+                add_actor(actor_id, display_name)
+
+        alias_owners: dict[str, set[str]] = {}
+        for actor_id, aliases in aliases_by_actor.items():
+            for normalized in aliases:
+                alias_owners.setdefault(normalized, set()).add(actor_id)
+
+        hints = []
+        for actor_id, aliases in aliases_by_actor.items():
+            unique_aliases = tuple(
+                display_name
+                for normalized, display_name in aliases.items()
+                if alias_owners[normalized] == {actor_id}
             )
-        )
+            if unique_aliases:
+                hints.append((actor_id, unique_aliases))
+        return tuple(hints)
 
     @property
     def event_versions(self) -> tuple[tuple[str, str], ...]:
@@ -730,6 +760,12 @@ class HindsightMemoryClient:
         latest = episode.events[-1].occurred_at
         if latest.tzinfo is None:
             latest = latest.replace(tzinfo=UTC)
+        entities: list[dict[str, Any]] = []
+        for actor_id, match_aliases in episode.fact_entity_hints:
+            entity: dict[str, Any] = {"text": actor_id, "type": "PERSON"}
+            if match_aliases is not None:
+                entity["match_aliases"] = list(match_aliases)
+            entities.append(entity)
         return {
             "content": episode.content,
             "context": cls._episode_context(episode),
@@ -742,10 +778,7 @@ class HindsightMemoryClient:
                 "scope_id": episode.scope_id,
                 "content_hash": episode.content_hash,
             },
-            "entities": [
-                {"text": actor_id, "type": "PERSON"}
-                for actor_id in episode.document_entity_ids
-            ],
+            "entities": entities,
         }
 
     @staticmethod

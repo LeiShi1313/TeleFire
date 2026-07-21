@@ -1,0 +1,59 @@
+diff --git a/hindsight_api/api/http.py b/hindsight_api/api/http.py
+index ca12c4c..6712f7c 100644
+--- a/hindsight_api/api/http.py
++++ b/hindsight_api/api/http.py
+@@ -580,0 +581,4 @@ class EntityInput(BaseModel):
++    match_aliases: list[str] | None = Field(
++        default=None,
++        description="If set, associate this entity only with facts that contain one of these extracted entity names.",
++    )
+@@ -6734 +6738,6 @@ def _register_routes(app: FastAPI):
+-                    content_dict["entities"] = [{"text": e.text, "type": e.type or "CONCEPT"} for e in item.entities]
++                    content_dict["entities"] = []
++                    for entity in item.entities:
++                        serialized_entity = {"text": entity.text, "type": entity.type or "CONCEPT"}
++                        if entity.match_aliases is not None:
++                            serialized_entity["match_aliases"] = entity.match_aliases
++                        content_dict["entities"].append(serialized_entity)
+diff --git a/hindsight_api/engine/retain/entity_processing.py b/hindsight_api/engine/retain/entity_processing.py
+index c89aca0..24004be 100644
+--- a/hindsight_api/engine/retain/entity_processing.py
++++ b/hindsight_api/engine/retain/entity_processing.py
+@@ -7,0 +8 @@ import logging
++import unicodedata
+@@ -14,0 +16,4 @@ logger = logging.getLogger(__name__)
++def _normalize_entity_name(value: str) -> str:
++    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
++
++
+@@ -36 +41,2 @@ def _prepare_facts_for_entity_processing(
+-        seen_texts = {e["text"].lower() for e in llm_entities}
++        fact_entity_names = {_normalize_entity_name(entity["text"]) for entity in llm_entities}
++        seen_texts = set(fact_entity_names)
+@@ -38 +44,10 @@ def _prepare_facts_for_entity_processing(
+-            if user_entity["text"].lower() not in seen_texts:
++            match_aliases = user_entity.get("match_aliases")
++            if match_aliases is not None:
++                normalized_aliases = {
++                    _normalize_entity_name(alias) for alias in match_aliases if isinstance(alias, str) and alias.strip()
++                }
++                if not fact_entity_names.intersection(normalized_aliases):
++                    continue
++
++            normalized_text = _normalize_entity_name(user_entity["text"])
++            if normalized_text not in seen_texts:
+@@ -45 +60 @@ def _prepare_facts_for_entity_processing(
+-                seen_texts.add(user_entity["text"].lower())
++                seen_texts.add(normalized_text)
+diff --git a/hindsight_api/engine/retain/types.py b/hindsight_api/engine/retain/types.py
+index 271e82e..70aa7cc 100644
+--- a/hindsight_api/engine/retain/types.py
++++ b/hindsight_api/engine/retain/types.py
+@@ -40 +40 @@ class RetainContentDict(TypedDict, total=False):
+-    entities: list[dict[str, str]]  # [{"text": "...", "type": "..."}]
++    entities: list[dict[str, str | list[str]]]  # text, type, and optional match_aliases
+@@ -60 +60,3 @@ class RetainContent:
+-    entities: list[dict[str, str]] = field(default_factory=list)  # User-provided entities
++    entities: list[dict[str, str | list[str]]] = field(
++        default_factory=list
++    )  # User-provided entities with optional match aliases

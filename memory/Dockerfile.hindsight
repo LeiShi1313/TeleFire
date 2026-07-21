@@ -6,12 +6,14 @@ FROM ghcr.io/vectorize-io/hindsight:0.8.4@sha256:2c60f233eaba8f51db31adb920a5607
 USER root
 
 COPY patches/408d7c34-observation-history-fk-race.patch /tmp/
+COPY patches/conditional-entity-aliases.patch /tmp/
 
 RUN rm -rf /app/control-plane
 COPY --from=control-plane --chown=hindsight:hindsight /app/control-plane /app/control-plane
 
 LABEL io.telefire.hindsight.control-plane-source-revision="92f433c90409636804c0797071a4abbe141f76c5" \
-      io.telefire.hindsight.control-plane-patch="bee6f5d114c09a7bf51a2ef1d5357e0bdf0d9c2d"
+      io.telefire.hindsight.control-plane-patch="bee6f5d114c09a7bf51a2ef1d5357e0bdf0d9c2d" \
+      io.telefire.hindsight.fact-entity-hints="v1"
 
 # Hindsight runs from its bundled virtualenv and invokes Node directly. Remove
 # package managers left by the upstream build, apply available OS fixes, and
@@ -21,6 +23,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends patch \
     && patch --batch --forward -d /app/api -p1 \
         < /tmp/408d7c34-observation-history-fk-race.patch \
+    && patch --batch --forward -d /app/api -p1 \
+        < /tmp/conditional-entity-aliases.patch \
     && apt-get purge -y --auto-remove patch \
     && rm -rf \
         /app/sdk/node_modules/@hey-api/openapi-ts \
@@ -28,6 +32,7 @@ RUN apt-get update \
         /usr/local/lib/python3.11/site-packages/* \
         /var/lib/apt/lists/* \
         /tmp/408d7c34-observation-history-fk-race.patch \
+        /tmp/conditional-entity-aliases.patch \
     && rm -f \
         /usr/bin/npm \
         /usr/bin/npx \

@@ -52,17 +52,37 @@ def episode() -> MemoryEpisode:
     )
 
 
-def test_document_entities_only_cover_a_single_event():
+def test_fact_entity_hints_are_conditional_for_multiple_events():
     item = episode()
 
     assert item.actor_ids == ("telegram:user:10", "telegram:user:20")
-    assert item.document_entity_ids == ()
+    assert item.fact_entity_hints == (
+        ("telegram:user:10", ("Alice Example",)),
+        ("telegram:user:20", ("Bob Example",)),
+    )
 
     single_event = replace(item, events=(item.events[1],))
-    assert single_event.document_entity_ids == (
-        "telegram:user:20",
-        "telegram:user:10",
+    assert single_event.fact_entity_hints == (
+        ("telegram:user:20", None),
+        ("telegram:user:10", None),
     )
+
+
+def test_fact_entity_hints_omit_ambiguous_display_names():
+    item = episode()
+    ambiguous = replace(
+        item,
+        events=(
+            replace(item.events[0], actor_display_name="Alex"),
+            replace(
+                item.events[1],
+                actor_display_name="Alex",
+                mentioned_actors=(),
+            ),
+        ),
+    )
+
+    assert ambiguous.fact_entity_hints == ()
 
 
 async def start_server(configure):
@@ -151,7 +171,18 @@ async def test_hindsight_client_retains_episode_and_renders_bank_recall():
         assert request_item["document_id"] == item.document_id
         assert request_item["update_mode"] == "replace"
         assert request_item["metadata"]["content_hash"] == item.content_hash
-        assert request_item["entities"] == []
+        assert request_item["entities"] == [
+            {
+                "text": "telegram:user:10",
+                "type": "PERSON",
+                "match_aliases": ["Alice Example"],
+            },
+            {
+                "text": "telegram:user:20",
+                "type": "PERSON",
+                "match_aliases": ["Bob Example"],
+            },
+        ]
         retained_content = json.loads(request_item["content"])
         assert retained_content["schema"] == "telefire.memory.episode.v1"
         assert retained_content["events"][1]["actor"] == {
